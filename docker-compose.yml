@@ -1,0 +1,50 @@
+# docker-compose.yml — Local development environment for aikey-data
+#
+# Usage:
+#   docker compose up --build   # start both services
+#
+# Prerequisites:
+#   aikey-control's PostgreSQL must be running on localhost:5432.
+#   Start it first:  cd ../aikey-control/service && docker compose up -d postgres
+#
+# Services connect to the host PostgreSQL via host.docker.internal,
+# sharing the same database as aikey-control (no duplicate PG instance).
+#
+# Services:
+#   collector-service  — Ingest API + DWD Projector (port 27300)
+#   query-service      — Dashboard query API (port 27301)
+
+services:
+  collector-service:
+    build:
+      context: ./collector-service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DATABASE_DSN: "postgres://aikey:aikey_dev_password@host.docker.internal:5432/aikey_control?sslmode=disable"
+      LISTEN_ADDR: "0.0.0.0:27300"
+      MIGRATIONS_DIR: /app/migrations
+      SERVICE_TOKEN: "${SERVICE_TOKEN:-dev-token}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    ports:
+      - "27300:27300"
+
+  query-service:
+    build:
+      context: ./query-service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DATABASE_DSN: "postgres://aikey:aikey_dev_password@host.docker.internal:5432/aikey_control?sslmode=disable"
+      LISTEN_ADDR: "0.0.0.0:27301"
+      # Auth disabled: control-service acts as facade; query-service is internal-only.
+      # TODO: re-enable with shared JWT / service token after SSO implementation.
+      SERVICE_TOKEN: ""
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    ports:
+      # Exposed for local dev convenience; production deploys should NOT expose this port.
+      - "27301:27301"
