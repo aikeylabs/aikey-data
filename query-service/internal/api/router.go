@@ -21,6 +21,7 @@ func NewRouter(h *UsageHandler, serviceToken string) http.Handler {
 	authed.HandleFunc("GET /v1/usage/personal/timeline", h.PersonalTimeline)
 	authed.HandleFunc("GET /v1/usage/personal/by-protocol/timeline", h.PersonalByProtocolTimeline)
 	authed.HandleFunc("GET /v1/usage/personal/by-protocol/total", h.PersonalByProtocolTotal)
+	authed.HandleFunc("GET /v1/usage/personal/by-key/total", h.PersonalByKeyTotal)
 
 	// Master page
 	authed.HandleFunc("GET /v1/usage/master/ranking", h.MasterUserRanking)

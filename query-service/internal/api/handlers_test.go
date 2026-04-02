@@ -52,6 +52,13 @@ func (m *mockRepo) MasterTimeline(_ context.Context, p usage.QueryParams) ([]usa
 	}, nil
 }
 
+func (m *mockRepo) PersonalByKeyTotal(_ context.Context, p usage.QueryParams) ([]usage.KeyTotal, error) {
+	return []usage.KeyTotal{
+		{VirtualKeyID: "personal:my-key", TotalTokens: 3000, RequestCount: 15},
+		{VirtualKeyID: "personal:other-key", TotalTokens: 1500, RequestCount: 8},
+	}, nil
+}
+
 func TestPersonalTimeline(t *testing.T) {
 	h := NewUsageHandler(&mockRepo{})
 	req := httptest.NewRequest("GET", "/v1/usage/personal/timeline?seat_id=seat1", nil)

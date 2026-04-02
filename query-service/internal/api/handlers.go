@@ -75,6 +75,25 @@ func (h *UsageHandler) PersonalByProtocolTotal(w http.ResponseWriter, r *http.Re
 	shared.JSON(w, http.StatusOK, data)
 }
 
+// GET /v1/usage/personal/by-key/total?seat_id=...&start_date=...&end_date=...
+// OR account_id=...
+func (h *UsageHandler) PersonalByKeyTotal(w http.ResponseWriter, r *http.Request) {
+	p, err := parsePersonalParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	data, err := h.repo.PersonalByKeyTotal(r.Context(), p)
+	if err != nil {
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	if data == nil {
+		data = []usage.KeyTotal{}
+	}
+	shared.JSON(w, http.StatusOK, data)
+}
+
 // --- Master page ---
 
 // GET /v1/usage/master/ranking?org_id=...&start_date=...&end_date=...&limit=...
@@ -136,10 +155,11 @@ func (h *UsageHandler) MasterTimeline(w http.ResponseWriter, r *http.Request) {
 func parsePersonalParams(r *http.Request) (usage.QueryParams, error) {
 	q := r.URL.Query()
 	seatID := q.Get("seat_id")
-	if seatID == "" {
-		return usage.QueryParams{}, errMissing("seat_id")
+	accountID := q.Get("account_id")
+	if seatID == "" && accountID == "" {
+		return usage.QueryParams{}, errMissing("seat_id or account_id")
 	}
-	p := usage.QueryParams{SeatID: seatID}
+	p := usage.QueryParams{SeatID: seatID, AccountID: accountID}
 	parseDates(&p, q.Get("start_date"), q.Get("end_date"))
 	p.Defaults()
 	return p, nil

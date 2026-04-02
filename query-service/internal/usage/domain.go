@@ -25,6 +25,13 @@ type ProtocolTotal struct {
 	RequestCount int64  `json:"request_count"`
 }
 
+// KeyTotal is a single entry in the per-key usage breakdown.
+type KeyTotal struct {
+	VirtualKeyID string `json:"virtual_key_id"`
+	TotalTokens  int64  `json:"total_tokens"`
+	RequestCount int64  `json:"request_count"`
+}
+
 // UserRanking is a single entry in the per-user ranking.
 type UserRanking struct {
 	AccountID   string `json:"account_id"`
@@ -34,9 +41,11 @@ type UserRanking struct {
 }
 
 // QueryParams holds common query filters.
+// Personal queries accept either SeatID or AccountID (fallback for personal/BYOK keys).
 type QueryParams struct {
 	OrgID     string
 	SeatID    string
+	AccountID string // used when SeatID is empty (personal key users without org seat)
 	StartDate time.Time // inclusive
 	EndDate   time.Time // inclusive
 	Limit     int       // for ranking, default 50

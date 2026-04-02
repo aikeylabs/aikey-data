@@ -15,8 +15,10 @@ type Repository interface {
 	PersonalByProtocolTimeline(ctx context.Context, p QueryParams) ([]ProtocolTimelinePoint, error)
 
 	// PersonalByProtocolTotal returns total_tokens per protocol (pie chart).
-	// Filters: user_usage_scope = 'normal'
 	PersonalByProtocolTotal(ctx context.Context, p QueryParams) ([]ProtocolTotal, error)
+
+	// PersonalByKeyTotal returns total_tokens per virtual_key_id.
+	PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyTotal, error)
 
 	// --- Master page ---
 
