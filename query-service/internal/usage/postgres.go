@@ -46,12 +46,12 @@ func (r *postgresRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]T
 func (r *postgresRepo) PersonalByProtocolTimeline(ctx context.Context, p QueryParams) ([]ProtocolTimelinePoint, error) {
 	filter, id := personalFilter(p)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT usage_date::text, protocol_type, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT usage_date::text, COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
 		  AND usage_date BETWEEN $2 AND $3
-		GROUP BY usage_date, protocol_type
-		ORDER BY usage_date, protocol_type`, filter),
+		GROUP BY usage_date, COALESCE(provider_code, protocol_type)
+		ORDER BY usage_date, COALESCE(provider_code, protocol_type)`, filter),
 		id, p.StartDate, p.EndDate)
 	if err != nil {
 		return nil, fmt.Errorf("personal by-protocol timeline: %w", err)
@@ -72,11 +72,11 @@ func (r *postgresRepo) PersonalByProtocolTimeline(ctx context.Context, p QueryPa
 func (r *postgresRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParams) ([]ProtocolTotal, error) {
 	filter, id := personalFilter(p)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT protocol_type, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
 		  AND usage_date BETWEEN $2 AND $3
-		GROUP BY protocol_type
+		GROUP BY COALESCE(provider_code, protocol_type)
 		ORDER BY SUM(total_tokens) DESC`, filter),
 		id, p.StartDate, p.EndDate)
 	if err != nil {
@@ -89,7 +89,9 @@ func (r *postgresRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParam
 func (r *postgresRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyTotal, error) {
 	filter, id := personalFilter(p)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT virtual_key_id, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT virtual_key_id,
+		       COALESCE(MAX(virtual_key_alias), virtual_key_id),
+		       COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
 		  AND usage_date BETWEEN $2 AND $3
@@ -104,7 +106,7 @@ func (r *postgresRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([
 	var result []KeyTotal
 	for rows.Next() {
 		var kt KeyTotal
-		if err := rows.Scan(&kt.VirtualKeyID, &kt.TotalTokens, &kt.RequestCount); err != nil {
+		if err := rows.Scan(&kt.VirtualKeyID, &kt.Alias, &kt.TotalTokens, &kt.RequestCount); err != nil {
 			return nil, err
 		}
 		result = append(result, kt)
@@ -142,12 +144,12 @@ func (r *postgresRepo) MasterUserRanking(ctx context.Context, p QueryParams) ([]
 
 func (r *postgresRepo) MasterByProtocolTotal(ctx context.Context, p QueryParams) ([]ProtocolTotal, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT protocol_type, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE org_id = $1
 		  AND usage_date BETWEEN $2 AND $3
 		  AND billing_scope IN ('org_only','org_and_user')
-		GROUP BY protocol_type
+		GROUP BY COALESCE(provider_code, protocol_type)
 		ORDER BY SUM(total_tokens) DESC`,
 		p.OrgID, p.StartDate, p.EndDate)
 	if err != nil {

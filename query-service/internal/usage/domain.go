@@ -10,17 +10,19 @@ type TimelinePoint struct {
 	RequestCount int64 `json:"request_count"`
 }
 
-// ProtocolTimelinePoint adds protocol_type dimension to a timeline point.
+// ProtocolTimelinePoint adds provider dimension to a timeline point.
+// JSON field is "protocol_type" for backward compatibility, but the value
+// is provider_code (e.g. "kimi", "anthropic") not the wire protocol.
 type ProtocolTimelinePoint struct {
 	Date         string `json:"date"`
-	ProtocolType string `json:"protocol_type"`
+	ProtocolType string `json:"protocol_type"` // actually provider_code
 	TotalTokens  int64  `json:"total_tokens"`
 	RequestCount int64  `json:"request_count"`
 }
 
-// ProtocolTotal is a single slice of a protocol pie chart.
+// ProtocolTotal is a single slice of a provider pie chart.
 type ProtocolTotal struct {
-	ProtocolType string `json:"protocol_type"`
+	ProtocolType string `json:"protocol_type"` // actually provider_code
 	TotalTokens  int64  `json:"total_tokens"`
 	RequestCount int64  `json:"request_count"`
 }
@@ -28,6 +30,7 @@ type ProtocolTotal struct {
 // KeyTotal is a single entry in the per-key usage breakdown.
 type KeyTotal struct {
 	VirtualKeyID string `json:"virtual_key_id"`
+	Alias        string `json:"alias,omitempty"` // human-readable key alias
 	TotalTokens  int64  `json:"total_tokens"`
 	RequestCount int64  `json:"request_count"`
 }
