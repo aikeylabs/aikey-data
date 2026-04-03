@@ -21,7 +21,7 @@ Local Proxy ──POST /v1/usage-events:batch──▶ Ingest API ──▶ USAG
 | Service | Port | Responsibility |
 |---------|------|----------------|
 | `collector-service` | 27300 | Ingest API, ODS persistence, DWD projection |
-| `query-service` | 27301 | Query aggregation for dashboards (planned) |
+| `query-service` | 27310 | Query aggregation for dashboards (planned) |
 
 ## Quick Start
 

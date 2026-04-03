@@ -21,7 +21,7 @@ Local Proxy ──POST /v1/usage-events:batch──▶ Ingest API ──▶ USAG
 | 服务 | 端口 | 职责 |
 |------|------|------|
 | `collector-service` | 27300 | Ingest API、ODS 持久化、DWD 投影 |
-| `query-service` | 27301 | 面向仪表盘的查询聚合（计划中）|
+| `query-service` | 27310 | 面向仪表盘的查询聚合（计划中）|
 
 ## 快速开始
 

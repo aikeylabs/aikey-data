@@ -12,7 +12,7 @@
 #
 # Services:
 #   collector-service  — Ingest API + DWD Projector (port 27300)
-#   query-service      — Dashboard query API (port 27301)
+#   query-service      — Dashboard query API (port 27310)
 
 services:
   collector-service:
@@ -40,11 +40,11 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       DATABASE_DSN: "postgres://aikey:aikey_dev_password@host.docker.internal:5432/aikey_control?sslmode=disable"
-      LISTEN_ADDR: "0.0.0.0:27301"
+      LISTEN_ADDR: "0.0.0.0:27310"
       # Auth disabled: control-service acts as facade; query-service is internal-only.
       # TODO: re-enable with shared JWT / service token after SSO implementation.
       SERVICE_TOKEN: ""
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     ports:
       # Exposed for local dev convenience; production deploys should NOT expose this port.
-      - "27301:27301"
+      - "27310:27310"

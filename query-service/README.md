@@ -49,7 +49,7 @@ make build
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DATABASE_DSN` | Yes | — | PostgreSQL connection string |
-| `LISTEN_ADDR` | No | `0.0.0.0:27301` | HTTP listen address |
+| `LISTEN_ADDR` | No | `0.0.0.0:27310` | HTTP listen address |
 | `SERVICE_TOKEN` | No | — | Bearer token for API auth |
 | `LOG_LEVEL` | No | `info` | Log level |
 

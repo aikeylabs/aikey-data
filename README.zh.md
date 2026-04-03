@@ -38,7 +38,7 @@ Local Proxy (aikey-proxy)
 └───────────────────────────────────────────────────────┘
 
 ┌───────────────────────────────────────────────────────┐
-│              query-service (:27301)                    │
+│              query-service (:27310)                    │
 │                                                       │
 │  个人页 API                      Master 页 API        │
 │  /v1/usage/personal/timeline     /v1/usage/master/... │
@@ -142,7 +142,7 @@ cp .env.example .env
 
 make build
 ./bin/query-service
-# 输出: query-service started addr=0.0.0.0:27301
+# 输出: query-service started addr=0.0.0.0:27310
 ```
 
 ### 4. 验证
@@ -151,7 +151,7 @@ make build
 curl http://localhost:27300/health
 # {"status":"ok"}
 
-curl http://localhost:27301/health
+curl http://localhost:27310/health
 # {"status":"ok"}
 ```
 
@@ -201,7 +201,7 @@ curl http://localhost:27300/metrics
 ### 查询个人用量（DWD 投影完成后）
 
 ```bash
-curl "http://localhost:27301/v1/usage/personal/timeline?seat_id=seat_demo&start_date=2026-03-01&end_date=2026-04-30" \
+curl "http://localhost:27310/v1/usage/personal/timeline?seat_id=seat_demo&start_date=2026-03-01&end_date=2026-04-30" \
   -H "Authorization: Bearer changeme"
 # [{"date":"2026-04-01","total_tokens":1550,"request_count":1}]
 ```
@@ -248,7 +248,7 @@ DATABASE_DSN=$DATABASE_DSN SERVICE_TOKEN=$SERVICE_TOKEN LOG_LEVEL=debug ./bin/qu
 
 ```bash
 curl -s http://localhost:27300/health | grep ok
-curl -s http://localhost:27301/health | grep ok
+curl -s http://localhost:27310/health | grep ok
 ```
 
 ### 步骤 3: 检查表是否自动创建
@@ -341,7 +341,7 @@ curl -s http://localhost:27300/metrics | python3 -m json.tool
 
 ```bash
 # 个人用量曲线
-curl -s "http://localhost:27301/v1/usage/personal/timeline?seat_id=seat_test&start_date=2026-04-01&end_date=2026-04-01" \
+curl -s "http://localhost:27310/v1/usage/personal/timeline?seat_id=seat_test&start_date=2026-04-01&end_date=2026-04-01" \
   -H "Authorization: Bearer $SERVICE_TOKEN" | python3 -m json.tool
 ```
 
@@ -351,7 +351,7 @@ curl -s "http://localhost:27301/v1/usage/personal/timeline?seat_id=seat_test&sta
 
 ```bash
 # Master 总用量曲线（使用 billing_scope 过滤）
-curl -s "http://localhost:27301/v1/usage/master/timeline?org_id=org_test&start_date=2026-04-01&end_date=2026-04-01" \
+curl -s "http://localhost:27310/v1/usage/master/timeline?org_id=org_test&start_date=2026-04-01&end_date=2026-04-01" \
   -H "Authorization: Bearer $SERVICE_TOKEN" | python3 -m json.tool
 ```
 

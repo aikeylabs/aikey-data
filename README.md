@@ -41,7 +41,7 @@ Local Proxy (aikey-proxy)
 └───────────────────────────────────────────────────────┘
 
 ┌───────────────────────────────────────────────────────┐
-│              query-service (:27301)                    │
+│              query-service (:27310)                    │
 │                                                       │
 │  ┌──────────────────────────────────────────────┐     │
 │  │ Personal Page APIs                           │     │
@@ -154,7 +154,7 @@ cp .env.example .env
 
 make build
 ./bin/query-service
-# Output: query-service started addr=0.0.0.0:27301
+# Output: query-service started addr=0.0.0.0:27310
 ```
 
 ### 4. Verify
@@ -163,7 +163,7 @@ make build
 curl http://localhost:27300/health
 # {"status":"ok"}
 
-curl http://localhost:27301/health
+curl http://localhost:27310/health
 # {"status":"ok"}
 ```
 
@@ -213,7 +213,7 @@ curl http://localhost:27300/metrics
 ### Query personal usage (after DWD projection)
 
 ```bash
-curl "http://localhost:27301/v1/usage/personal/timeline?seat_id=seat_demo&start_date=2026-03-01&end_date=2026-04-30" \
+curl "http://localhost:27310/v1/usage/personal/timeline?seat_id=seat_demo&start_date=2026-03-01&end_date=2026-04-30" \
   -H "Authorization: Bearer changeme"
 # [{"date":"2026-04-01","total_tokens":1550,"request_count":1}]
 ```
@@ -221,7 +221,7 @@ curl "http://localhost:27301/v1/usage/personal/timeline?seat_id=seat_demo&start_
 ### Query master ranking
 
 ```bash
-curl "http://localhost:27301/v1/usage/master/ranking?org_id=org_demo&start_date=2026-03-01&end_date=2026-04-30" \
+curl "http://localhost:27310/v1/usage/master/ranking?org_id=org_demo&start_date=2026-03-01&end_date=2026-04-30" \
   -H "Authorization: Bearer changeme"
 # [{"account_id":"acc_demo","seat_id":"seat_demo","total_tokens":1550,"request_count":1}]
 ```
@@ -268,7 +268,7 @@ Verify health:
 
 ```bash
 curl -s http://localhost:27300/health | grep ok
-curl -s http://localhost:27301/health | grep ok
+curl -s http://localhost:27310/health | grep ok
 ```
 
 ### Step 3: Verify table creation
@@ -362,7 +362,7 @@ Expected:
 
 ```bash
 # Personal timeline
-curl -s "http://localhost:27301/v1/usage/personal/timeline?seat_id=seat_test&start_date=2026-04-01&end_date=2026-04-01" \
+curl -s "http://localhost:27310/v1/usage/personal/timeline?seat_id=seat_test&start_date=2026-04-01&end_date=2026-04-01" \
   -H "Authorization: Bearer $SERVICE_TOKEN" | python3 -m json.tool
 ```
 
@@ -372,7 +372,7 @@ If DWD projected with `user_usage_scope='excluded'` (no control event match): em
 
 ```bash
 # Master timeline (uses billing_scope filter)
-curl -s "http://localhost:27301/v1/usage/master/timeline?org_id=org_test&start_date=2026-04-01&end_date=2026-04-01" \
+curl -s "http://localhost:27310/v1/usage/master/timeline?org_id=org_test&start_date=2026-04-01&end_date=2026-04-01" \
   -H "Authorization: Bearer $SERVICE_TOKEN" | python3 -m json.tool
 ```
 

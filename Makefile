@@ -76,7 +76,7 @@ dev-up:
 	@echo ""
 	@echo "Services started:"
 	@echo "  collector-service: http://localhost:27300/health"
-	@echo "  query-service:     http://localhost:27301/health"
+	@echo "  query-service:     http://localhost:27310/health"
 
 ## dev-down: stop all containers
 dev-down:
@@ -87,7 +87,7 @@ dev-restart:
 	docker compose up --build -d --no-deps collector-service query-service
 	@echo "Restarted:"
 	@echo "  collector-service: http://localhost:27300/health"
-	@echo "  query-service:     http://localhost:27301/health"
+	@echo "  query-service:     http://localhost:27310/health"
 	docker compose logs -f collector-service query-service
 
 ## dev-restart-all: full teardown + rebuild (including postgres)

@@ -90,7 +90,7 @@ func (r *postgresRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([
 	filter, id := personalFilter(p)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT virtual_key_id,
-		       COALESCE(MAX(virtual_key_alias), virtual_key_id),
+		       COALESCE(NULLIF(MAX(virtual_key_alias), ''), REGEXP_REPLACE(virtual_key_id, '^personal:', '')),
 		       COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s

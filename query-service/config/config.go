@@ -19,7 +19,7 @@ func Load() (*Config, error) {
 	}
 	return &Config{
 		DatabaseDSN:  dsn,
-		ListenAddr:   envOrDefault("LISTEN_ADDR", "0.0.0.0:27301"),
+		ListenAddr:   envOrDefault("LISTEN_ADDR", "0.0.0.0:27310"),
 		ServiceToken: os.Getenv("SERVICE_TOKEN"),
 		LogLevel:     envOrDefault("LOG_LEVEL", "info"),
 	}, nil
