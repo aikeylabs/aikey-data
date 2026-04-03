@@ -1,0 +1,13 @@
+# Build output
+bin/
+**/bin/
+
+# Environment files
+.env
+
+# Go test cache
+*.test
+*.out
+
+# OS
+.DS_Store
