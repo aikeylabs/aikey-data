@@ -31,7 +31,7 @@ func main() {
 	}
 	defer db.Close()
 
-	repo := usage.NewPostgresRepository(db)
+	repo := usage.NewPostgresRepository(shared.NewDB(db, shared.DialectPostgres))
 	handler := api.NewUsageHandler(repo)
 	router := api.NewRouter(handler, cfg.ServiceToken)
 

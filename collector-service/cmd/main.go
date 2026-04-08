@@ -39,16 +39,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Wrap DB with dialect (production always uses postgres).
+	ddb := shared.NewDB(db, shared.DialectPostgres)
+
 	// Assemble dependencies — ingest
-	odsRepo := ingest.NewPostgresODSRepository(db)
+	odsRepo := ingest.NewPostgresODSRepository(ddb)
 	ingestSvc := ingest.NewService(odsRepo)
 	ingestHandler := api.NewIngestHandler(ingestSvc)
 
 	// Assemble dependencies — projector
-	odsReader := projector.NewPostgresODSReader(db)
-	dwdWriter := projector.NewPostgresDWDWriter(db)
-	checkpoint := projector.NewPostgresCheckpointStore(db)
-	controlReader := projector.NewPostgresControlEventReader(db)
+	odsReader := projector.NewPostgresODSReader(ddb)
+	dwdWriter := projector.NewPostgresDWDWriter(ddb)
+	checkpoint := projector.NewPostgresCheckpointStore(ddb)
+	controlReader := projector.NewPostgresControlEventReader(ddb)
 	enricher := projector.NewEnricher(controlReader)
 	projWorker := projector.NewWorker(odsReader, dwdWriter, checkpoint, enricher)
 

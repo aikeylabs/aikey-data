@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/AiKeyLabs/aikey-data/query-service/internal/shared"
 )
 
-type postgresRepo struct{ db *sql.DB }
+type postgresRepo struct{ db *shared.DB }
 
-func NewPostgresRepository(db *sql.DB) Repository {
+func NewPostgresRepository(db *shared.DB) Repository {
 	return &postgresRepo{db: db}
 }
 
@@ -19,9 +21,9 @@ func NewPostgresRepository(db *sql.DB) Repository {
 // usage data is always visible.
 func personalFilter(p QueryParams) (clause string, id string) {
 	if p.SeatID != "" {
-		return "seat_id = $1", p.SeatID
+		return "seat_id = ?", p.SeatID
 	}
-	return "account_id = $1", p.AccountID
+	return "account_id = ?", p.AccountID
 }
 
 // --- Personal page ---
@@ -32,7 +34,7 @@ func (r *postgresRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]T
 		SELECT usage_date::text, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
-		  AND usage_date BETWEEN $2 AND $3
+		  AND usage_date BETWEEN ? AND ?
 		GROUP BY usage_date
 		ORDER BY usage_date`, filter),
 		id, p.StartDate, p.EndDate)
@@ -49,7 +51,7 @@ func (r *postgresRepo) PersonalByProtocolTimeline(ctx context.Context, p QueryPa
 		SELECT usage_date::text, COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
-		  AND usage_date BETWEEN $2 AND $3
+		  AND usage_date BETWEEN ? AND ?
 		GROUP BY usage_date, COALESCE(provider_code, protocol_type)
 		ORDER BY usage_date, COALESCE(provider_code, protocol_type)`, filter),
 		id, p.StartDate, p.EndDate)
@@ -75,7 +77,7 @@ func (r *postgresRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParam
 		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
-		  AND usage_date BETWEEN $2 AND $3
+		  AND usage_date BETWEEN ? AND ?
 		GROUP BY COALESCE(provider_code, protocol_type)
 		ORDER BY SUM(total_tokens) DESC`, filter),
 		id, p.StartDate, p.EndDate)
@@ -94,7 +96,7 @@ func (r *postgresRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([
 		       COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
-		  AND usage_date BETWEEN $2 AND $3
+		  AND usage_date BETWEEN ? AND ?
 		GROUP BY virtual_key_id
 		ORDER BY SUM(total_tokens) DESC`, filter),
 		id, p.StartDate, p.EndDate)
@@ -120,11 +122,11 @@ func (r *postgresRepo) MasterUserRanking(ctx context.Context, p QueryParams) ([]
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT account_id, seat_id, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
-		WHERE org_id = $1
-		  AND usage_date BETWEEN $2 AND $3
+		WHERE org_id = ?
+		  AND usage_date BETWEEN ? AND ?
 		GROUP BY account_id, seat_id
 		ORDER BY SUM(total_tokens) DESC
-		LIMIT $4`,
+		LIMIT ?`,
 		p.OrgID, p.StartDate, p.EndDate, p.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("master user ranking: %w", err)
@@ -146,8 +148,8 @@ func (r *postgresRepo) MasterByProtocolTotal(ctx context.Context, p QueryParams)
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
-		WHERE org_id = $1
-		  AND usage_date BETWEEN $2 AND $3
+		WHERE org_id = ?
+		  AND usage_date BETWEEN ? AND ?
 		  AND billing_scope IN ('org_only','org_and_user')
 		GROUP BY COALESCE(provider_code, protocol_type)
 		ORDER BY SUM(total_tokens) DESC`,
@@ -163,8 +165,8 @@ func (r *postgresRepo) MasterTimeline(ctx context.Context, p QueryParams) ([]Tim
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT usage_date::text, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
-		WHERE org_id = $1
-		  AND usage_date BETWEEN $2 AND $3
+		WHERE org_id = ?
+		  AND usage_date BETWEEN ? AND ?
 		  AND billing_scope IN ('org_only','org_and_user')
 		GROUP BY usage_date
 		ORDER BY usage_date`,

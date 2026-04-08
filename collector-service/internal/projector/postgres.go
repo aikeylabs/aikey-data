@@ -5,15 +5,18 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
 )
 
 // --- ODSReader ---
 
-type postgresODSReader struct{ db *sql.DB }
+type postgresODSReader struct{ db *shared.DB }
 
-func NewPostgresODSReader(db *sql.DB) ODSReader { return &postgresODSReader{db: db} }
+func NewPostgresODSReader(db *shared.DB) ODSReader { return &postgresODSReader{db: db} }
 
-const fetchPendingSQL = `
+// fetchPendingSQL is built dynamically via nowExpr for dialect portability.
+const fetchPendingTpl = `
 SELECT ods_id, event_id, event_time, occurred_at,
        org_id, account_id, seat_id, account_status_snapshot,
        virtual_key_id, virtual_key_revision, virtual_key_hash,
@@ -27,13 +30,14 @@ SELECT ods_id, event_id, event_time, occurred_at,
        dwd_retry_count
 FROM usage_event_ods
 WHERE (dwd_status = 'pending')
-   OR (dwd_status = 'retry' AND dwd_next_retry_at <= NOW())
+   OR (dwd_status = 'retry' AND dwd_next_retry_at <= %s)
 ORDER BY ods_id
-LIMIT $1
+LIMIT ?
 `
 
 func (r *postgresODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord, error) {
-	rows, err := r.db.QueryContext(ctx, fetchPendingSQL, limit)
+	query := fmt.Sprintf(fetchPendingTpl, r.db.Now())
+	rows, err := r.db.QueryContext(ctx, query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("fetch pending ods: %w", err)
 	}
@@ -64,22 +68,22 @@ func (r *postgresODSReader) FetchPending(ctx context.Context, limit int) ([]ODSR
 
 func (r *postgresODSReader) MarkProjected(ctx context.Context, odsID int64) error {
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE usage_event_ods SET dwd_status = 'projected' WHERE ods_id = $1`, odsID)
+		`UPDATE usage_event_ods SET dwd_status = 'projected' WHERE ods_id = ?`, odsID)
 	return err
 }
 
 func (r *postgresODSReader) MarkRetry(ctx context.Context, odsID int64, retryCount int, errCode, errMsg string) error {
-	nextRetry := retryDelay(retryCount)
-	intervalStr := fmt.Sprintf("%d seconds", int(nextRetry.Seconds()))
+	// Compute retry time in Go to avoid PG-specific interval arithmetic.
+	nextRetryAt := time.Now().Add(retryDelay(retryCount))
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE usage_event_ods
 		 SET dwd_status = 'retry',
-		     dwd_retry_count = $2,
-		     dwd_next_retry_at = NOW() + $3::interval,
-		     dwd_last_error_code = $4,
-		     dwd_last_error_msg = $5
-		 WHERE ods_id = $1`,
-		odsID, retryCount, intervalStr, errCode, errMsg)
+		     dwd_retry_count = ?,
+		     dwd_next_retry_at = ?,
+		     dwd_last_error_code = ?,
+		     dwd_last_error_msg = ?
+		 WHERE ods_id = ?`,
+		retryCount, nextRetryAt, errCode, errMsg, odsID)
 	return err
 }
 
@@ -87,9 +91,9 @@ func (r *postgresODSReader) MarkDeadLetter(ctx context.Context, odsID int64, err
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE usage_event_ods
 		 SET dwd_status = 'dead_letter',
-		     dwd_last_error_code = $2,
-		     dwd_last_error_msg = $3
-		 WHERE ods_id = $1`,
+		     dwd_last_error_code = ?,
+		     dwd_last_error_msg = ?
+		 WHERE ods_id = ?`,
 		odsID, errCode, errMsg)
 	return err
 }
@@ -109,9 +113,9 @@ func retryDelay(retryCount int) time.Duration {
 
 // --- ControlEventReader ---
 
-type postgresControlEventReader struct{ db *sql.DB }
+type postgresControlEventReader struct{ db *shared.DB }
 
-func NewPostgresControlEventReader(db *sql.DB) ControlEventReader {
+func NewPostgresControlEventReader(db *shared.DB) ControlEventReader {
 	return &postgresControlEventReader{db: db}
 }
 
@@ -122,15 +126,15 @@ SELECT event_id, org_id, account_id, change_type, entity_type,
        revision, provider_id, effective_from, effective_to,
        after_snapshot_json
 FROM managed_key_control_events
-WHERE virtual_key_id = $1
-  AND effective_from <= $2
-  AND (effective_to IS NULL OR effective_to > $2)
+WHERE virtual_key_id = ?
+  AND effective_from <= ?
+  AND (effective_to IS NULL OR effective_to > ?)
 ORDER BY effective_from DESC
 LIMIT 1
 `
 
 func (r *postgresControlEventReader) FindByVirtualKeyAtTime(ctx context.Context, virtualKeyID string, eventTime interface{}) (*ControlEvent, error) {
-	row := r.db.QueryRowContext(ctx, findControlEventSQL, virtualKeyID, eventTime)
+	row := r.db.QueryRowContext(ctx, findControlEventSQL, virtualKeyID, eventTime, eventTime)
 	var ce ControlEvent
 	err := row.Scan(
 		&ce.EventID, &ce.OrgID, &ce.AccountID, &ce.ChangeType, &ce.EntityType,
@@ -150,13 +154,11 @@ func (r *postgresControlEventReader) FindByVirtualKeyAtTime(ctx context.Context,
 
 // --- DWDWriter ---
 
-type postgresDWDWriter struct{ db *sql.DB }
+type postgresDWDWriter struct{ db *shared.DB }
 
-func NewPostgresDWDWriter(db *sql.DB) DWDWriter { return &postgresDWDWriter{db: db} }
+func NewPostgresDWDWriter(db *shared.DB) DWDWriter { return &postgresDWDWriter{db: db} }
 
-const insertDWDSQL = `
-INSERT INTO usage_fact_dwd (
-    event_id, ods_id, occurred_at, event_time, usage_date,
+const dwdColumns = `event_id, ods_id, occurred_at, event_time, usage_date,
     org_id, account_id, seat_id,
     virtual_key_id, virtual_key_revision, virtual_key_alias, virtual_key_hash,
     binding_id, binding_alias,
@@ -169,29 +171,29 @@ INSERT INTO usage_fact_dwd (
     request_status, http_status_code, upstream_request_id,
     completion_source, quality_status, validation_code, validation_message,
     anomaly_type, anomaly_reason, billing_scope, user_usage_scope,
-    control_event_id, control_event_revision, projector_version
-) VALUES (
-    $1,$2,$3,$4,$5,
-    $6,$7,$8,
-    $9,$10,$11,$12,
-    $13,$14,
-    $15,$16,$17,
-    $18,$19,
-    $20,$21,$22,$23,
-    $24,$25,
-    $26,$27,$28,$29,
-    $30,$31,$32,$33,
-    $34,$35,$36,
-    $37,$38,$39,$40,
-    $41,$42,$43,$44,
-    $45,$46,$47
-)
-ON CONFLICT (org_id, event_id) DO NOTHING
-`
+    control_event_id, control_event_revision, projector_version`
+
+const dwdPlaceholders = `?,?,?,?,?,
+    ?,?,?,
+    ?,?,?,?,
+    ?,?,
+    ?,?,?,
+    ?,?,
+    ?,?,?,?,
+    ?,?,
+    ?,?,?,?,
+    ?,?,?,?,
+    ?,?,?,
+    ?,?,?,?,
+    ?,?,?,?,
+    ?,?,?`
 
 func (w *postgresDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
+	insertDWDSQL := w.db.InsertOrIgnoreOn("usage_fact_dwd", dwdColumns, dwdPlaceholders, "org_id, event_id")
 	res, err := w.db.ExecContext(ctx, insertDWDSQL,
-		f.EventID, f.OdsID, f.OccurredAt, f.EventTime, f.UsageDate,
+		// Why: SQLite stores time.Time as its default String() format (e.g. "2026-04-08 08:00:00 +0800 CST")
+		// which breaks date range queries. Format UsageDate as ISO date for cross-dialect compatibility.
+		f.EventID, f.OdsID, f.OccurredAt, f.EventTime, f.UsageDate.Format("2006-01-02"),
 		f.OrgID, f.AccountID, f.SeatID,
 		f.VirtualKeyID, f.VirtualKeyRevision, f.VirtualKeyAlias, f.VirtualKeyHash,
 		f.BindingID, f.BindingAlias,
@@ -215,16 +217,16 @@ func (w *postgresDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error
 
 // --- CheckpointStore ---
 
-type postgresCheckpointStore struct{ db *sql.DB }
+type postgresCheckpointStore struct{ db *shared.DB }
 
-func NewPostgresCheckpointStore(db *sql.DB) CheckpointStore {
+func NewPostgresCheckpointStore(db *shared.DB) CheckpointStore {
 	return &postgresCheckpointStore{db: db}
 }
 
 func (s *postgresCheckpointStore) GetLastScannedOdsID(ctx context.Context, taskName string) (int64, error) {
 	var id int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT last_scanned_ods_id FROM usage_dwd_projector_tasks WHERE task_name = $1`,
+		`SELECT last_scanned_ods_id FROM usage_dwd_projector_tasks WHERE task_name = ?`,
 		taskName).Scan(&id)
 	if err == sql.ErrNoRows {
 		return 0, nil
@@ -233,10 +235,11 @@ func (s *postgresCheckpointStore) GetLastScannedOdsID(ctx context.Context, taskN
 }
 
 func (s *postgresCheckpointStore) UpdateCheckpoint(ctx context.Context, taskName string, lastOdsID int64) error {
+	nowExpr := s.db.Now()
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE usage_dwd_projector_tasks
-		 SET last_scanned_ods_id = $2, last_scanned_at = NOW(), last_success_at = NOW(), updated_at = NOW()
-		 WHERE task_name = $1`,
-		taskName, lastOdsID)
+		fmt.Sprintf(`UPDATE usage_dwd_projector_tasks
+		 SET last_scanned_ods_id = ?, last_scanned_at = %s, last_success_at = %s, updated_at = %s
+		 WHERE task_name = ?`, nowExpr, nowExpr, nowExpr),
+		lastOdsID, taskName)
 	return err
 }

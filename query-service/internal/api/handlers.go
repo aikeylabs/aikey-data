@@ -2,6 +2,7 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -30,6 +31,7 @@ func (h *UsageHandler) PersonalTimeline(w http.ResponseWriter, r *http.Request) 
 	}
 	data, err := h.repo.PersonalTimeline(r.Context(), p)
 	if err != nil {
+		slog.Error("PersonalTimeline query failed", "error", err)
 		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
 		return
 	}
@@ -48,6 +50,7 @@ func (h *UsageHandler) PersonalByProtocolTimeline(w http.ResponseWriter, r *http
 	}
 	data, err := h.repo.PersonalByProtocolTimeline(r.Context(), p)
 	if err != nil {
+		slog.Error("PersonalByProtocolTimeline query failed", "error", err)
 		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
 		return
 	}
@@ -66,6 +69,7 @@ func (h *UsageHandler) PersonalByProtocolTotal(w http.ResponseWriter, r *http.Re
 	}
 	data, err := h.repo.PersonalByProtocolTotal(r.Context(), p)
 	if err != nil {
+		slog.Error("PersonalByProtocolTotal query failed", "error", err)
 		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
 		return
 	}
@@ -85,6 +89,7 @@ func (h *UsageHandler) PersonalByKeyTotal(w http.ResponseWriter, r *http.Request
 	}
 	data, err := h.repo.PersonalByKeyTotal(r.Context(), p)
 	if err != nil {
+		slog.Error("PersonalByKeyTotal query failed", "error", err)
 		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
 		return
 	}
@@ -105,6 +110,7 @@ func (h *UsageHandler) MasterUserRanking(w http.ResponseWriter, r *http.Request)
 	}
 	data, err := h.repo.MasterUserRanking(r.Context(), p)
 	if err != nil {
+		slog.Error("MasterUserRanking query failed", "error", err)
 		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
 		return
 	}
@@ -123,6 +129,7 @@ func (h *UsageHandler) MasterByProtocolTotal(w http.ResponseWriter, r *http.Requ
 	}
 	data, err := h.repo.MasterByProtocolTotal(r.Context(), p)
 	if err != nil {
+		slog.Error("MasterByProtocolTotal query failed", "error", err)
 		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
 		return
 	}
@@ -141,6 +148,7 @@ func (h *UsageHandler) MasterTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := h.repo.MasterTimeline(r.Context(), p)
 	if err != nil {
+		slog.Error("MasterTimeline query failed", "error", err)
 		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
 		return
 	}
