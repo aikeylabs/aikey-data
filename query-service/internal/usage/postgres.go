@@ -15,13 +15,20 @@ func NewPostgresRepository(db *shared.DB) Repository {
 }
 
 // personalFilter returns the WHERE clause and parameter for personal queries.
-// If SeatID is set, filter by seat_id; otherwise fall back to account_id.
-// For personal/BYOK keys that bypass control-plane verification, we include
-// all billing_scope values (not just user_usage_scope='normal') so personal
-// usage data is always visible.
+// Priority:
+//  1. SeatID → filter by seat_id (team member with assigned seat)
+//  2. OrgID = "personal" → filter by org_id (personal edition, no account mapping)
+//  3. AccountID → filter by account_id (fallback for BYOK users)
+//
+// Why org_id="personal": in local-user mode the proxy reports events with
+// org_id="personal" but no account_id. Without this clause the query returns
+// empty, and the Usage Ledger shows zero.
 func personalFilter(p QueryParams) (clause string, id string) {
 	if p.SeatID != "" {
 		return "seat_id = ?", p.SeatID
+	}
+	if p.OrgID == "personal" {
+		return "org_id = ?", "personal"
 	}
 	return "account_id = ?", p.AccountID
 }
@@ -92,7 +99,7 @@ func (r *postgresRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([
 	filter, id := personalFilter(p)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT virtual_key_id,
-		       COALESCE(NULLIF(MAX(virtual_key_alias), ''), REGEXP_REPLACE(virtual_key_id, '^personal:', '')),
+		       COALESCE(NULLIF(MAX(virtual_key_alias), ''), REPLACE(virtual_key_id, 'personal:', '')),
 		       COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s

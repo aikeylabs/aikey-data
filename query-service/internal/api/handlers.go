@@ -164,10 +164,13 @@ func parsePersonalParams(r *http.Request) (usage.QueryParams, error) {
 	q := r.URL.Query()
 	seatID := q.Get("seat_id")
 	accountID := q.Get("account_id")
-	if seatID == "" && accountID == "" {
+	orgID := q.Get("org_id")
+	// Allow org_id=personal for personal edition (local-user mode) where
+	// events have no account_id but are tagged with org_id="personal".
+	if seatID == "" && accountID == "" && orgID != "personal" {
 		return usage.QueryParams{}, errMissing("seat_id or account_id")
 	}
-	p := usage.QueryParams{SeatID: seatID, AccountID: accountID}
+	p := usage.QueryParams{SeatID: seatID, AccountID: accountID, OrgID: orgID}
 	parseDates(&p, q.Get("start_date"), q.Get("end_date"))
 	p.Defaults()
 	return p, nil
