@@ -1,5 +1,8 @@
 # Multi-stage build — produces a minimal Alpine image.
 # Requires Go 1.26+
+#
+# Build context must be the aikeylabs root (context: .. in docker-compose.yml)
+# so that pkg/buildinfo/ is accessible.
 
 # ---- build stage ----
 FROM golang:1.26-alpine AS builder
@@ -11,11 +14,16 @@ ARG BUILD_TIME=unknown
 
 WORKDIR /src
 
-COPY go.mod go.sum ./
-RUN go mod download
+# Copy buildinfo dependency first (for layer caching)
+COPY pkg/buildinfo/ /buildinfo/
 
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+# Copy service source
+COPY aikey-data/collector-service/ .
+
+# Fix replace directive: point to Docker-local path instead of dev layout
+RUN sed -i 's|=> ../../pkg/buildinfo|=> /buildinfo|' go.mod \
+    && go mod download \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath \
     -ldflags="-s -w \
       -X github.com/AiKeyLabs/pkg/buildinfo.Version=${BUILD_VERSION} \
       -X github.com/AiKeyLabs/pkg/buildinfo.Revision=${BUILD_REVISION} \
@@ -41,7 +49,7 @@ RUN apk add --no-cache ca-certificates tzdata
 RUN echo "${BUILD_VERSION}+${BUILD_ID} ${BUILD_TIME}" > /etc/aikey-version
 
 COPY --from=builder /app/collector-service .
-COPY migrations/ ./migrations/
+COPY aikey-data/collector-service/migrations/ ./migrations/
 
 EXPOSE 27300
 ENTRYPOINT ["/app/collector-service"]

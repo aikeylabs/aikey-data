@@ -17,8 +17,13 @@
 services:
   collector-service:
     build:
-      context: ./collector-service
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: aikey-data/collector-service/Dockerfile
+      args:
+        BUILD_VERSION: ${BUILD_VERSION:-dev}
+        BUILD_REVISION: ${BUILD_REVISION:-unknown}
+        BUILD_ID: ${BUILD_ID:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -33,8 +38,13 @@ services:
 
   query-service:
     build:
-      context: ./query-service
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: aikey-data/query-service/Dockerfile
+      args:
+        BUILD_VERSION: ${BUILD_VERSION:-dev}
+        BUILD_REVISION: ${BUILD_REVISION:-unknown}
+        BUILD_ID: ${BUILD_ID:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
