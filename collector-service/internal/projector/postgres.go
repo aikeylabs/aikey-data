@@ -29,8 +29,9 @@ SELECT ods_id, event_id, event_time, occurred_at,
        request_status, http_status_code, upstream_request_id,
        dwd_retry_count
 FROM usage_event_ods
-WHERE (dwd_status = 'pending')
-   OR (dwd_status = 'retry' AND dwd_next_retry_at <= %s)
+WHERE ((dwd_status = 'pending')
+   OR (dwd_status = 'retry' AND dwd_next_retry_at <= %s))
+  AND COALESCE(virtual_key_id, '') != '__canary__'
 ORDER BY ods_id
 LIMIT ?
 `

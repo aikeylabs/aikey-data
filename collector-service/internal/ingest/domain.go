@@ -57,7 +57,8 @@ type UsageEvent struct {
 	ProviderID   string `json:"provider_id,omitempty"`
 	ProviderCode string `json:"provider_code,omitempty"`
 	ProtocolType string `json:"protocol_type,omitempty"`
-	RouteSource  string `json:"route_source,omitempty"`
+	RouteSource    string `json:"route_source,omitempty"`
+	OAuthIdentity  string `json:"oauth_identity,omitempty"` // Email/display name for OAuth accounts
 
 	// usage
 	Model             string  `json:"model,omitempty"`
