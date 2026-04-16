@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,9 +15,20 @@ import (
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/api"
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/shared"
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/usage"
+	"github.com/AiKeyLabs/pkg/buildinfo"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		bi := buildinfo.Get()
+		if len(os.Args) > 2 && (os.Args[2] == "--json" || os.Args[2] == "-j") {
+			fmt.Println(string(bi.JSON()))
+		} else {
+			fmt.Println("query-service", bi.String())
+		}
+		os.Exit(0)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("load config", "error", err)
@@ -47,7 +59,7 @@ func main() {
 	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		slog.Info("query-service started", "addr", cfg.ListenAddr)
+		slog.Info("query-service started", "addr", cfg.ListenAddr, "version", buildinfo.Get().String())
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("listen", "error", err)
 			os.Exit(1)

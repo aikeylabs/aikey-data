@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,9 +17,20 @@ import (
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/ingest"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/projector"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
+	"github.com/AiKeyLabs/pkg/buildinfo"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		bi := buildinfo.Get()
+		if len(os.Args) > 2 && (os.Args[2] == "--json" || os.Args[2] == "-j") {
+			fmt.Println(string(bi.JSON()))
+		} else {
+			fmt.Println("collector-service", bi.String())
+		}
+		os.Exit(0)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("load config", "error", err)
@@ -75,7 +87,7 @@ func main() {
 	go projWorker.Run(projCtx)
 
 	go func() {
-		slog.Info("collector-service started", "addr", cfg.ListenAddr)
+		slog.Info("collector-service started", "addr", cfg.ListenAddr, "version", buildinfo.Get().String())
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("listen", "error", err)
 			os.Exit(1)

@@ -59,6 +59,15 @@ func (s *Service) ingestOne(ctx context.Context, e *UsageEvent) EventResult {
 	if e.SchemaVersion == 0 {
 		e.SchemaVersion = 1
 	}
+	// Warn on unknown schema version but still ingest (forward-compatible).
+	// A newer proxy may send v2 events before collector is upgraded.
+	// Missing new fields will be zero-valued, which is acceptable.
+	if e.SchemaVersion > MaxSchemaVersion {
+		slog.Warn("ingest: unknown schema version, ingesting anyway",
+			"event_id", e.EventID,
+			"got", e.SchemaVersion,
+			"max_supported", MaxSchemaVersion)
+	}
 	// Default request count
 	if e.RequestCount == 0 {
 		e.RequestCount = 1

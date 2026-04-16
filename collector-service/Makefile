@@ -3,15 +3,31 @@
 
 APP       := collector-service
 VERSION   ?= 0.1.0
-GIT_HASH  := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+PKG       := github.com/AiKeyLabs/pkg/buildinfo
+GIT_REVISION  = $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo "unknown")
+GIT_DIRTY     = $(shell test -z "$$(git status --porcelain --untracked-files=normal 2>/dev/null)" && echo "" || echo "-dirty")
+BUILD_ID     ?= $(shell head -c 2 /dev/urandom 2>/dev/null | xxd -p 2>/dev/null \
+                  || powershell -NoProfile -C "'{0:x4}' -f (Get-Random -Max 65535)" 2>/dev/null \
+                  || echo "0000")
+BUILD_TIME    = $(shell date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+                  || powershell -NoProfile -C "(Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')" 2>/dev/null \
+                  || echo "unknown")
 BUILD_DIR := bin
 GO        := go
 
 # Local dev: keep debug symbols for dlv/pprof
-LDFLAGS_DEV  := -ldflags "-X main.version=$(VERSION)"
+LDFLAGS_DEV  := -ldflags "\
+  -X $(PKG).Version=$(VERSION) \
+  -X $(PKG).Revision=$(GIT_REVISION)$(GIT_DIRTY) \
+  -X $(PKG).BuildID=$(BUILD_ID) \
+  -X $(PKG).BuildTime=$(BUILD_TIME)"
 
 # Production: strip symbols, embed version+commit, static link (CGO_ENABLED=0)
-LDFLAGS_PROD := -ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(GIT_HASH)"
+LDFLAGS_PROD := -ldflags "-s -w \
+  -X $(PKG).Version=$(VERSION) \
+  -X $(PKG).Revision=$(GIT_REVISION)$(GIT_DIRTY) \
+  -X $(PKG).BuildID=$(BUILD_ID) \
+  -X $(PKG).BuildTime=$(BUILD_TIME)"
 
 # Cross-compile targets
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64

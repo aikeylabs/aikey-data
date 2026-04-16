@@ -5,6 +5,15 @@ import (
 	"time"
 )
 
+// SupportedSchemaVersions lists the event schema versions this collector can process.
+// Exposed via GET /version so proxy can check compatibility.
+// When the event schema evolves (new fields, changed semantics), bump MaxSchemaVersion
+// and add backward-compatible handling in ingestOne().
+var SupportedSchemaVersions = []int{1}
+
+// MaxSchemaVersion is the highest schema version this collector understands.
+const MaxSchemaVersion = 1
+
 // UsageEvent represents a single usage event reported by Local Proxy.
 type UsageEvent struct {
 	// identifiers

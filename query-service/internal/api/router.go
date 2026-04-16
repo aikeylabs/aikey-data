@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/shared"
+	"github.com/AiKeyLabs/pkg/buildinfo"
 )
 
 func NewRouter(h *UsageHandler, serviceToken string) http.Handler {
@@ -12,6 +13,12 @@ func NewRouter(h *UsageHandler, serviceToken string) http.Handler {
 	// Health check
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		shared.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+
+	// Version — unauthenticated
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(buildinfo.Get().JSON())
 	})
 
 	// Authenticated query endpoints
