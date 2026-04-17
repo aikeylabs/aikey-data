@@ -1,13 +1,18 @@
 package api
 
 import (
+	"database/sql"
 	"net/http"
 
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/shared"
 	"github.com/AiKeyLabs/pkg/buildinfo"
 )
 
-func NewRouter(h *UsageHandler, serviceToken string) http.Handler {
+// NewRouter builds the query-service HTTP handler.
+//
+// db is used only for the /internal/canary-check liveness endpoint. Nil is
+// tolerated for tests that don't exercise that path.
+func NewRouter(h *UsageHandler, db *sql.DB, serviceToken string) http.Handler {
 	mux := http.NewServeMux()
 
 	// Health check
@@ -20,6 +25,13 @@ func NewRouter(h *UsageHandler, serviceToken string) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(buildinfo.Get().JSON())
 	})
+
+	// Query-stage canary check — unauthenticated liveness endpoint read by
+	// the proxy's Canary probe. See canary.go for why this is distinct from
+	// collector-service's /internal/canary-check.
+	if db != nil {
+		mux.HandleFunc("GET /internal/canary-check", HandleQueryCanaryCheck(db))
+	}
 
 	// Authenticated query endpoints
 	authed := http.NewServeMux()

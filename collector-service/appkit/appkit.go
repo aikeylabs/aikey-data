@@ -52,7 +52,7 @@ func New(db *sql.DB, cfg Config) Result {
 	enricher := projector.NewEnricher(ctrlReader)
 	projWorker := projector.NewWorker(odsReader, dwdWriter, checkpoint, enricher)
 
-	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, cfg.ServiceToken)
+	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, cfg.ServiceToken)
 
 	return Result{
 		Handler:      router,

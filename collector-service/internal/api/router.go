@@ -1,8 +1,10 @@
 package api
 
 import (
+	"database/sql"
 	"net/http"
 
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/diagnostics"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/ingest"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/projector"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
@@ -16,7 +18,15 @@ type MetricsResponse struct {
 }
 
 // NewRouter creates the HTTP route multiplexer.
-func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, projWorker *projector.Worker, serviceToken string) http.Handler {
+//
+// db is used for diagnostics endpoints (/v1/diagnostics/pipeline and
+// /internal/canary-check). These are kept unauthenticated because:
+//   - they are read-only and return pipeline freshness metadata, no business data
+//   - the proxy's canary probe hits /internal/canary-check without a bearer token
+//   - aikey doctor (CLI) reads /v1/diagnostics/pipeline without a bearer token
+// If you need to restrict them, wrap both with shared.ServiceTokenAuth and
+// update the proxy/CLI callers accordingly.
+func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, projWorker *projector.Worker, db *sql.DB, serviceToken string) http.Handler {
 	mux := http.NewServeMux()
 
 	// Health check — unauthenticated
@@ -45,6 +55,14 @@ func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, projWorker *pr
 			Projector: projWorker.MetricsSnapshot(),
 		})
 	})
+
+	// Diagnostics — unauthenticated. Canonical home for pipeline observability;
+	// trial-server delegates these paths to this handler, production container
+	// exposes them on its own listen address.
+	if db != nil {
+		mux.HandleFunc("GET /v1/diagnostics/pipeline", diagnostics.HandlePipeline(db))
+		mux.HandleFunc("GET /internal/canary-check", diagnostics.HandleCanaryCheck(db))
+	}
 
 	// Ingest API — authenticated
 	authed := http.NewServeMux()

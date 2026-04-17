@@ -28,5 +28,5 @@ func NewHandler(db *sql.DB, cfg Config) http.Handler {
 	ddb := shared.NewDB(db, cfg.DBDialect)
 	repo := usage.NewPostgresRepository(ddb)
 	handler := api.NewUsageHandler(repo)
-	return api.NewRouter(handler, cfg.ServiceToken)
+	return api.NewRouter(handler, db, cfg.ServiceToken)
 }

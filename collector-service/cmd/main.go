@@ -67,7 +67,7 @@ func main() {
 	enricher := projector.NewEnricher(controlReader)
 	projWorker := projector.NewWorker(odsReader, dwdWriter, checkpoint, enricher)
 
-	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, cfg.ServiceToken)
+	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, cfg.ServiceToken)
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,

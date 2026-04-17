@@ -11,6 +11,12 @@ const (
 	defaultBatchSize    = 100
 	defaultScanInterval = 5 * time.Second
 	deadLetterThreshold = 20
+
+	// canaryVirtualKeyID is the sentinel virtual_key_id the proxy uses for
+	// liveness probes. Canary events traverse collector→ODS→projector as a
+	// heartbeat signal; the projector acks them (MarkProjected) but must not
+	// emit a DWD row to keep business stats clean.
+	canaryVirtualKeyID = "__canary__"
 )
 
 // Worker runs the ODS → DWD projection loop in the background.
@@ -102,6 +108,20 @@ func (w *Worker) scanOnce(ctx context.Context) {
 }
 
 func (w *Worker) projectOne(ctx context.Context, rec *ODSRecord) error {
+	// Canary short-circuit: ack (MarkProjected) without enriching or writing
+	// to usage_fact_dwd. Canaries are liveness probes, not business data —
+	// inserting them would pollute /user/overview stats. Diagnostics queries
+	// ODS.dwd_status='projected' for the canary DWD watermark, so acking here
+	// is what advances that watermark and keeps watermark_health healthy.
+	if rec.VirtualKeyID.Valid && rec.VirtualKeyID.String == canaryVirtualKeyID {
+		if err := w.odsReader.MarkProjected(ctx, rec.OdsID); err != nil {
+			slog.Error("canary mark projected failed", "ods_id", rec.OdsID, "error", err)
+			return err
+		}
+		w.metrics.Projected.Add(1)
+		return nil
+	}
+
 	fact, err := w.enricher.Enrich(ctx, rec)
 	if err != nil {
 		return w.handleError(ctx, rec, "ENRICH_FAILED", err.Error())

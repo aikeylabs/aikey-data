@@ -16,6 +16,13 @@ type postgresODSReader struct{ db *shared.DB }
 func NewPostgresODSReader(db *shared.DB) ODSReader { return &postgresODSReader{db: db} }
 
 // fetchPendingSQL is built dynamically via nowExpr for dialect portability.
+//
+// Why no canary filter: canary events flow through the projector as a liveness
+// signal so that diagnostics can observe end-to-end traversal (the proxy's
+// canary probe and /internal/canary-check both rely on canary ODS reaching
+// the 'projected' dwd_status). The projector worker short-circuits canary
+// events to MarkProjected without writing to usage_fact_dwd, so they never
+// pollute business stats. See worker.go:projectOne.
 const fetchPendingTpl = `
 SELECT ods_id, event_id, event_time, occurred_at,
        org_id, account_id, seat_id, account_status_snapshot,
@@ -31,7 +38,6 @@ SELECT ods_id, event_id, event_time, occurred_at,
 FROM usage_event_ods
 WHERE ((dwd_status = 'pending')
    OR (dwd_status = 'retry' AND dwd_next_retry_at <= %s))
-  AND COALESCE(virtual_key_id, '') != '__canary__'
 ORDER BY ods_id
 LIMIT ?
 `
