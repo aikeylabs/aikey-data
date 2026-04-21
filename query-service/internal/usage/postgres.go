@@ -96,17 +96,39 @@ func (r *postgresRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParam
 }
 
 func (r *postgresRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyTotal, error) {
+	// Identity enrichment (2026-04-22, F2 of the usage-ledger label fix):
+	//
+	// DWD doesn't carry `oauth_identity` — it dropped during projection —
+	// but ODS does. For OAuth sessions the DWD `virtual_key_alias` column
+	// is also empty, so without enrichment the UI rendered raw
+	// `session_<hex>` strings in the "Usage by Key" chart.
+	//
+	// Strategy: LEFT-JOIN a pre-aggregated sub-select that pulls
+	// oauth_identity per virtual_key_id from ODS within the same date
+	// window. Runs once per outer row group (small N — a single user
+	// rarely has >10 distinct virtual_key_ids in a window), so cost is
+	// negligible in practice. Proper long-term fix: propagate
+	// oauth_identity through the projector into DWD — tracked as a
+	// follow-up (avoid here because it needs a migration).
 	filter, id := personalFilter(p)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT virtual_key_id,
-		       COALESCE(NULLIF(MAX(virtual_key_alias), ''), REPLACE(virtual_key_id, 'personal:', '')),
-		       COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
-		FROM usage_fact_dwd
+		SELECT d.virtual_key_id,
+		       COALESCE(NULLIF(MAX(d.virtual_key_alias), ''), REPLACE(d.virtual_key_id, 'personal:', '')),
+		       COALESCE(id.identity, ''),
+		       COALESCE(SUM(d.total_tokens),0), COALESCE(SUM(d.request_count),0)
+		FROM usage_fact_dwd AS d
+		LEFT JOIN (
+		    SELECT virtual_key_id, MAX(oauth_identity) AS identity
+		    FROM usage_event_ods
+		    WHERE oauth_identity IS NOT NULL AND oauth_identity != ''
+		      AND DATE(event_time) BETWEEN ? AND ?
+		    GROUP BY virtual_key_id
+		) AS id ON id.virtual_key_id = d.virtual_key_id
 		WHERE %s
-		  AND usage_date BETWEEN ? AND ?
-		GROUP BY virtual_key_id
-		ORDER BY SUM(total_tokens) DESC`, filter),
-		id, p.StartDate, p.EndDate)
+		  AND d.usage_date BETWEEN ? AND ?
+		GROUP BY d.virtual_key_id, id.identity
+		ORDER BY SUM(d.total_tokens) DESC`, filter),
+		p.StartDate, p.EndDate, id, p.StartDate, p.EndDate)
 	if err != nil {
 		return nil, fmt.Errorf("personal by-key total: %w", err)
 	}
@@ -115,7 +137,7 @@ func (r *postgresRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([
 	var result []KeyTotal
 	for rows.Next() {
 		var kt KeyTotal
-		if err := rows.Scan(&kt.VirtualKeyID, &kt.Alias, &kt.TotalTokens, &kt.RequestCount); err != nil {
+		if err := rows.Scan(&kt.VirtualKeyID, &kt.Alias, &kt.Identity, &kt.TotalTokens, &kt.RequestCount); err != nil {
 			return nil, err
 		}
 		result = append(result, kt)

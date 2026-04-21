@@ -28,9 +28,16 @@ type ProtocolTotal struct {
 }
 
 // KeyTotal is a single entry in the per-key usage breakdown.
+//
+// Priority for display labels on the client (see web/src/pages/user/
+// usage-ledger): `Alias` (personal/team BYOK) → `Identity` (OAuth email)
+// → stripped `VirtualKeyID`. Identity was added 2026-04-22 so OAuth
+// sessions stop surfacing as raw `session_<hex>` in the "Usage by Key"
+// chart.
 type KeyTotal struct {
 	VirtualKeyID string `json:"virtual_key_id"`
-	Alias        string `json:"alias,omitempty"` // human-readable key alias
+	Alias        string `json:"alias,omitempty"`    // human-readable key alias (personal/team BYOK)
+	Identity     string `json:"identity,omitempty"` // email / display_identity (OAuth sessions)
 	TotalTokens  int64  `json:"total_tokens"`
 	RequestCount int64  `json:"request_count"`
 }
