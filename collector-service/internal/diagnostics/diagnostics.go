@@ -12,6 +12,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -138,20 +139,53 @@ func queryCanaryWatermarks(ctx context.Context, db DBQuerier) Watermarks {
 }
 
 // scanTime reads a single nullable timestamp column and parses it.
+// Cross-dialect tolerant: accepts int64 (SQLite INTEGER millis after
+// v1.0.3-alpha), time.Time (Postgres TIMESTAMPTZ scan), or textual
+// formats (fallback for legacy rows or unusual driver behaviour).
+// See bugfix 20260424 review finding #4.
 func scanTime(row *sql.Row) (time.Time, bool) {
-	var s sql.NullString
-	if err := row.Scan(&s); err != nil || !s.Valid {
+	var raw any
+	if err := row.Scan(&raw); err != nil {
 		return time.Time{}, false
 	}
-	return parseTimestamp(s.String)
+	switch v := raw.(type) {
+	case nil:
+		return time.Time{}, false
+	case int64:
+		if v <= 0 {
+			return time.Time{}, false
+		}
+		return time.UnixMilli(v).UTC(), true
+	case time.Time:
+		if v.IsZero() {
+			return time.Time{}, false
+		}
+		return v.UTC(), true
+	case string:
+		return parseTimestamp(v)
+	case []byte:
+		return parseTimestamp(string(v))
+	}
+	return time.Time{}, false
 }
 
-// parseTimestamp handles both SQLite datetime() format ("2026-04-16 08:18:01"),
-// PostgreSQL timestamp ("2026-04-16 08:18:01+00"), and RFC3339 variants.
+// parseTimestamp handles SQLite datetime() format ("2026-04-16 08:18:01"),
+// PostgreSQL timestamp ("2026-04-16 08:18:01+00"), RFC3339 variants,
+// and integer-string millis (defensive tolerance for hand-crafted
+// rows or intermediate migration states — see ParseTime in
+// pkg/aikeytime for the same pattern).
 func parseTimestamp(s string) (time.Time, bool) {
+	// Integer string → millis. Match aikeytime.ParseTime's heuristic:
+	// require 13+ digits so we don't mistake a 10-digit second-epoch
+	// for millis.
+	if len(s) >= 13 {
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil && n > 1_000_000_000_000 {
+			return time.UnixMilli(n).UTC(), true
+		}
+	}
 	for _, layout := range []string{
-		"2006-01-02 15:04:05",       // SQLite datetime('now')
-		"2006-01-02 15:04:05-07",    // PostgreSQL with tz offset
+		"2006-01-02 15:04:05",        // SQLite datetime('now')
+		"2006-01-02 15:04:05-07",     // PostgreSQL with tz offset
 		"2006-01-02 15:04:05.999999", // PostgreSQL fractional seconds
 		time.RFC3339Nano,
 		time.RFC3339,

@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/AiKeyLabs/pkg/aikeytime"
 )
 
 // mockODS implements ODSRepository for unit testing.
@@ -26,7 +28,7 @@ func (m *mockODS) InsertEvent(_ context.Context, e *UsageEvent, _ []byte) (bool,
 
 func TestIngestBatch_HappyPath(t *testing.T) {
 	svc := NewService(newMockODS())
-	now := time.Now()
+	now := aikeytime.FromTime(time.Now())
 	req := &BatchRequest{
 		Source:        "aikey-proxy",
 		SourceVersion: "0.1.0",
@@ -51,7 +53,7 @@ func TestIngestBatch_HappyPath(t *testing.T) {
 
 func TestIngestBatch_Duplicate(t *testing.T) {
 	svc := NewService(newMockODS())
-	now := time.Now()
+	now := aikeytime.FromTime(time.Now())
 	e := UsageEvent{EventID: "e1", OrgID: "org1", EventTime: now, OccurredAt: now, RequestStatus: "success"}
 
 	req := &BatchRequest{Events: []UsageEvent{e}}
@@ -71,11 +73,11 @@ func TestIngestBatch_Validation(t *testing.T) {
 		name  string
 		event UsageEvent
 	}{
-		{"missing event_id", UsageEvent{OrgID: "org1", EventTime: time.Now(), OccurredAt: time.Now(), RequestStatus: "ok"}},
-		{"missing org_id", UsageEvent{EventID: "e1", EventTime: time.Now(), OccurredAt: time.Now(), RequestStatus: "ok"}},
-		{"missing event_time", UsageEvent{EventID: "e1", OrgID: "org1", OccurredAt: time.Now(), RequestStatus: "ok"}},
-		{"missing occurred_at", UsageEvent{EventID: "e1", OrgID: "org1", EventTime: time.Now(), RequestStatus: "ok"}},
-		{"missing request_status", UsageEvent{EventID: "e1", OrgID: "org1", EventTime: time.Now(), OccurredAt: time.Now()}},
+		{"missing event_id", UsageEvent{OrgID: "org1", EventTime: aikeytime.Now(), OccurredAt: aikeytime.Now(), RequestStatus: "ok"}},
+		{"missing org_id", UsageEvent{EventID: "e1", EventTime: aikeytime.Now(), OccurredAt: aikeytime.Now(), RequestStatus: "ok"}},
+		{"missing event_time", UsageEvent{EventID: "e1", OrgID: "org1", OccurredAt: aikeytime.Now(), RequestStatus: "ok"}},
+		{"missing occurred_at", UsageEvent{EventID: "e1", OrgID: "org1", EventTime: aikeytime.Now(), RequestStatus: "ok"}},
+		{"missing request_status", UsageEvent{EventID: "e1", OrgID: "org1", EventTime: aikeytime.Now(), OccurredAt: aikeytime.Now()}},
 	}
 
 	for _, tt := range tests {
@@ -91,7 +93,7 @@ func TestIngestBatch_Validation(t *testing.T) {
 
 func TestIngestBatch_MixedResults(t *testing.T) {
 	svc := NewService(newMockODS())
-	now := time.Now()
+	now := aikeytime.FromTime(time.Now())
 	req := &BatchRequest{
 		Events: []UsageEvent{
 			{EventID: "e1", OrgID: "org1", EventTime: now, OccurredAt: now, RequestStatus: "success"},

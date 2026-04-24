@@ -10,6 +10,11 @@ type Repository interface {
 	// Filters: user_usage_scope = 'normal'
 	PersonalTimeline(ctx context.Context, p QueryParams) ([]TimelinePoint, error)
 
+	// PersonalHourlyTimeline returns hourly total_tokens for a single
+	// UTC calendar date (p.StartDate). Returns 0..24 rows (hours with
+	// activity); callers pad sparse hours client-side.
+	PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]HourlyPoint, error)
+
 	// PersonalByProtocolTimeline returns daily total_tokens grouped by protocol.
 	// Filters: user_usage_scope = 'normal'
 	PersonalByProtocolTimeline(ctx context.Context, p QueryParams) ([]ProtocolTimelinePoint, error)

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/AiKeyLabs/pkg/aikeytime"
 )
 
 // --- mocks shared with worker tests ---
@@ -79,8 +81,8 @@ func TestProjectOne_CanaryShortCircuit(t *testing.T) {
 	canaryRec := &ODSRecord{
 		OdsID:         42,
 		EventID:       "canary-1776408000",
-		EventTime:     time.Now(),
-		OccurredAt:    time.Now(),
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
 		OrgID:         "__canary__",
 		VirtualKeyID:  sql.NullString{String: "__canary__", Valid: true},
 		RequestCount:  1,
@@ -113,7 +115,7 @@ func TestProjectOne_BusinessEventWritesDWD(t *testing.T) {
 			VirtualKeyID:  "vk1",
 			ProviderID:    "prov1",
 			Revision:      "rev-001",
-			EffectiveFrom: time.Now().Add(-time.Hour),
+			EffectiveFrom: aikeytime.FromTime(time.Now().Add(-time.Hour)),
 		},
 	}}
 	w := NewWorker(ods, dwd, &mockCheckpointStore{}, NewEnricher(cr))
@@ -121,8 +123,8 @@ func TestProjectOne_BusinessEventWritesDWD(t *testing.T) {
 	rec := &ODSRecord{
 		OdsID:         7,
 		EventID:       "e7",
-		EventTime:     time.Now(),
-		OccurredAt:    time.Now(),
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
 		OrgID:         "org1",
 		VirtualKeyID:  sql.NullString{String: "vk1", Valid: true},
 		RequestCount:  1,
@@ -153,7 +155,7 @@ func TestProjectOne_CanaryAckFailureReturnsError(t *testing.T) {
 		OrgID:         "__canary__",
 		VirtualKeyID:  sql.NullString{String: "__canary__", Valid: true},
 		RequestStatus: "success",
-		EventTime:     time.Now(),
+		EventTime:     aikeytime.Now(),
 	}
 	if err := w.projectOne(context.Background(), canaryRec); err == nil {
 		t.Fatal("expected error, got nil")

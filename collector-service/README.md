@@ -34,6 +34,18 @@ make build
 ./bin/collector-service
 ```
 
+## Timestamp storage convention (v1.0.3-alpha+)
+
+All usage-pipeline timestamps (`event_time`, `occurred_at`, `started_at`, `finished_at`, `projected_at`, `ingest_received_at`, `collector_time`, `dwd_next_retry_at`) are stored as **int64 Unix epoch milliseconds (UTC)** on SQLite (personal / trial) and remain **TIMESTAMPTZ** on PostgreSQL (team production).
+
+Go code uses `aikeytime.Millis` as the unified struct field type; `shared.DB.BindMillis(m)` emits the right driver argument per dialect. Proxy → Collector JSON wire format is int64 millis:
+
+```json
+{ "event_time": 1777041000000, "occurred_at": 1777041000000 }
+```
+
+See the design doc in `roadmap20260320/技术实现/update/20260424-时间戳统一为int64毫秒-data-service.md` and bugfix record `workflow/CI/bugfix/20260424-today-use-card-empty.md`.
+
 ## API
 
 ### `POST /v1/usage-events:batch`

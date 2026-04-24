@@ -38,6 +38,7 @@ func NewRouter(h *UsageHandler, db *sql.DB, serviceToken string) http.Handler {
 
 	// Personal page
 	authed.HandleFunc("GET /v1/usage/personal/timeline", h.PersonalTimeline)
+	authed.HandleFunc("GET /v1/usage/personal/hourly", h.PersonalHourlyTimeline)
 	authed.HandleFunc("GET /v1/usage/personal/by-protocol/timeline", h.PersonalByProtocolTimeline)
 	authed.HandleFunc("GET /v1/usage/personal/by-protocol/total", h.PersonalByProtocolTotal)
 	authed.HandleFunc("GET /v1/usage/personal/by-key/total", h.PersonalByKeyTotal)

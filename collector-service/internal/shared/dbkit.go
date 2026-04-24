@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+
+	"github.com/AiKeyLabs/pkg/aikeytime"
 )
 
 const (
@@ -54,7 +56,81 @@ func (d *DB) Now() string {
 	return "NOW()"
 }
 
+// NowMillis returns a SQL expression that evaluates to "the current
+// moment, in the same representation as int64-millis / TIMESTAMPTZ
+// timestamp columns". Use this when generating a comparison against
+// a timestamp column populated by the v1.0.3-alpha β-hybrid scheme
+// (SQLite INTEGER millis, Postgres TIMESTAMPTZ).
+//
+// Why a separate helper from Now(): the legacy Now() returns
+// datetime('now') on SQLite — a TEXT value that compares
+// lexicographically against INTEGER millis and always yields TRUE
+// (string "1777041000000" < string "2026-04-24 05:13:34"), causing
+// retry rows to hot-loop instead of waiting for their scheduled
+// retry time. See bugfix 20260424.
+func (d *DB) NowMillis() string {
+	if d.Dialect == DialectSQLite {
+		// (strftime('%s','now') * 1000) — UTC seconds × 1000 = UTC millis.
+		// CAST to INTEGER is belt-and-braces: strftime returns TEXT,
+		// and we want a clean INTEGER for comparison affinity.
+		return "(CAST(strftime('%s','now') AS INTEGER) * 1000)"
+	}
+	// Postgres: dwd_next_retry_at / effective_from etc. remain TIMESTAMPTZ
+	// under β-hybrid. NOW() returns TIMESTAMPTZ, native comparison works.
+	return "NOW()"
+}
+
+// DateOf returns a SQL expression that projects a timestamp column
+// as a DATE / YYYY-MM-DD string. Used for grouping / filtering that
+// needs the calendar day of an instant.
+//
+//   - SQLite (INTEGER millis): DATE(col/1000, 'unixepoch')
+//   - Postgres (TIMESTAMPTZ) : DATE(col AT TIME ZONE 'UTC')
+//
+// Why a helper: SQLite's DATE() returns NULL when handed an INTEGER
+// without the 'unixepoch' modifier — the legacy DATE(event_time)
+// compiled fine but silently dropped every row (see bugfix
+// 20260424 review finding #3).
+func (d *DB) DateOf(col string) string {
+	if d.Dialect == DialectSQLite {
+		return fmt.Sprintf("DATE(%s/1000, 'unixepoch')", col)
+	}
+	return fmt.Sprintf("DATE(%s AT TIME ZONE 'UTC')", col)
+}
+
 func (d *DB) IsSQLite() bool { return d.Dialect == DialectSQLite }
+
+// BindMillis returns the correct driver argument for an aikeytime.Millis
+// value on the current dialect. β-hybrid:
+//
+//   - SQLite → INTEGER column: emit int64 millis. Zero → SQL NULL so
+//     NOT-NULL columns that receive a zero value still error loudly
+//     (the caller must set the time before insert).
+//   - Postgres → TIMESTAMPTZ column: emit time.Time (UTC). Zero → NULL.
+//
+// Write sites call this at every bind so the wrapper type never
+// reaches the driver's generic Valuer path — which would emit int64
+// regardless and break TIMESTAMPTZ columns on Postgres.
+func (d *DB) BindMillis(m aikeytime.Millis) any {
+	if m.IsZero() {
+		return nil
+	}
+	if d.Dialect == DialectSQLite {
+		return m.Int64()
+	}
+	return m.Time()
+}
+
+// BindMillisPtr is the nullable-pointer variant. nil → NULL.
+func (d *DB) BindMillisPtr(m *aikeytime.Millis) any {
+	if m == nil || m.IsZero() {
+		return nil
+	}
+	if d.Dialect == DialectSQLite {
+		return m.Int64()
+	}
+	return m.Time()
+}
 
 func (d *DB) rewrite(query string) string {
 	if d.Dialect != DialectPostgres || !strings.Contains(query, "?") {

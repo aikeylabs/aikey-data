@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
-	"time"
 )
 
 const projectorVersion = "0.1.0"
@@ -62,7 +61,10 @@ func (e *Enricher) buildBaseFact(rec *ODSRecord) *DWDFact {
 		OdsID:                      rec.OdsID,
 		OccurredAt:                 rec.OccurredAt,
 		EventTime:                  rec.EventTime,
-		UsageDate:                  rec.EventTime.Truncate(24 * time.Hour),
+		// UsageDate is the UTC date portion of EventTime ("YYYY-MM-DD").
+		// Computed via Millis.Time() (already UTC) so bucket-by-date queries
+		// agree with bucket-by-hour queries on event_time millis.
+		UsageDate:                  rec.EventTime.Time().Format("2006-01-02"),
 
 		OrgID:                      rec.OrgID,
 		AccountID:                  rec.AccountID.String,

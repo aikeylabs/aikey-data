@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/shared"
+	"github.com/AiKeyLabs/pkg/aikeytime"
 )
 
 type postgresRepo struct{ db *shared.DB }
@@ -38,12 +40,12 @@ func personalFilter(p QueryParams) (clause string, id string) {
 func (r *postgresRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]TimelinePoint, error) {
 	filter, id := personalFilter(p)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT usage_date::text, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT %s, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
 		  AND usage_date BETWEEN ? AND ?
 		GROUP BY usage_date
-		ORDER BY usage_date`, filter),
+		ORDER BY usage_date`, r.db.DateString("usage_date"), filter),
 		id, p.StartDate, p.EndDate)
 	if err != nil {
 		return nil, fmt.Errorf("personal timeline: %w", err)
@@ -52,15 +54,49 @@ func (r *postgresRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]T
 	return scanTimeline(rows)
 }
 
+// PersonalHourlyTimeline aggregates fact rows into 24 UTC hour buckets
+// for p.StartDate. Dialect differences (Postgres EXTRACT vs SQLite
+// strftime) are hidden behind shared.DB.HourBucket — see dbkit.go.
+func (r *postgresRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]HourlyPoint, error) {
+	filter, id := personalFilter(p)
+	// Full-day window [startOfDay, startOfNextDay) in UTC. Using BETWEEN
+	// on date alone (usage_date) would only give day-level totals; we
+	// need event_time to keep intra-day resolution.
+	dayStart := aikeytime.FromTime(p.StartDate.UTC().Truncate(24 * time.Hour))
+	dayEnd := aikeytime.FromTime(p.StartDate.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour))
+
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT %s AS hour, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		FROM usage_fact_dwd
+		WHERE %s
+		  AND event_time >= ? AND event_time < ?
+		GROUP BY hour
+		ORDER BY hour`, r.db.HourBucket("event_time"), filter),
+		id, r.db.BindMillis(dayStart), r.db.BindMillis(dayEnd))
+	if err != nil {
+		return nil, fmt.Errorf("personal hourly timeline: %w", err)
+	}
+	defer rows.Close()
+	var result []HourlyPoint
+	for rows.Next() {
+		var hp HourlyPoint
+		if err := rows.Scan(&hp.Hour, &hp.TotalTokens, &hp.RequestCount); err != nil {
+			return nil, err
+		}
+		result = append(result, hp)
+	}
+	return result, rows.Err()
+}
+
 func (r *postgresRepo) PersonalByProtocolTimeline(ctx context.Context, p QueryParams) ([]ProtocolTimelinePoint, error) {
 	filter, id := personalFilter(p)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT usage_date::text, COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT %s, COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
 		  AND usage_date BETWEEN ? AND ?
 		GROUP BY usage_date, COALESCE(provider_code, protocol_type)
-		ORDER BY usage_date, COALESCE(provider_code, protocol_type)`, filter),
+		ORDER BY usage_date, COALESCE(provider_code, protocol_type)`, r.db.DateString("usage_date"), filter),
 		id, p.StartDate, p.EndDate)
 	if err != nil {
 		return nil, fmt.Errorf("personal by-protocol timeline: %w", err)
@@ -111,6 +147,12 @@ func (r *postgresRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([
 	// oauth_identity through the projector into DWD — tracked as a
 	// follow-up (avoid here because it needs a migration).
 	filter, id := personalFilter(p)
+	// DATE(event_time) worked while event_time was a TEXT ISO string, but
+	// post v1.0.3-alpha the SQLite column is INTEGER millis. Calling
+	// SQLite's DATE() on a bare integer returns NULL → the WHERE clause
+	// matches zero rows → identity enrichment silently drops every row.
+	// DateOf() encapsulates the right expression per dialect. See bugfix
+	// 20260424 review finding #3.
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT d.virtual_key_id,
 		       COALESCE(NULLIF(MAX(d.virtual_key_alias), ''), REPLACE(d.virtual_key_id, 'personal:', '')),
@@ -121,13 +163,13 @@ func (r *postgresRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([
 		    SELECT virtual_key_id, MAX(oauth_identity) AS identity
 		    FROM usage_event_ods
 		    WHERE oauth_identity IS NOT NULL AND oauth_identity != ''
-		      AND DATE(event_time) BETWEEN ? AND ?
+		      AND %s BETWEEN ? AND ?
 		    GROUP BY virtual_key_id
 		) AS id ON id.virtual_key_id = d.virtual_key_id
 		WHERE %s
 		  AND d.usage_date BETWEEN ? AND ?
 		GROUP BY d.virtual_key_id, id.identity
-		ORDER BY SUM(d.total_tokens) DESC`, filter),
+		ORDER BY SUM(d.total_tokens) DESC`, r.db.DateOf("event_time"), filter),
 		p.StartDate, p.EndDate, id, p.StartDate, p.EndDate)
 	if err != nil {
 		return nil, fmt.Errorf("personal by-key total: %w", err)
@@ -191,14 +233,14 @@ func (r *postgresRepo) MasterByProtocolTotal(ctx context.Context, p QueryParams)
 }
 
 func (r *postgresRepo) MasterTimeline(ctx context.Context, p QueryParams) ([]TimelinePoint, error) {
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT usage_date::text, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT %s, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE org_id = ?
 		  AND usage_date BETWEEN ? AND ?
 		  AND billing_scope IN ('org_only','org_and_user')
 		GROUP BY usage_date
-		ORDER BY usage_date`,
+		ORDER BY usage_date`, r.db.DateString("usage_date")),
 		p.OrgID, p.StartDate, p.EndDate)
 	if err != nil {
 		return nil, fmt.Errorf("master timeline: %w", err)

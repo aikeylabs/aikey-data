@@ -5,9 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
+	"github.com/AiKeyLabs/pkg/aikeytime"
 )
 
 type postgresODS struct{ db *shared.DB }
@@ -17,10 +17,19 @@ func NewPostgresODSRepository(db *shared.DB) ODSRepository {
 	return &postgresODS{db: db}
 }
 
+// ingest_received_at / collector_time are set explicitly from Go here
+// (aikeytime.Now()) rather than relying on the SQL DEFAULT. Why: the
+// v1.0.3-alpha SQLite migration's ADD COLUMN path does not preserve
+// DEFAULT expressions, so an upgraded trial DB would leave these
+// columns NULL if the write relied on the DEFAULT. Always binding from
+// Go keeps upgraded and fresh installs behaviour-identical — the
+// schema DEFAULT becomes redundant belt-and-braces. See bugfix
+// 20260424 review finding #2.
 const odsColumns = `event_id, request_id, trace_id, proxy_instance_id, device_id,
     schema_version, source_type, source_version, client_version,
     proxy_config_version, proxy_loaded_control_seq,
     event_time, occurred_at, started_at, finished_at,
+    ingest_received_at, collector_time,
     org_id, account_id, seat_id, account_status_snapshot,
     virtual_key_id, virtual_key_revision, virtual_key_hash,
     binding_id, credential_id, credential_revision,
@@ -36,6 +45,7 @@ const odsPlaceholders = `?,?,?,?,?,
     ?,?,?,?,
     ?,?,
     ?,?,?,?,
+    ?,?,
     ?,?,?,?,
     ?,?,?,
     ?,?,?,
@@ -53,7 +63,8 @@ func (r *postgresODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []
 		e.EventID, nullStr(e.RequestID), nullStr(e.TraceID), nullStr(e.ProxyInstanceID), nullStr(e.DeviceID),
 		e.SchemaVersion, "local_proxy", nullStr(e.SourceVersion), nullStr(e.ClientVersion),
 		nullStr(e.ProxyConfigVersion), e.ProxyLoadedControlSeq,
-		e.EventTime, e.OccurredAt, nullTime(e.StartedAt), nullTime(e.FinishedAt),
+		r.db.BindMillis(e.EventTime), r.db.BindMillis(e.OccurredAt), r.db.BindMillisPtr(e.StartedAt), r.db.BindMillisPtr(e.FinishedAt),
+		r.db.BindMillis(aikeytime.Now()), r.db.BindMillis(aikeytime.Now()),
 		e.OrgID, nullStr(e.AccountID), nullStr(e.SeatID), nullStr(e.AccountStatusSnapshot),
 		nullStr(e.VirtualKeyID), nullStr(e.VirtualKeyRevision), nullStr(e.VirtualKeyHash),
 		nullStr(e.BindingID), nullStr(e.CredentialID), nullStr(e.CredentialRevision),
@@ -79,12 +90,10 @@ func nullStr(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: true}
 }
 
-func nullTime(t *time.Time) sql.NullTime {
-	if t == nil {
-		return sql.NullTime{}
-	}
-	return sql.NullTime{Time: *t, Valid: true}
-}
+// nullTime kept for backward compatibility with any callers that still bind
+// *time.Time via sql.NullTime. New code goes through shared.DB.BindMillis.
+// Unused placeholder import below ensures aikeytime is wired in.
+var _ = aikeytime.Millis(0)
 
 func ptrStr(s *string) string {
 	if s == nil {

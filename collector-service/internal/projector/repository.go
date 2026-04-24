@@ -1,6 +1,10 @@
 package projector
 
-import "context"
+import (
+	"context"
+
+	"github.com/AiKeyLabs/pkg/aikeytime"
+)
 
 // ODSReader reads pending ODS records for projection.
 type ODSReader interface {
@@ -22,7 +26,7 @@ type ControlEventReader interface {
 	// FindByVirtualKeyAtTime finds the control event effective at the given time
 	// for the specified virtual_key_id.
 	// Returns nil if no matching event found.
-	FindByVirtualKeyAtTime(ctx context.Context, virtualKeyID string, eventTime interface{}) (*ControlEvent, error)
+	FindByVirtualKeyAtTime(ctx context.Context, virtualKeyID string, eventTime aikeytime.Millis) (*ControlEvent, error)
 }
 
 // DWDWriter writes enriched facts to the DWD layer.

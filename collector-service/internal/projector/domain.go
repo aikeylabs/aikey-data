@@ -3,7 +3,8 @@ package projector
 
 import (
 	"database/sql"
-	"time"
+
+	"github.com/AiKeyLabs/pkg/aikeytime"
 )
 
 // QualityStatus indicates data completeness of a DWD fact.
@@ -47,8 +48,8 @@ const (
 type ODSRecord struct {
 	OdsID                      int64
 	EventID                    string
-	EventTime                  time.Time
-	OccurredAt                 time.Time
+	EventTime                  aikeytime.Millis
+	OccurredAt                 aikeytime.Millis
 
 	OrgID                      string
 	AccountID                  sql.NullString
@@ -102,8 +103,8 @@ type ControlEvent struct {
 	CredentialRevision string
 	Revision           string // event-level monotonic counter
 	ProviderID         string
-	EffectiveFrom      time.Time
-	EffectiveTo        *time.Time
+	EffectiveFrom      aikeytime.Millis
+	EffectiveTo        *aikeytime.Millis
 	AfterSnapshotJSON  []byte
 }
 
@@ -111,9 +112,9 @@ type ControlEvent struct {
 type DWDFact struct {
 	EventID                    string
 	OdsID                      int64
-	OccurredAt                 time.Time
-	EventTime                  time.Time
-	UsageDate                  time.Time // date portion of EventTime
+	OccurredAt                 aikeytime.Millis
+	EventTime                  aikeytime.Millis
+	UsageDate                  string // ISO date "YYYY-MM-DD" in UTC
 
 	OrgID                      string
 	AccountID                  string

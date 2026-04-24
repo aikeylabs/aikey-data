@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"testing"
 	"time"
+
+	"github.com/AiKeyLabs/pkg/aikeytime"
 )
 
 // --- mocks ---
@@ -13,7 +15,7 @@ type mockControlReader struct {
 	events map[string]*ControlEvent // keyed by virtual_key_id
 }
 
-func (m *mockControlReader) FindByVirtualKeyAtTime(_ context.Context, vkID string, _ interface{}) (*ControlEvent, error) {
+func (m *mockControlReader) FindByVirtualKeyAtTime(_ context.Context, vkID string, _ aikeytime.Millis) (*ControlEvent, error) {
 	return m.events[vkID], nil
 }
 
@@ -29,7 +31,7 @@ func TestEnrich_Valid(t *testing.T) {
 			VirtualKeyID: "vk1",
 			ProviderID:   "prov1",
 			Revision:     "rev-001",
-			EffectiveFrom: time.Now().Add(-1 * time.Hour),
+			EffectiveFrom: aikeytime.FromTime(time.Now().Add(-1 * time.Hour)),
 		},
 	}}
 	enricher := NewEnricher(cr)
@@ -37,8 +39,8 @@ func TestEnrich_Valid(t *testing.T) {
 	rec := &ODSRecord{
 		OdsID:         1,
 		EventID:       "e1",
-		EventTime:     time.Now(),
-		OccurredAt:    time.Now(),
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
 		OrgID:         "org1",
 		AccountID:     sql.NullString{String: "acc1", Valid: true},
 		SeatID:        sql.NullString{String: "seat1", Valid: true},
@@ -77,8 +79,8 @@ func TestEnrich_NoVirtualKey(t *testing.T) {
 	rec := &ODSRecord{
 		OdsID:         2,
 		EventID:       "e2",
-		EventTime:     time.Now(),
-		OccurredAt:    time.Now(),
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
 		OrgID:         "org1",
 		RequestCount:  1,
 		RequestStatus: "success",
@@ -103,8 +105,8 @@ func TestEnrich_NoControlEvent(t *testing.T) {
 	rec := &ODSRecord{
 		OdsID:         3,
 		EventID:       "e3",
-		EventTime:     time.Now(),
-		OccurredAt:    time.Now(),
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
 		OrgID:         "org1",
 		VirtualKeyID:  sql.NullString{String: "vk_unknown", Valid: true},
 		RequestCount:  1,
@@ -130,7 +132,7 @@ func TestEnrich_OrgMismatch(t *testing.T) {
 			OrgID:         "org_other", // different org!
 			SeatID:        "seat1",
 			VirtualKeyID:  "vk1",
-			EffectiveFrom: time.Now().Add(-1 * time.Hour),
+			EffectiveFrom: aikeytime.FromTime(time.Now().Add(-1 * time.Hour)),
 		},
 	}}
 	enricher := NewEnricher(cr)
@@ -138,8 +140,8 @@ func TestEnrich_OrgMismatch(t *testing.T) {
 	rec := &ODSRecord{
 		OdsID:         4,
 		EventID:       "e4",
-		EventTime:     time.Now(),
-		OccurredAt:    time.Now(),
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
 		OrgID:         "org1",
 		VirtualKeyID:  sql.NullString{String: "vk1", Valid: true},
 		RequestCount:  1,
@@ -166,7 +168,7 @@ func TestEnrich_AccountMismatch_LateReport(t *testing.T) {
 			AccountID:     sql.NullString{String: "acc_different", Valid: true},
 			SeatID:        "seat1",
 			VirtualKeyID:  "vk1",
-			EffectiveFrom: time.Now().Add(-1 * time.Hour),
+			EffectiveFrom: aikeytime.FromTime(time.Now().Add(-1 * time.Hour)),
 		},
 	}}
 	enricher := NewEnricher(cr)
@@ -174,8 +176,8 @@ func TestEnrich_AccountMismatch_LateReport(t *testing.T) {
 	rec := &ODSRecord{
 		OdsID:         5,
 		EventID:       "e5",
-		EventTime:     time.Now(),
-		OccurredAt:    time.Now(),
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
 		OrgID:         "org1",
 		AccountID:     sql.NullString{String: "acc1", Valid: true},
 		SeatID:        sql.NullString{String: "seat1", Valid: true},
@@ -210,7 +212,7 @@ func TestEnrich_BindingMismatch(t *testing.T) {
 			BindingID:     sql.NullString{String: "bind_ce", Valid: true},
 			CredentialID:  "cred1",
 			ProviderID:    "prov1",
-			EffectiveFrom: time.Now().Add(-1 * time.Hour),
+			EffectiveFrom: aikeytime.FromTime(time.Now().Add(-1 * time.Hour)),
 		},
 	}}
 	enricher := NewEnricher(cr)
@@ -218,8 +220,8 @@ func TestEnrich_BindingMismatch(t *testing.T) {
 	rec := &ODSRecord{
 		OdsID:         10,
 		EventID:       "e10",
-		EventTime:     time.Now(),
-		OccurredAt:    time.Now(),
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
 		OrgID:         "org1",
 		AccountID:     sql.NullString{String: "acc1", Valid: true},
 		SeatID:        sql.NullString{String: "seat1", Valid: true},
@@ -250,7 +252,7 @@ func TestEnrich_CredentialMismatch(t *testing.T) {
 			VirtualKeyID:  "vk1",
 			CredentialID:  "cred_ce",
 			ProviderID:    "prov1",
-			EffectiveFrom: time.Now().Add(-1 * time.Hour),
+			EffectiveFrom: aikeytime.FromTime(time.Now().Add(-1 * time.Hour)),
 		},
 	}}
 	enricher := NewEnricher(cr)
@@ -258,8 +260,8 @@ func TestEnrich_CredentialMismatch(t *testing.T) {
 	rec := &ODSRecord{
 		OdsID:         11,
 		EventID:       "e11",
-		EventTime:     time.Now(),
-		OccurredAt:    time.Now(),
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
 		OrgID:         "org1",
 		SeatID:        sql.NullString{String: "seat1", Valid: true},
 		VirtualKeyID:  sql.NullString{String: "vk1", Valid: true},
@@ -287,7 +289,7 @@ func TestEnrich_KeyRevisionMismatch(t *testing.T) {
 			VirtualKeyID:       "vk1",
 			VirtualKeyRevision: "rev-2",
 			ProviderID:         "prov1",
-			EffectiveFrom:      time.Now().Add(-1 * time.Hour),
+			EffectiveFrom:      aikeytime.FromTime(time.Now().Add(-1 * time.Hour)),
 		},
 	}}
 	enricher := NewEnricher(cr)
@@ -295,8 +297,8 @@ func TestEnrich_KeyRevisionMismatch(t *testing.T) {
 	rec := &ODSRecord{
 		OdsID:              12,
 		EventID:            "e12",
-		EventTime:          time.Now(),
-		OccurredAt:         time.Now(),
+		EventTime:          aikeytime.Now(),
+		OccurredAt:         aikeytime.Now(),
 		OrgID:              "org1",
 		AccountID:          sql.NullString{String: "acc1", Valid: true},
 		SeatID:             sql.NullString{String: "seat1", Valid: true},
@@ -330,7 +332,7 @@ func TestEnrich_SeatEnrichedFromControlEvent(t *testing.T) {
 			SeatID:        "seat_from_ce",
 			VirtualKeyID:  "vk1",
 			ProviderID:    "prov1",
-			EffectiveFrom: time.Now().Add(-1 * time.Hour),
+			EffectiveFrom: aikeytime.FromTime(time.Now().Add(-1 * time.Hour)),
 		},
 	}}
 	enricher := NewEnricher(cr)
@@ -338,8 +340,8 @@ func TestEnrich_SeatEnrichedFromControlEvent(t *testing.T) {
 	rec := &ODSRecord{
 		OdsID:         6,
 		EventID:       "e6",
-		EventTime:     time.Now(),
-		OccurredAt:    time.Now(),
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
 		OrgID:         "org1",
 		VirtualKeyID:  sql.NullString{String: "vk1", Valid: true},
 		RequestCount:  1,

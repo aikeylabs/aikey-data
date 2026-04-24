@@ -2,7 +2,7 @@
 package ingest
 
 import (
-	"time"
+	"github.com/AiKeyLabs/pkg/aikeytime"
 )
 
 // SupportedSchemaVersions lists the event schema versions this collector can process.
@@ -30,11 +30,14 @@ type UsageEvent struct {
 	ProxyConfigVersion   string `json:"proxy_config_version,omitempty"`
 	ProxyLoadedControlSeq *int64 `json:"proxy_loaded_control_seq,omitempty"`
 
-	// timestamps — event_time is the authoritative local client time (D4)
-	EventTime  time.Time  `json:"event_time"`
-	OccurredAt time.Time  `json:"occurred_at"`
-	StartedAt  *time.Time `json:"started_at,omitempty"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	// timestamps: int64 Unix epoch milliseconds (UTC). Wire format switched
+	// from RFC3339 in v1.0.3-alpha — see design doc
+	// roadmap20260320/技术实现/update/20260424-时间戳统一为int64毫秒-data-service.md.
+	// event_time is the authoritative proxy-reported instant (D4).
+	EventTime  aikeytime.Millis  `json:"event_time"`
+	OccurredAt aikeytime.Millis  `json:"occurred_at"`
+	StartedAt  *aikeytime.Millis `json:"started_at,omitempty"`
+	FinishedAt *aikeytime.Millis `json:"finished_at,omitempty"`
 
 	// ownership
 	OrgID                 string `json:"org_id"`

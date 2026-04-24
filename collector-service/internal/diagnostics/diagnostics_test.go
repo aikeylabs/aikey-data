@@ -15,7 +15,45 @@ import (
 // setupTestDB creates an in-memory SQLite DB with the minimal ODS/DWD schema
 // used by diagnostics. We keep the schema local to this test to avoid coupling
 // to migrations — only the columns diagnostics reads are needed.
+//
+// Post v1.0.3-alpha the production schema stores ingest_received_at /
+// projected_at as INTEGER millis. We declare the same here so scanTime is
+// exercised against the real column affinity (driver returns int64, not
+// string). setupTestDBLegacyText exists for the one test that needs to
+// exercise the text-timestamp fallback path.
 func setupTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE usage_event_ods (
+			ods_id INTEGER PRIMARY KEY,
+			event_id TEXT,
+			org_id TEXT,
+			virtual_key_id TEXT,
+			ingest_received_at INTEGER,
+			dwd_status TEXT
+		);
+		CREATE TABLE usage_fact_dwd (
+			event_id TEXT,
+			org_id TEXT,
+			projected_at INTEGER
+		);
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// setupTestDBLegacyText exercises scanTime's text-timestamp fallback path
+// — the branch we need to keep working for any DB upgraded from pre-v1.0.3
+// formats or hand-seeded fixtures. The legacy text paths were the only
+// thing scanTime knew about before bugfix 20260424 review finding #4.
+func setupTestDBLegacyText(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -43,7 +81,11 @@ func setupTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-func insertODS(t *testing.T, db *sql.DB, eventID, orgID, ingest, status string) {
+// insertODS / insertDWD accept `ingest` / `projectedAt` as either int64
+// (v1.0.3-alpha-style millis) or string (legacy text). SQLite's dynamic
+// affinity stores whatever we bind; scanTime must interpret correctly
+// regardless.
+func insertODS(t *testing.T, db *sql.DB, eventID, orgID string, ingest any, status string) {
 	t.Helper()
 	_, err := db.Exec(
 		`INSERT INTO usage_event_ods (event_id, org_id, virtual_key_id, ingest_received_at, dwd_status)
@@ -55,7 +97,7 @@ func insertODS(t *testing.T, db *sql.DB, eventID, orgID, ingest, status string) 
 	}
 }
 
-func insertDWD(t *testing.T, db *sql.DB, eventID, orgID, projectedAt string) {
+func insertDWD(t *testing.T, db *sql.DB, eventID, orgID string, projectedAt any) {
 	t.Helper()
 	_, err := db.Exec(
 		`INSERT INTO usage_fact_dwd (event_id, org_id, projected_at) VALUES (?, ?, ?)`,
@@ -66,6 +108,11 @@ func insertDWD(t *testing.T, db *sql.DB, eventID, orgID, projectedAt string) {
 	}
 }
 
+// millisAt is a small helper to make the intent "write an int64
+// timestamp at this wall time" explicit in tests that used to pass
+// formatted strings.
+func millisAt(t time.Time) int64 { return t.UTC().UnixMilli() }
+
 // TestCanaryWatermarks_UsesODSDwdStatus verifies the canary DWD watermark
 // comes from usage_event_ods.dwd_status='projected', NOT usage_fact_dwd.
 // Regression guard: before 2026-04-17 the projector excluded canaries from
@@ -74,11 +121,11 @@ func insertDWD(t *testing.T, db *sql.DB, eventID, orgID, projectedAt string) {
 func TestCanaryWatermarks_UsesODSDwdStatus(t *testing.T) {
 	db := setupTestDB(t)
 	now := time.Now().UTC()
-	recent := now.Add(-1 * time.Minute).Format("2006-01-02 15:04:05")
-	stale := now.Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+	recent := millisAt(now.Add(-1 * time.Minute))
+	stale := millisAt(now.Add(-24 * time.Hour))
 
 	insertODS(t, db, "canary-1", "__canary__", recent, "projected")
-	insertODS(t, db, "canary-2", "__canary__", now.Format("2006-01-02 15:04:05"), "pending")
+	insertODS(t, db, "canary-2", "__canary__", millisAt(now), "pending")
 	// Stale DWD row with org_id='__canary__' — must be ignored now
 	insertDWD(t, db, "legacy-canary", "__canary__", stale)
 
@@ -103,8 +150,8 @@ func TestCanaryWatermarks_UsesODSDwdStatus(t *testing.T) {
 func TestCanaryWatermarks_OnlyProjectedAcks(t *testing.T) {
 	db := setupTestDB(t)
 	now := time.Now().UTC()
-	newPending := now.Format("2006-01-02 15:04:05")
-	oldProjected := now.Add(-10 * time.Minute).Format("2006-01-02 15:04:05")
+	newPending := millisAt(now)
+	oldProjected := millisAt(now.Add(-10 * time.Minute))
 
 	insertODS(t, db, "canary-old", "__canary__", oldProjected, "projected")
 	insertODS(t, db, "canary-new", "__canary__", newPending, "pending")
@@ -122,7 +169,7 @@ func TestCanaryWatermarks_OnlyProjectedAcks(t *testing.T) {
 // TestBusinessWatermarks_ExcludesCanary verifies business queries ignore canaries.
 func TestBusinessWatermarks_ExcludesCanary(t *testing.T) {
 	db := setupTestDB(t)
-	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	now := millisAt(time.Now().UTC())
 	insertODS(t, db, "biz-1", "org-a", now, "projected")
 	insertODS(t, db, "canary-1", "__canary__", now, "projected")
 	insertDWD(t, db, "biz-1", "org-a", now)
@@ -148,7 +195,7 @@ func TestBusinessWatermarks_ExcludesCanary(t *testing.T) {
 // usage_fact_dwd (which never contains canary rows).
 func TestHandleCanaryCheck_DWDFromODSDwdStatus(t *testing.T) {
 	db := setupTestDB(t)
-	now := time.Now().UTC().Format("2006-01-02 15:04:05")
+	now := millisAt(time.Now().UTC())
 
 	insertODS(t, db, "canary-acked", "__canary__", now, "projected")
 	insertODS(t, db, "canary-pending", "__canary__", now, "pending")
@@ -235,4 +282,39 @@ func TestEvaluateHealth_DegradedAtProjector_OnlyWhenCanaryStaleButODSFresh(t *te
 	if stage == nil || *stage != "projector" {
 		t.Errorf("expected stage=projector, got %v", stage)
 	}
+}
+
+// TestScanTime_AcceptsIntegerMillisAndLegacyText is the direct regression
+// guard for bugfix 20260424 review finding #4: scanTime must work against
+// both v1.0.3-alpha INTEGER columns (int64 millis) and any pre-existing
+// TEXT columns whose data wasn't migrated. Neither path should degrade
+// silently.
+func TestScanTime_AcceptsIntegerMillisAndLegacyText(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+
+	t.Run("INTEGER millis schema (post v1.0.3-alpha)", func(t *testing.T) {
+		db := setupTestDB(t)
+		insertODS(t, db, "e1", "__canary__", millisAt(now), "projected")
+		wm := queryCanaryWatermarks(context.Background(), db)
+		if wm.ODSLatestIngestedAt == nil {
+			t.Fatal("expected watermark from INTEGER column")
+		}
+		delta := now.Sub(*wm.ODSLatestIngestedAt).Abs()
+		if delta > time.Second {
+			t.Errorf("watermark drift from int64 scan = %v (>1s)", delta)
+		}
+	})
+
+	t.Run("TEXT schema (legacy fallback)", func(t *testing.T) {
+		db := setupTestDBLegacyText(t)
+		insertODS(t, db, "e2", "__canary__", now.Format("2006-01-02 15:04:05"), "projected")
+		wm := queryCanaryWatermarks(context.Background(), db)
+		if wm.ODSLatestIngestedAt == nil {
+			t.Fatal("expected watermark from TEXT column")
+		}
+		delta := now.Sub(*wm.ODSLatestIngestedAt).Abs()
+		if delta > time.Second {
+			t.Errorf("watermark drift from text scan = %v (>1s)", delta)
+		}
+	})
 }

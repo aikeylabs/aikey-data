@@ -19,6 +19,13 @@ func (m *mockRepo) PersonalTimeline(_ context.Context, p usage.QueryParams) ([]u
 	}, nil
 }
 
+func (m *mockRepo) PersonalHourlyTimeline(_ context.Context, p usage.QueryParams) ([]usage.HourlyPoint, error) {
+	return []usage.HourlyPoint{
+		{Hour: 9, TotalTokens: 400, RequestCount: 2},
+		{Hour: 14, TotalTokens: 1600, RequestCount: 8},
+	}, nil
+}
+
 func (m *mockRepo) PersonalByProtocolTimeline(_ context.Context, p usage.QueryParams) ([]usage.ProtocolTimelinePoint, error) {
 	return []usage.ProtocolTimelinePoint{
 		{Date: "2026-03-01", ProtocolType: "openai", TotalTokens: 800, RequestCount: 4},
@@ -137,5 +144,46 @@ func TestMasterRanking_MissingOrgID(t *testing.T) {
 
 	if w.Code != 400 {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+// --- PersonalHourlyTimeline ---
+
+func TestPersonalHourlyTimeline_OK(t *testing.T) {
+	h := NewUsageHandler(&mockRepo{})
+	req := httptest.NewRequest("GET", "/v1/usage/personal/hourly?seat_id=seat1&date=2026-04-24", nil)
+	w := httptest.NewRecorder()
+	h.PersonalHourlyTimeline(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	var result []usage.HourlyPoint
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result) != 2 {
+		t.Errorf("expected 2 points from mock, got %d", len(result))
+	}
+}
+
+func TestPersonalHourlyTimeline_MissingIdentity(t *testing.T) {
+	h := NewUsageHandler(&mockRepo{})
+	req := httptest.NewRequest("GET", "/v1/usage/personal/hourly", nil)
+	w := httptest.NewRecorder()
+	h.PersonalHourlyTimeline(w, req)
+
+	if w.Code != 400 {
+		t.Fatalf("expected 400 (no seat_id/account_id/org_id=personal), got %d", w.Code)
+	}
+}
+
+func TestPersonalHourlyTimeline_PersonalEdition(t *testing.T) {
+	h := NewUsageHandler(&mockRepo{})
+	req := httptest.NewRequest("GET", "/v1/usage/personal/hourly?org_id=personal", nil)
+	w := httptest.NewRecorder()
+	h.PersonalHourlyTimeline(w, req)
+	if w.Code != 200 {
+		t.Fatalf("personal-edition path should accept org_id=personal: got %d body=%s", w.Code, w.Body.String())
 	}
 }

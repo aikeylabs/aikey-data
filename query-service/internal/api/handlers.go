@@ -41,6 +41,42 @@ func (h *UsageHandler) PersonalTimeline(w http.ResponseWriter, r *http.Request) 
 	shared.JSON(w, http.StatusOK, data)
 }
 
+// GET /v1/usage/personal/hourly?seat_id=...&date=YYYY-MM-DD
+// Returns intra-day (hourly, UTC) usage buckets for a single calendar
+// date. `date` defaults to the server's current UTC day; the endpoint
+// intentionally ignores end_date because the bucket shape only makes
+// sense for a single day.
+func (h *UsageHandler) PersonalHourlyTimeline(w http.ResponseWriter, r *http.Request) {
+	p, err := parsePersonalParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	// Override date range: collapse to a single day. If the client
+	// passed date=YYYY-MM-DD via start_date (which parsePersonalParams
+	// already folded in), we use it; otherwise default to today UTC.
+	q := r.URL.Query()
+	if ds := q.Get("date"); ds != "" {
+		if t, err := time.Parse("2006-01-02", ds); err == nil {
+			p.StartDate = t
+		}
+	}
+	if p.StartDate.IsZero() {
+		p.StartDate = time.Now().UTC().Truncate(24 * time.Hour)
+	}
+	p.EndDate = p.StartDate
+	data, err := h.repo.PersonalHourlyTimeline(r.Context(), p)
+	if err != nil {
+		slog.Error("PersonalHourlyTimeline query failed", "error", err)
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	if data == nil {
+		data = []usage.HourlyPoint{}
+	}
+	shared.JSON(w, http.StatusOK, data)
+}
+
 // GET /v1/usage/personal/by-protocol/timeline?seat_id=...&start_date=...&end_date=...
 func (h *UsageHandler) PersonalByProtocolTimeline(w http.ResponseWriter, r *http.Request) {
 	p, err := parsePersonalParams(r)

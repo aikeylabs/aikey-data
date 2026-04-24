@@ -34,6 +34,18 @@ make build
 ./bin/collector-service
 ```
 
+## 时间戳存储规范（v1.0.3-alpha+）
+
+所有 usage 管道时间字段（`event_time` / `occurred_at` / `started_at` / `finished_at` / `projected_at` / `ingest_received_at` / `collector_time` / `dwd_next_retry_at`）在 SQLite（personal / trial）下以 **int64 Unix 毫秒时间戳（UTC）** 存储；在 PostgreSQL（生产）下仍为 **TIMESTAMPTZ**。
+
+Go 代码统一使用 `aikeytime.Millis` 作为结构体字段类型，`shared.DB.BindMillis(m)` 按方言下发正确的驱动参数。Proxy → Collector 线上 JSON wire 为 int64 毫秒：
+
+```json
+{ "event_time": 1777041000000, "occurred_at": 1777041000000 }
+```
+
+详见设计文档 `roadmap20260320/技术实现/update/20260424-时间戳统一为int64毫秒-data-service.md` 与修复记录 `workflow/CI/bugfix/20260424-today-use-card-empty.md`。
+
 ## API
 
 ### `POST /v1/usage-events:batch`

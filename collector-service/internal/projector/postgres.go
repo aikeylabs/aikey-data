@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
+	"github.com/AiKeyLabs/pkg/aikeytime"
 )
 
 // --- ODSReader ---
@@ -43,7 +44,13 @@ LIMIT ?
 `
 
 func (r *postgresODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord, error) {
-	query := fmt.Sprintf(fetchPendingTpl, r.db.Now())
+	// dwd_next_retry_at is an int64-millis column on SQLite (v1.0.3-alpha)
+	// and TIMESTAMPTZ on Postgres. Compare against NowMillis() which
+	// produces the right per-dialect expression. Using plain Now() here
+	// would emit datetime('now') on SQLite, and a TEXT-to-INTEGER
+	// lexicographic compare would match every retry row on every scan
+	// (hot loop). See bugfix 20260424 review finding #1.
+	query := fmt.Sprintf(fetchPendingTpl, r.db.NowMillis())
 	rows, err := r.db.QueryContext(ctx, query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("fetch pending ods: %w", err)
@@ -81,7 +88,9 @@ func (r *postgresODSReader) MarkProjected(ctx context.Context, odsID int64) erro
 
 func (r *postgresODSReader) MarkRetry(ctx context.Context, odsID int64, retryCount int, errCode, errMsg string) error {
 	// Compute retry time in Go to avoid PG-specific interval arithmetic.
-	nextRetryAt := time.Now().Add(retryDelay(retryCount))
+	// Wrap as aikeytime.Millis so the dialect-aware bind helper emits the
+	// right driver type (int64 for SQLite INTEGER, time.Time for PG TIMESTAMPTZ).
+	nextRetryAt := aikeytime.FromTime(time.Now().Add(retryDelay(retryCount)))
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE usage_event_ods
 		 SET dwd_status = 'retry',
@@ -90,7 +99,7 @@ func (r *postgresODSReader) MarkRetry(ctx context.Context, odsID int64, retryCou
 		     dwd_last_error_code = ?,
 		     dwd_last_error_msg = ?
 		 WHERE ods_id = ?`,
-		retryCount, nextRetryAt, errCode, errMsg, odsID)
+		retryCount, r.db.BindMillis(nextRetryAt), errCode, errMsg, odsID)
 	return err
 }
 
@@ -140,8 +149,9 @@ ORDER BY effective_from DESC
 LIMIT 1
 `
 
-func (r *postgresControlEventReader) FindByVirtualKeyAtTime(ctx context.Context, virtualKeyID string, eventTime interface{}) (*ControlEvent, error) {
-	row := r.db.QueryRowContext(ctx, findControlEventSQL, virtualKeyID, eventTime, eventTime)
+func (r *postgresControlEventReader) FindByVirtualKeyAtTime(ctx context.Context, virtualKeyID string, eventTime aikeytime.Millis) (*ControlEvent, error) {
+	bound := r.db.BindMillis(eventTime)
+	row := r.db.QueryRowContext(ctx, findControlEventSQL, virtualKeyID, bound, bound)
 	var ce ControlEvent
 	err := row.Scan(
 		&ce.EventID, &ce.OrgID, &ce.AccountID, &ce.ChangeType, &ce.EntityType,
@@ -165,6 +175,12 @@ type postgresDWDWriter struct{ db *shared.DB }
 
 func NewPostgresDWDWriter(db *shared.DB) DWDWriter { return &postgresDWDWriter{db: db} }
 
+// projected_at is set explicitly from Go (aikeytime.Now()) rather than
+// relying on the SQL DEFAULT. Why: the v1.0.3-alpha migration's
+// ADD COLUMN path drops the DEFAULT expression, so an upgraded trial
+// DB would leave projected_at NULL on new inserts. Always binding from
+// Go makes upgraded and fresh installs behaviour-identical. See
+// bugfix 20260424 review finding #2.
 const dwdColumns = `event_id, ods_id, occurred_at, event_time, usage_date,
     org_id, account_id, seat_id,
     virtual_key_id, virtual_key_revision, virtual_key_alias, virtual_key_hash,
@@ -178,7 +194,7 @@ const dwdColumns = `event_id, ods_id, occurred_at, event_time, usage_date,
     request_status, http_status_code, upstream_request_id,
     completion_source, quality_status, validation_code, validation_message,
     anomaly_type, anomaly_reason, billing_scope, user_usage_scope,
-    control_event_id, control_event_revision, projector_version`
+    control_event_id, control_event_revision, projector_version, projected_at`
 
 const dwdPlaceholders = `?,?,?,?,?,
     ?,?,?,
@@ -193,14 +209,18 @@ const dwdPlaceholders = `?,?,?,?,?,
     ?,?,?,
     ?,?,?,?,
     ?,?,?,?,
-    ?,?,?`
+    ?,?,?,?`
 
 func (w *postgresDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 	insertDWDSQL := w.db.InsertOrIgnoreOn("usage_fact_dwd", dwdColumns, dwdPlaceholders, "org_id, event_id")
 	res, err := w.db.ExecContext(ctx, insertDWDSQL,
-		// Why: SQLite stores time.Time as its default String() format (e.g. "2026-04-08 08:00:00 +0800 CST")
-		// which breaks date range queries. Format UsageDate as ISO date for cross-dialect compatibility.
-		f.EventID, f.OdsID, f.OccurredAt, f.EventTime, f.UsageDate.Format("2006-01-02"),
+		// Why int64 millis (via BindMillis) instead of time.Time: Go's default
+		// time.Time String() format contains a local tz suffix (e.g. "+0800
+		// CST") that SQLite's date functions cannot parse, which broke
+		// strftime-based hour bucketing (see bugfix 20260424). β-hybrid on
+		// Postgres: BindMillis returns time.Time so TIMESTAMPTZ still works.
+		// UsageDate stays as an ISO "YYYY-MM-DD" string for BETWEEN queries.
+		f.EventID, f.OdsID, w.db.BindMillis(f.OccurredAt), w.db.BindMillis(f.EventTime), f.UsageDate,
 		f.OrgID, f.AccountID, f.SeatID,
 		f.VirtualKeyID, f.VirtualKeyRevision, f.VirtualKeyAlias, f.VirtualKeyHash,
 		f.BindingID, f.BindingAlias,
@@ -213,7 +233,7 @@ func (w *postgresDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error
 		f.RequestStatus, f.HTTPStatusCode, f.UpstreamRequestID,
 		f.CompletionSource, string(f.QualityStatus), f.ValidationCode, f.ValidationMessage,
 		string(f.AnomalyType), f.AnomalyReason, string(f.BillingScope), string(f.UserUsageScope),
-		f.ControlEventID, f.ControlEventRevision, f.ProjectorVersion,
+		f.ControlEventID, f.ControlEventRevision, f.ProjectorVersion, w.db.BindMillis(aikeytime.Now()),
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert dwd fact %s: %w", f.EventID, err)

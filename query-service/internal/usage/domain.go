@@ -10,6 +10,17 @@ type TimelinePoint struct {
 	RequestCount int64 `json:"request_count"`
 }
 
+// HourlyPoint is an intra-day usage bucket — one slot per hour for a
+// given UTC date. Used by the overview "Today used" card to render a
+// 24-bar intra-day distribution. The hour field is 0..23 in UTC (same
+// timezone basis as TimelinePoint's date), so clients display after
+// converting to their local zone if desired.
+type HourlyPoint struct {
+	Hour         int   `json:"hour"`          // 0..23 (UTC)
+	TotalTokens  int64 `json:"total_tokens"`
+	RequestCount int64 `json:"request_count"`
+}
+
 // ProtocolTimelinePoint adds provider dimension to a timeline point.
 // JSON field is "protocol_type" for backward compatibility, but the value
 // is provider_code (e.g. "kimi", "anthropic") not the wire protocol.

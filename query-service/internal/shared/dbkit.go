@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/AiKeyLabs/pkg/aikeytime"
 )
 
 const (
@@ -56,6 +58,94 @@ func (d *DB) Now() string {
 }
 
 func (d *DB) IsSQLite() bool { return d.Dialect == DialectSQLite }
+
+// HourBucket returns a dialect-specific SQL expression that extracts
+// the UTC hour (0..23 as INTEGER) from a timestamp column. Intended
+// for use inside SELECT lists or GROUP BY clauses where the produced
+// expression is interpolated via fmt.Sprintf.
+//
+// Storage convention after v1.0.3-alpha (β-hybrid):
+//   - SQLite column is INTEGER holding Unix epoch milliseconds (UTC).
+//     Extract hour via strftime on the seconds-resolution view of the
+//     millis, with the 'unixepoch' modifier so SQLite interprets the
+//     value as epoch rather than an ISO string.
+//   - Postgres column is TIMESTAMPTZ. Extract UTC hour as before.
+//
+// Why we switched from strftime on the raw text: the text path broke
+// because Go's default time.Time String() format ("2026-04-24
+// 14:30:00 +0800 CST") is not recognised by strftime — the query
+// returned NULL and the endpoint 500'd. Design doc:
+// roadmap20260320/技术实现/update/20260424-时间戳统一为int64毫秒-data-service.md
+func (d *DB) HourBucket(col string) string {
+	if d.Dialect == DialectSQLite {
+		// col / 1000 truncates to whole seconds; 'unixepoch' tells
+		// strftime to treat the integer as Unix seconds (UTC).
+		return fmt.Sprintf("CAST(strftime('%%H', %s / 1000, 'unixepoch') AS INTEGER)", col)
+	}
+	return fmt.Sprintf("CAST(EXTRACT(HOUR FROM %s AT TIME ZONE 'UTC') AS INTEGER)", col)
+}
+
+// BindMillis and BindMillisPtr mirror the collector-service helpers
+// (see aikey-data/collector-service/internal/shared/dbkit.go) so
+// query-service write / filter sites can bind aikeytime.Millis values
+// without every caller branching on dialect. The query-service is
+// read-mostly but still binds startDate / endDate filters on millis
+// columns, so this helper centralises the β-hybrid bind policy.
+func (d *DB) BindMillis(m aikeytime.Millis) any {
+	if m.IsZero() {
+		return nil
+	}
+	if d.Dialect == DialectSQLite {
+		return m.Int64()
+	}
+	return m.Time()
+}
+
+func (d *DB) BindMillisPtr(m *aikeytime.Millis) any {
+	if m == nil || m.IsZero() {
+		return nil
+	}
+	if d.Dialect == DialectSQLite {
+		return m.Int64()
+	}
+	return m.Time()
+}
+
+// DateString returns a dialect-specific SELECT expression that
+// projects a DATE-typed column as YYYY-MM-DD text. In Postgres a
+// cast to `::text` is required; in SQLite the column is already
+// stored as TEXT (the schema uses TEXT for usage_date), so the
+// column name is returned verbatim.
+//
+// Prior to 2026-04-24, repository code hard-coded `usage_date::text`
+// and relied on the dbkit rewrite step stripping `::text` on SQLite
+// (stripPgCasts). That works, but leaves an implicit dependency on
+// regex-level rewriting; making the dialect choice explicit through
+// this helper removes the magic.
+func (d *DB) DateString(col string) string {
+	if d.Dialect == DialectSQLite {
+		return col
+	}
+	return col + "::text"
+}
+
+// DateOf returns a SQL expression that projects a timestamp column
+// (INTEGER millis on SQLite, TIMESTAMPTZ on Postgres) as a DATE.
+//
+//   - SQLite: DATE(col/1000, 'unixepoch') — 'unixepoch' tells SQLite
+//     to treat the int as seconds since epoch UTC. Without it, the
+//     legacy DATE(event_time) returned NULL on INTEGER input and
+//     silently dropped rows.
+//   - Postgres: DATE(col AT TIME ZONE 'UTC') — explicit UTC so
+//     intra-day boundary behavior matches SQLite.
+//
+// See bugfix 20260424 review finding #3.
+func (d *DB) DateOf(col string) string {
+	if d.Dialect == DialectSQLite {
+		return fmt.Sprintf("DATE(%s/1000, 'unixepoch')", col)
+	}
+	return fmt.Sprintf("DATE(%s AT TIME ZONE 'UTC')", col)
+}
 
 func (d *DB) rewrite(query string) string {
 	// SQLite: strip PostgreSQL-style type casts (e.g. ::text, ::integer).
