@@ -10,11 +10,16 @@ import (
 	"github.com/AiKeyLabs/pkg/aikeytime"
 )
 
-type postgresODS struct{ db *shared.DB }
+type sqlODS struct{ db *shared.DB }
 
-// NewPostgresODSRepository creates an ODS repository backed by PostgreSQL.
-func NewPostgresODSRepository(db *shared.DB) ODSRepository {
-	return &postgresODS{db: db}
+// NewSQLODSRepository creates an ODS repository backed by either
+// PostgreSQL or SQLite — dialect differences are abstracted by
+// shared.DB (see internal/shared/dbkit.go). Renamed from
+// postgresODS/NewPostgresODSRepository 2026-04-24 because the file
+// name implied PG-only but the implementation has always been
+// dual-dialect via dbkit.
+func NewSQLODSRepository(db *shared.DB) ODSRepository {
+	return &sqlODS{db: db}
 }
 
 // ingest_received_at / collector_time are set explicitly from Go here
@@ -57,7 +62,7 @@ const odsPlaceholders = `?,?,?,?,?,
     ?,?,?,?,?,
     ?,?,?,?`
 
-func (r *postgresODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte) (bool, error) {
+func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte) (bool, error) {
 	insertODS := r.db.InsertOrIgnoreOn("usage_event_ods", odsColumns, odsPlaceholders, "org_id, event_id")
 	res, err := r.db.ExecContext(ctx, insertODS,
 		e.EventID, nullStr(e.RequestID), nullStr(e.TraceID), nullStr(e.ProxyInstanceID), nullStr(e.DeviceID),

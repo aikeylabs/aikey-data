@@ -41,14 +41,14 @@ func New(db *sql.DB, cfg Config) Result {
 
 	ddb := shared.NewDB(db, cfg.DBDialect)
 
-	odsRepo := ingest.NewPostgresODSRepository(ddb)
+	odsRepo := ingest.NewSQLODSRepository(ddb)
 	ingestSvc := ingest.NewService(odsRepo)
 	ingestHandler := api.NewIngestHandler(ingestSvc)
 
-	odsReader := projector.NewPostgresODSReader(ddb)
-	dwdWriter := projector.NewPostgresDWDWriter(ddb)
-	checkpoint := projector.NewPostgresCheckpointStore(ddb)
-	ctrlReader := projector.NewPostgresControlEventReader(ddb)
+	odsReader := projector.NewSQLODSReader(ddb)
+	dwdWriter := projector.NewSQLDWDWriter(ddb)
+	checkpoint := projector.NewSQLCheckpointStore(ddb)
+	ctrlReader := projector.NewSQLControlEventReader(ddb)
 	enricher := projector.NewEnricher(ctrlReader)
 	projWorker := projector.NewWorker(odsReader, dwdWriter, checkpoint, enricher)
 

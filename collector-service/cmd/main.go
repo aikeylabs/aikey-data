@@ -55,15 +55,15 @@ func main() {
 	ddb := shared.NewDB(db, shared.DialectPostgres)
 
 	// Assemble dependencies — ingest
-	odsRepo := ingest.NewPostgresODSRepository(ddb)
+	odsRepo := ingest.NewSQLODSRepository(ddb)
 	ingestSvc := ingest.NewService(odsRepo)
 	ingestHandler := api.NewIngestHandler(ingestSvc)
 
 	// Assemble dependencies — projector
-	odsReader := projector.NewPostgresODSReader(ddb)
-	dwdWriter := projector.NewPostgresDWDWriter(ddb)
-	checkpoint := projector.NewPostgresCheckpointStore(ddb)
-	controlReader := projector.NewPostgresControlEventReader(ddb)
+	odsReader := projector.NewSQLODSReader(ddb)
+	dwdWriter := projector.NewSQLDWDWriter(ddb)
+	checkpoint := projector.NewSQLCheckpointStore(ddb)
+	controlReader := projector.NewSQLControlEventReader(ddb)
 	enricher := projector.NewEnricher(controlReader)
 	projWorker := projector.NewWorker(odsReader, dwdWriter, checkpoint, enricher)
 

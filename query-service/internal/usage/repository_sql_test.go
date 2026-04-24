@@ -10,9 +10,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// The repo is named "postgresRepo" but shared.DB abstracts the dialect,
-// so the same repo works against SQLite in-memory. These tests exercise
-// the SQLite code path (including the dialect-branching inside
+// The repo (sqlRepo) works against SQLite in-memory thanks to
+// shared.DB abstracting the dialect. These tests exercise the SQLite
+// code path (including the dialect-branching inside
 // PersonalHourlyTimeline). A PG integration test would need a live
 // Postgres instance, which we don't run in CI — the Postgres path is
 // covered separately by the dialect unit tests in dbkit_test.go.
@@ -124,7 +124,7 @@ func TestPersonalHourlyTimeline_AggregatesByHour(t *testing.T) {
 		{hour: 23, tokens: 300, reqs: 3},
 	})
 
-	repo := NewPostgresRepository(db)
+	repo := NewSQLRepository(db)
 	day, _ := time.Parse("2006-01-02", date)
 	points, err := repo.PersonalHourlyTimeline(context.Background(), QueryParams{
 		SeatID:    "seat1",
@@ -166,7 +166,7 @@ func TestPersonalHourlyTimeline_ExcludesOtherDays(t *testing.T) {
 		})
 	}
 
-	repo := NewPostgresRepository(db)
+	repo := NewSQLRepository(db)
 	day, _ := time.Parse("2006-01-02", "2026-04-24")
 	points, err := repo.PersonalHourlyTimeline(context.Background(), QueryParams{
 		SeatID:    "seat1",
@@ -194,7 +194,7 @@ func TestPersonalHourlyTimeline_FiltersBySeat(t *testing.T) {
 		reqs   int64
 	}{{hour: 9, tokens: 999, reqs: 9}})
 
-	repo := NewPostgresRepository(db)
+	repo := NewSQLRepository(db)
 	day, _ := time.Parse("2006-01-02", date)
 	points, err := repo.PersonalHourlyTimeline(context.Background(), QueryParams{
 		SeatID:    "seat1",
@@ -210,7 +210,7 @@ func TestPersonalHourlyTimeline_FiltersBySeat(t *testing.T) {
 
 func TestPersonalHourlyTimeline_EmptyDay(t *testing.T) {
 	db := setupUsageTestDB(t)
-	repo := NewPostgresRepository(db)
+	repo := NewSQLRepository(db)
 	day, _ := time.Parse("2006-01-02", "2026-04-24")
 	points, err := repo.PersonalHourlyTimeline(context.Background(), QueryParams{
 		SeatID:    "seat1",
@@ -259,7 +259,7 @@ func TestPersonalTimeline_AggregatesByDay(t *testing.T) {
 	insertDailyRow(t, db, "2026-04-20", "seat1", "org1", "anthropic", "org_and_user", 50, 1)
 	insertDailyRow(t, db, "2026-04-21", "seat1", "org1", "openai", "org_and_user", 200, 2)
 
-	repo := NewPostgresRepository(db)
+	repo := NewSQLRepository(db)
 	start, _ := time.Parse("2006-01-02", "2026-04-01") // wide margin — see file note
 	end, _ := time.Parse("2006-01-02", "2026-04-30")
 	points, err := repo.PersonalTimeline(context.Background(), QueryParams{
@@ -287,7 +287,7 @@ func TestPersonalTimeline_FiltersBySeat(t *testing.T) {
 	insertDailyRow(t, db, "2026-04-20", "seat1", "org1", "openai", "org_and_user", 100, 1)
 	insertDailyRow(t, db, "2026-04-20", "seat2", "org1", "openai", "org_and_user", 999, 9)
 
-	repo := NewPostgresRepository(db)
+	repo := NewSQLRepository(db)
 	start, _ := time.Parse("2006-01-02", "2026-04-01")
 	end, _ := time.Parse("2006-01-02", "2026-04-30")
 	points, err := repo.PersonalTimeline(context.Background(), QueryParams{
@@ -311,7 +311,7 @@ func TestPersonalByProtocolTimeline_GroupsByDayAndProvider(t *testing.T) {
 	insertDailyRow(t, db, "2026-04-20", "seat1", "org1", "anthropic", "org_and_user", 50, 1)
 	insertDailyRow(t, db, "2026-04-21", "seat1", "org1", "openai", "org_and_user", 200, 2)
 
-	repo := NewPostgresRepository(db)
+	repo := NewSQLRepository(db)
 	start, _ := time.Parse("2006-01-02", "2026-04-01")
 	end, _ := time.Parse("2006-01-02", "2026-04-30")
 	points, err := repo.PersonalByProtocolTimeline(context.Background(), QueryParams{
@@ -342,7 +342,7 @@ func TestMasterTimeline_FiltersByBillingScope(t *testing.T) {
 	insertDailyRow(t, db, "2026-04-20", "seat1", "org1", "openai", "org_and_user", 100, 1)
 	insertDailyRow(t, db, "2026-04-20", "seat2", "org1", "openai", "user_only", 999, 9) // excluded
 
-	repo := NewPostgresRepository(db)
+	repo := NewSQLRepository(db)
 	start, _ := time.Parse("2006-01-02", "2026-04-01")
 	end, _ := time.Parse("2006-01-02", "2026-04-30")
 	points, err := repo.MasterTimeline(context.Background(), QueryParams{
@@ -366,7 +366,7 @@ func TestMasterTimeline_FiltersByOrg(t *testing.T) {
 	insertDailyRow(t, db, "2026-04-20", "seat1", "org1", "openai", "org_and_user", 100, 1)
 	insertDailyRow(t, db, "2026-04-20", "seat1", "org2", "openai", "org_and_user", 999, 9)
 
-	repo := NewPostgresRepository(db)
+	repo := NewSQLRepository(db)
 	start, _ := time.Parse("2006-01-02", "2026-04-01")
 	end, _ := time.Parse("2006-01-02", "2026-04-30")
 	points, err := repo.MasterTimeline(context.Background(), QueryParams{
@@ -397,7 +397,7 @@ func TestPersonalHourlyTimeline_OrgIDPersonal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo := NewPostgresRepository(db)
+	repo := NewSQLRepository(db)
 	day, _ := time.Parse("2006-01-02", date)
 	points, err := repo.PersonalHourlyTimeline(context.Background(), QueryParams{
 		OrgID:     "personal",
@@ -448,7 +448,7 @@ func TestCrossDayBoundary_TodayUseAndTimelineAgree(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repo := NewPostgresRepository(db)
+	repo := NewSQLRepository(db)
 
 	// 1. TODAY USE card (hourly, queries event_time millis)
 	day, _ := time.Parse("2006-01-02", date)
@@ -499,4 +499,95 @@ func TestCrossDayBoundary_TodayUseAndTimelineAgree(t *testing.T) {
 	if len(byProto) != 1 || byProto[0].ProtocolType != "anthropic" || byProto[0].TotalTokens != 1234 {
 		t.Errorf("Provider breakdown must show 1234 tokens for anthropic: %+v", byProto)
 	}
+}
+
+// TestPersonalHourlyTimeline_LocalTZShiftsHourBucket is the regression
+// guard for the tz-local round. The same physical event at UTC 04:00
+// must appear at hour 4 in a UTC query and hour 12 in an
+// Asia/Shanghai query (+08:00).
+func TestPersonalHourlyTimeline_LocalTZShiftsHourBucket(t *testing.T) {
+	db := setupUsageTestDB(t)
+
+	a, _ := time.Parse(time.RFC3339, "2026-04-24T04:00:00Z")
+	_, err := db.DB.Exec(`INSERT INTO usage_fact_dwd
+		(event_id, org_id, seat_id, event_time, usage_date, total_tokens, request_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"evA", "org1", "seat1", a.UTC().UnixMilli(), "2026-04-24", 100, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repo := NewSQLRepository(db)
+	day, _ := time.Parse("2006-01-02", "2026-04-24")
+
+	t.Run("UTC shows hour 4", func(t *testing.T) {
+		p := QueryParams{SeatID: "seat1", StartDate: day, TZ: "UTC"}
+		p.Defaults()
+		p.EndDate = p.StartDate
+		points, err := repo.PersonalHourlyTimeline(context.Background(), p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(points) != 1 || points[0].Hour != 4 || points[0].TotalTokens != 100 {
+			t.Errorf("UTC path: want hour=4/tokens=100, got %+v", points)
+		}
+	})
+
+	t.Run("Asia/Shanghai shows hour 12", func(t *testing.T) {
+		p := QueryParams{SeatID: "seat1", StartDate: day, TZ: "Asia/Shanghai"}
+		p.Defaults()
+		p.EndDate = p.StartDate
+		points, err := repo.PersonalHourlyTimeline(context.Background(), p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(points) != 1 || points[0].Hour != 12 || points[0].TotalTokens != 100 {
+			t.Errorf("Asia/Shanghai path: want hour=12/tokens=100, got %+v", points)
+		}
+	})
+}
+
+// TestPersonalTimeline_LocalTZDayBoundary verifies that an event whose
+// UTC date and local date differ lands in the *local* day bucket.
+// 2026-04-25 01:00 +0800 = 2026-04-24 17:00 UTC: a Shanghai user
+// expects it on 04-25; a UTC user expects it on 04-24. Both correct.
+func TestPersonalTimeline_LocalTZDayBoundary(t *testing.T) {
+	db := setupUsageTestDB(t)
+
+	b, _ := time.Parse(time.RFC3339, "2026-04-24T17:00:00Z")
+	_, err := db.DB.Exec(`INSERT INTO usage_fact_dwd
+		(event_id, org_id, seat_id, event_time, usage_date, total_tokens, request_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"evB", "org1", "seat1", b.UTC().UnixMilli(), "2026-04-24", 200, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repo := NewSQLRepository(db)
+	start, _ := time.Parse("2006-01-02", "2026-04-23")
+	end, _ := time.Parse("2006-01-02", "2026-04-26")
+
+	t.Run("UTC buckets on 2026-04-24", func(t *testing.T) {
+		p := QueryParams{SeatID: "seat1", StartDate: start, EndDate: end, TZ: "UTC"}
+		p.Defaults()
+		tl, err := repo.PersonalTimeline(context.Background(), p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tl) != 1 || tl[0].Date != "2026-04-24" || tl[0].TotalTokens != 200 {
+			t.Errorf("UTC bucketing wrong: %+v", tl)
+		}
+	})
+
+	t.Run("Asia/Shanghai buckets on 2026-04-25", func(t *testing.T) {
+		p := QueryParams{SeatID: "seat1", StartDate: start, EndDate: end, TZ: "Asia/Shanghai"}
+		p.Defaults()
+		tl, err := repo.PersonalTimeline(context.Background(), p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tl) != 1 || tl[0].Date != "2026-04-25" || tl[0].TotalTokens != 200 {
+			t.Errorf("Shanghai bucketing wrong — event should land in local 04-25: %+v", tl)
+		}
+	})
 }

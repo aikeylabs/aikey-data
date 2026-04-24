@@ -12,9 +12,9 @@ import (
 
 // --- ODSReader ---
 
-type postgresODSReader struct{ db *shared.DB }
+type sqlODSReader struct{ db *shared.DB }
 
-func NewPostgresODSReader(db *shared.DB) ODSReader { return &postgresODSReader{db: db} }
+func NewSQLODSReader(db *shared.DB) ODSReader { return &sqlODSReader{db: db} }
 
 // fetchPendingSQL is built dynamically via nowExpr for dialect portability.
 //
@@ -43,7 +43,7 @@ ORDER BY ods_id
 LIMIT ?
 `
 
-func (r *postgresODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord, error) {
+func (r *sqlODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord, error) {
 	// dwd_next_retry_at is an int64-millis column on SQLite (v1.0.3-alpha)
 	// and TIMESTAMPTZ on Postgres. Compare against NowMillis() which
 	// produces the right per-dialect expression. Using plain Now() here
@@ -80,13 +80,13 @@ func (r *postgresODSReader) FetchPending(ctx context.Context, limit int) ([]ODSR
 	return records, rows.Err()
 }
 
-func (r *postgresODSReader) MarkProjected(ctx context.Context, odsID int64) error {
+func (r *sqlODSReader) MarkProjected(ctx context.Context, odsID int64) error {
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE usage_event_ods SET dwd_status = 'projected' WHERE ods_id = ?`, odsID)
 	return err
 }
 
-func (r *postgresODSReader) MarkRetry(ctx context.Context, odsID int64, retryCount int, errCode, errMsg string) error {
+func (r *sqlODSReader) MarkRetry(ctx context.Context, odsID int64, retryCount int, errCode, errMsg string) error {
 	// Compute retry time in Go to avoid PG-specific interval arithmetic.
 	// Wrap as aikeytime.Millis so the dialect-aware bind helper emits the
 	// right driver type (int64 for SQLite INTEGER, time.Time for PG TIMESTAMPTZ).
@@ -103,7 +103,7 @@ func (r *postgresODSReader) MarkRetry(ctx context.Context, odsID int64, retryCou
 	return err
 }
 
-func (r *postgresODSReader) MarkDeadLetter(ctx context.Context, odsID int64, errCode, errMsg string) error {
+func (r *sqlODSReader) MarkDeadLetter(ctx context.Context, odsID int64, errCode, errMsg string) error {
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE usage_event_ods
 		 SET dwd_status = 'dead_letter',
@@ -129,10 +129,10 @@ func retryDelay(retryCount int) time.Duration {
 
 // --- ControlEventReader ---
 
-type postgresControlEventReader struct{ db *shared.DB }
+type sqlControlEventReader struct{ db *shared.DB }
 
-func NewPostgresControlEventReader(db *shared.DB) ControlEventReader {
-	return &postgresControlEventReader{db: db}
+func NewSQLControlEventReader(db *shared.DB) ControlEventReader {
+	return &sqlControlEventReader{db: db}
 }
 
 const findControlEventSQL = `
@@ -149,7 +149,7 @@ ORDER BY effective_from DESC
 LIMIT 1
 `
 
-func (r *postgresControlEventReader) FindByVirtualKeyAtTime(ctx context.Context, virtualKeyID string, eventTime aikeytime.Millis) (*ControlEvent, error) {
+func (r *sqlControlEventReader) FindByVirtualKeyAtTime(ctx context.Context, virtualKeyID string, eventTime aikeytime.Millis) (*ControlEvent, error) {
 	bound := r.db.BindMillis(eventTime)
 	row := r.db.QueryRowContext(ctx, findControlEventSQL, virtualKeyID, bound, bound)
 	var ce ControlEvent
@@ -171,9 +171,9 @@ func (r *postgresControlEventReader) FindByVirtualKeyAtTime(ctx context.Context,
 
 // --- DWDWriter ---
 
-type postgresDWDWriter struct{ db *shared.DB }
+type sqlDWDWriter struct{ db *shared.DB }
 
-func NewPostgresDWDWriter(db *shared.DB) DWDWriter { return &postgresDWDWriter{db: db} }
+func NewSQLDWDWriter(db *shared.DB) DWDWriter { return &sqlDWDWriter{db: db} }
 
 // projected_at is set explicitly from Go (aikeytime.Now()) rather than
 // relying on the SQL DEFAULT. Why: the v1.0.3-alpha migration's
@@ -211,7 +211,7 @@ const dwdPlaceholders = `?,?,?,?,?,
     ?,?,?,?,
     ?,?,?,?`
 
-func (w *postgresDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
+func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 	insertDWDSQL := w.db.InsertOrIgnoreOn("usage_fact_dwd", dwdColumns, dwdPlaceholders, "org_id, event_id")
 	res, err := w.db.ExecContext(ctx, insertDWDSQL,
 		// Why int64 millis (via BindMillis) instead of time.Time: Go's default
@@ -244,13 +244,13 @@ func (w *postgresDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error
 
 // --- CheckpointStore ---
 
-type postgresCheckpointStore struct{ db *shared.DB }
+type sqlCheckpointStore struct{ db *shared.DB }
 
-func NewPostgresCheckpointStore(db *shared.DB) CheckpointStore {
-	return &postgresCheckpointStore{db: db}
+func NewSQLCheckpointStore(db *shared.DB) CheckpointStore {
+	return &sqlCheckpointStore{db: db}
 }
 
-func (s *postgresCheckpointStore) GetLastScannedOdsID(ctx context.Context, taskName string) (int64, error) {
+func (s *sqlCheckpointStore) GetLastScannedOdsID(ctx context.Context, taskName string) (int64, error) {
 	var id int64
 	err := s.db.QueryRowContext(ctx,
 		`SELECT last_scanned_ods_id FROM usage_dwd_projector_tasks WHERE task_name = ?`,
@@ -261,7 +261,7 @@ func (s *postgresCheckpointStore) GetLastScannedOdsID(ctx context.Context, taskN
 	return id, err
 }
 
-func (s *postgresCheckpointStore) UpdateCheckpoint(ctx context.Context, taskName string, lastOdsID int64) error {
+func (s *sqlCheckpointStore) UpdateCheckpoint(ctx context.Context, taskName string, lastOdsID int64) error {
 	nowExpr := s.db.Now()
 	_, err := s.db.ExecContext(ctx,
 		fmt.Sprintf(`UPDATE usage_dwd_projector_tasks

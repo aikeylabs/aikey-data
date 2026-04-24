@@ -147,6 +147,52 @@ func (d *DB) DateOf(col string) string {
 	return fmt.Sprintf("DATE(%s AT TIME ZONE 'UTC')", col)
 }
 
+// HourBucketLocal is the tz-aware counterpart to HourBucket. Shifts the
+// int64 millis column by `offsetMs` before extracting the hour, so the
+// result is the hour in the user's local timezone.
+//
+//   - offsetMs = 0          → same as HourBucket (UTC hour).
+//   - offsetMs = 8*3600_000 → +08:00 (Asia/Shanghai); UTC 04:00 → local 12.
+//
+// DST caveat: the offset is constant across the SQL expression, so a
+// query window that straddles a DST transition will mis-bucket
+// exactly one hour on the transition day. The caller
+// (QueryParams.Defaults) computes the offset at the query **window's
+// start** — not at `time.Now()` — so a historical query from a DST
+// region picks the offset that applied during the window, not the
+// caller's current-season offset. This keeps the error bounded to
+// the ≤1 DST-crossing day per window rather than the entire historic
+// window.
+//
+// Postgres takes the tz *name* (IANA) rather than a raw offset so DST
+// is respected inside the query itself (per-row).
+func (d *DB) HourBucketLocal(col string, offsetMs int64, tzName string) string {
+	if d.Dialect == DialectSQLite {
+		// ((col + offset) / 3_600_000) %% 24 — pure integer math, no
+		// strftime / unixepoch roundtrip, same correctness as UTC path.
+		return fmt.Sprintf("((%s + %d) / 3600000) %% 24", col, offsetMs)
+	}
+	// Postgres: EXTRACT(HOUR FROM col AT TIME ZONE '<iana>') yields the
+	// hour in that named zone, DST-aware per row.
+	return fmt.Sprintf("CAST(EXTRACT(HOUR FROM %s AT TIME ZONE %s) AS INTEGER)", col, pgLiteral(tzName))
+}
+
+// DateOfLocal is the tz-aware counterpart to DateOf. Projects the
+// millis column as a local YYYY-MM-DD string.
+func (d *DB) DateOfLocal(col string, offsetMs int64, tzName string) string {
+	if d.Dialect == DialectSQLite {
+		return fmt.Sprintf("DATE((%s + %d)/1000, 'unixepoch')", col, offsetMs)
+	}
+	return fmt.Sprintf("DATE(%s AT TIME ZONE %s)", col, pgLiteral(tzName))
+}
+
+// pgLiteral wraps a string in single quotes with minimal escaping for
+// inline interpolation into a Postgres SQL fragment. Only used for
+// IANA tz names (controlled whitelist at the API boundary).
+func pgLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
 func (d *DB) rewrite(query string) string {
 	// SQLite: strip PostgreSQL-style type casts (e.g. ::text, ::integer).
 	// In SQLite columns are already dynamically typed so the cast is a no-op.

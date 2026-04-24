@@ -44,7 +44,7 @@ func TestFetchPending_SQLiteRetryScheduling(t *testing.T) {
 	insertODSTestRow(t, db, 2, "retry", pastRetry)
 	insertODSTestRow(t, db, 3, "retry", futureRetry)
 
-	reader := NewPostgresODSReader(db)
+	reader := NewSQLODSReader(db)
 	pending, err := reader.FetchPending(context.Background(), 100)
 	if err != nil {
 		t.Fatalf("FetchPending: %v", err)
@@ -175,7 +175,7 @@ func insertODSTestRow(t *testing.T, db *shared.DB, odsID int64, status string, n
 func TestInsertDWDFact_UpgradedSchemaNoSQLDefault(t *testing.T) {
 	db := newSQLiteDWDTestDB(t, false /* includeSQLDefaults */)
 
-	writer := NewPostgresDWDWriter(db)
+	writer := NewSQLDWDWriter(db)
 	fact := &DWDFact{
 		EventID:          "test-event-1",
 		OdsID:            42,

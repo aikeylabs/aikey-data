@@ -4,16 +4,24 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
 
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/shared"
 	"github.com/AiKeyLabs/pkg/aikeytime"
 )
 
-type postgresRepo struct{ db *shared.DB }
+// aikeytime.FromTime / aikeytime.Millis are used via shared.DB.BindMillis.
+var _ = aikeytime.Millis(0) // keep import even if only used transitively
 
-func NewPostgresRepository(db *shared.DB) Repository {
-	return &postgresRepo{db: db}
+type sqlRepo struct{ db *shared.DB }
+
+// NewSQLRepository returns a Repository backed by either PostgreSQL
+// or SQLite. Dialect differences are abstracted by shared.DB (see
+// internal/shared/dbkit.go). The type/constructor were renamed from
+// postgresRepo/NewPostgresRepository 2026-04-24 because the file
+// name was misleading — the implementation has always been dual-
+// dialect via dbkit.
+func NewSQLRepository(db *shared.DB) Repository {
+	return &sqlRepo{db: db}
 }
 
 // personalFilter returns the WHERE clause and parameter for personal queries.
@@ -37,16 +45,22 @@ func personalFilter(p QueryParams) (clause string, id string) {
 
 // --- Personal page ---
 
-func (r *postgresRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]TimelinePoint, error) {
+// PersonalTimeline groups usage by the caller's local calendar day
+// (QueryParams.TZ). A user in +08:00 asking for "2026-04-24" sees
+// their local 00:00..24:00 window, not UTC 00..24 which would split
+// their morning across two rows. See bugfix 20260424 tz-local round.
+func (r *sqlRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]TimelinePoint, error) {
 	filter, id := personalFilter(p)
+	startMs, endMs := p.LocalWindowMs() // [local start-day, local end-day+1) in UTC millis
+	dateExpr := r.db.DateOfLocal("event_time", p.TZOffsetMs, p.TZ)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT %s, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT %s AS d, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
-		  AND usage_date BETWEEN ? AND ?
-		GROUP BY usage_date
-		ORDER BY usage_date`, r.db.DateString("usage_date"), filter),
-		id, p.StartDate, p.EndDate)
+		  AND event_time >= ? AND event_time < ?
+		GROUP BY d
+		ORDER BY d`, dateExpr, filter),
+		id, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
 	if err != nil {
 		return nil, fmt.Errorf("personal timeline: %w", err)
 	}
@@ -54,24 +68,27 @@ func (r *postgresRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]T
 	return scanTimeline(rows)
 }
 
-// PersonalHourlyTimeline aggregates fact rows into 24 UTC hour buckets
-// for p.StartDate. Dialect differences (Postgres EXTRACT vs SQLite
-// strftime) are hidden behind shared.DB.HourBucket — see dbkit.go.
-func (r *postgresRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]HourlyPoint, error) {
+// PersonalHourlyTimeline aggregates fact rows into 24 hour buckets
+// for the calendar day at p.StartDate, interpreted in the caller's
+// local timezone (p.TZ). Dialect differences are hidden behind
+// shared.DB.HourBucketLocal — see dbkit.go.
+func (r *sqlRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]HourlyPoint, error) {
 	filter, id := personalFilter(p)
-	// Full-day window [startOfDay, startOfNextDay) in UTC. Using BETWEEN
-	// on date alone (usage_date) would only give day-level totals; we
-	// need event_time to keep intra-day resolution.
-	dayStart := aikeytime.FromTime(p.StartDate.UTC().Truncate(24 * time.Hour))
-	dayEnd := aikeytime.FromTime(p.StartDate.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour))
+	// Local day window: [localMidnight, localMidnight+24h) converted
+	// back to UTC millis for the event_time range filter. p.StartDate
+	// is already local-midnight because QueryParams.Defaults() shifted
+	// it into p.TZLocation.
+	dayStart := aikeytime.FromTime(p.StartDate)
+	dayEnd := aikeytime.FromTime(p.StartDate.AddDate(0, 0, 1))
 
+	hourExpr := r.db.HourBucketLocal("event_time", p.TZOffsetMs, p.TZ)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT %s AS hour, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
 		  AND event_time >= ? AND event_time < ?
 		GROUP BY hour
-		ORDER BY hour`, r.db.HourBucket("event_time"), filter),
+		ORDER BY hour`, hourExpr, filter),
 		id, r.db.BindMillis(dayStart), r.db.BindMillis(dayEnd))
 	if err != nil {
 		return nil, fmt.Errorf("personal hourly timeline: %w", err)
@@ -88,16 +105,18 @@ func (r *postgresRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams
 	return result, rows.Err()
 }
 
-func (r *postgresRepo) PersonalByProtocolTimeline(ctx context.Context, p QueryParams) ([]ProtocolTimelinePoint, error) {
+func (r *sqlRepo) PersonalByProtocolTimeline(ctx context.Context, p QueryParams) ([]ProtocolTimelinePoint, error) {
 	filter, id := personalFilter(p)
+	startMs, endMs := p.LocalWindowMs()
+	dateExpr := r.db.DateOfLocal("event_time", p.TZOffsetMs, p.TZ)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT %s, COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT %s AS d, COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
-		  AND usage_date BETWEEN ? AND ?
-		GROUP BY usage_date, COALESCE(provider_code, protocol_type)
-		ORDER BY usage_date, COALESCE(provider_code, protocol_type)`, r.db.DateString("usage_date"), filter),
-		id, p.StartDate, p.EndDate)
+		  AND event_time >= ? AND event_time < ?
+		GROUP BY d, COALESCE(provider_code, protocol_type)
+		ORDER BY d, COALESCE(provider_code, protocol_type)`, dateExpr, filter),
+		id, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
 	if err != nil {
 		return nil, fmt.Errorf("personal by-protocol timeline: %w", err)
 	}
@@ -114,16 +133,17 @@ func (r *postgresRepo) PersonalByProtocolTimeline(ctx context.Context, p QueryPa
 	return result, rows.Err()
 }
 
-func (r *postgresRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParams) ([]ProtocolTotal, error) {
+func (r *sqlRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParams) ([]ProtocolTotal, error) {
 	filter, id := personalFilter(p)
+	startMs, endMs := p.LocalWindowMs()
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
-		  AND usage_date BETWEEN ? AND ?
+		  AND event_time >= ? AND event_time < ?
 		GROUP BY COALESCE(provider_code, protocol_type)
 		ORDER BY SUM(total_tokens) DESC`, filter),
-		id, p.StartDate, p.EndDate)
+		id, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
 	if err != nil {
 		return nil, fmt.Errorf("personal by-protocol total: %w", err)
 	}
@@ -131,7 +151,7 @@ func (r *postgresRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParam
 	return scanProtocolTotal(rows)
 }
 
-func (r *postgresRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyTotal, error) {
+func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyTotal, error) {
 	// Identity enrichment (2026-04-22, F2 of the usage-ledger label fix):
 	//
 	// DWD doesn't carry `oauth_identity` — it dropped during projection —
@@ -147,12 +167,14 @@ func (r *postgresRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([
 	// oauth_identity through the projector into DWD — tracked as a
 	// follow-up (avoid here because it needs a migration).
 	filter, id := personalFilter(p)
-	// DATE(event_time) worked while event_time was a TEXT ISO string, but
-	// post v1.0.3-alpha the SQLite column is INTEGER millis. Calling
-	// SQLite's DATE() on a bare integer returns NULL → the WHERE clause
-	// matches zero rows → identity enrichment silently drops every row.
-	// DateOf() encapsulates the right expression per dialect. See bugfix
-	// 20260424 review finding #3.
+	// Both the identity-enrichment subquery (on ODS) and the outer
+	// aggregation (on DWD) are filtered by the caller's local-tz
+	// window. We express this as a single event_time millis range on
+	// each side, same instants on both, so sub-join never drops
+	// events the outer query includes.
+	startMs, endMs := p.LocalWindowMs()
+	startMsArg := r.db.BindMillis(startMs)
+	endMsArg := r.db.BindMillis(endMs)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT d.virtual_key_id,
 		       COALESCE(NULLIF(MAX(d.virtual_key_alias), ''), REPLACE(d.virtual_key_id, 'personal:', '')),
@@ -163,14 +185,14 @@ func (r *postgresRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([
 		    SELECT virtual_key_id, MAX(oauth_identity) AS identity
 		    FROM usage_event_ods
 		    WHERE oauth_identity IS NOT NULL AND oauth_identity != ''
-		      AND %s BETWEEN ? AND ?
+		      AND event_time >= ? AND event_time < ?
 		    GROUP BY virtual_key_id
 		) AS id ON id.virtual_key_id = d.virtual_key_id
 		WHERE %s
-		  AND d.usage_date BETWEEN ? AND ?
+		  AND d.event_time >= ? AND d.event_time < ?
 		GROUP BY d.virtual_key_id, id.identity
-		ORDER BY SUM(d.total_tokens) DESC`, r.db.DateOf("event_time"), filter),
-		p.StartDate, p.EndDate, id, p.StartDate, p.EndDate)
+		ORDER BY SUM(d.total_tokens) DESC`, filter),
+		startMsArg, endMsArg, id, startMsArg, endMsArg)
 	if err != nil {
 		return nil, fmt.Errorf("personal by-key total: %w", err)
 	}
@@ -189,16 +211,17 @@ func (r *postgresRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([
 
 // --- Master page ---
 
-func (r *postgresRepo) MasterUserRanking(ctx context.Context, p QueryParams) ([]UserRanking, error) {
+func (r *sqlRepo) MasterUserRanking(ctx context.Context, p QueryParams) ([]UserRanking, error) {
+	startMs, endMs := p.LocalWindowMs()
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT account_id, seat_id, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE org_id = ?
-		  AND usage_date BETWEEN ? AND ?
+		  AND event_time >= ? AND event_time < ?
 		GROUP BY account_id, seat_id
 		ORDER BY SUM(total_tokens) DESC
 		LIMIT ?`,
-		p.OrgID, p.StartDate, p.EndDate, p.Limit)
+		p.OrgID, r.db.BindMillis(startMs), r.db.BindMillis(endMs), p.Limit)
 	if err != nil {
 		return nil, fmt.Errorf("master user ranking: %w", err)
 	}
@@ -215,16 +238,17 @@ func (r *postgresRepo) MasterUserRanking(ctx context.Context, p QueryParams) ([]
 	return result, rows.Err()
 }
 
-func (r *postgresRepo) MasterByProtocolTotal(ctx context.Context, p QueryParams) ([]ProtocolTotal, error) {
+func (r *sqlRepo) MasterByProtocolTotal(ctx context.Context, p QueryParams) ([]ProtocolTotal, error) {
+	startMs, endMs := p.LocalWindowMs()
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE org_id = ?
-		  AND usage_date BETWEEN ? AND ?
+		  AND event_time >= ? AND event_time < ?
 		  AND billing_scope IN ('org_only','org_and_user')
 		GROUP BY COALESCE(provider_code, protocol_type)
 		ORDER BY SUM(total_tokens) DESC`,
-		p.OrgID, p.StartDate, p.EndDate)
+		p.OrgID, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
 	if err != nil {
 		return nil, fmt.Errorf("master by-protocol total: %w", err)
 	}
@@ -232,16 +256,18 @@ func (r *postgresRepo) MasterByProtocolTotal(ctx context.Context, p QueryParams)
 	return scanProtocolTotal(rows)
 }
 
-func (r *postgresRepo) MasterTimeline(ctx context.Context, p QueryParams) ([]TimelinePoint, error) {
+func (r *sqlRepo) MasterTimeline(ctx context.Context, p QueryParams) ([]TimelinePoint, error) {
+	startMs, endMs := p.LocalWindowMs()
+	dateExpr := r.db.DateOfLocal("event_time", p.TZOffsetMs, p.TZ)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT %s, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT %s AS d, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE org_id = ?
-		  AND usage_date BETWEEN ? AND ?
+		  AND event_time >= ? AND event_time < ?
 		  AND billing_scope IN ('org_only','org_and_user')
-		GROUP BY usage_date
-		ORDER BY usage_date`, r.db.DateString("usage_date")),
-		p.OrgID, p.StartDate, p.EndDate)
+		GROUP BY d
+		ORDER BY d`, dateExpr),
+		p.OrgID, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
 	if err != nil {
 		return nil, fmt.Errorf("master timeline: %w", err)
 	}
