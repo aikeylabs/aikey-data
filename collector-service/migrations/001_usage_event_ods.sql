@@ -44,6 +44,12 @@ CREATE TABLE IF NOT EXISTS usage_event_ods (
     provider_code             VARCHAR(64),
     protocol_type             VARCHAR(32),
     route_source              VARCHAR(32),
+    -- Email / display name for OAuth-managed provider accounts. Mirrors
+    -- the collector ingest INSERT order in
+    -- aikey-data/collector-service/internal/ingest/repository_sql.go.
+    -- Nullable: only OAuth-sourced events fill this; static API key
+    -- credentials leave it NULL.
+    oauth_identity            VARCHAR(255),
 
     -- usage
     model                     VARCHAR(255),
