@@ -239,7 +239,26 @@ func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 		return false, fmt.Errorf("insert dwd fact %s: %w", f.EventID, err)
 	}
 	n, _ := res.RowsAffected()
-	return n > 0, nil
+	if n > 0 {
+		return true, nil
+	}
+	// Same defense-in-depth as ods InsertEvent (see F2 fix in
+	// internal/ingest/repository_sql.go). rowsAffected==0 from
+	// `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` is ambiguous —
+	// verify it's a real duplicate via SELECT before silently dropping
+	// the projection.
+	var found int
+	verr := w.db.QueryRowContext(ctx,
+		"SELECT 1 FROM usage_fact_dwd WHERE org_id = ? AND event_id = ? LIMIT 1",
+		f.OrgID, f.EventID,
+	).Scan(&found)
+	if verr == nil && found == 1 {
+		return false, nil // genuine duplicate
+	}
+	if verr == sql.ErrNoRows {
+		return false, fmt.Errorf("dwd INSERT silently ignored (no UNIQUE conflict on org_id=%s event_id=%s) — likely NOT NULL/CHECK/FK violation; check schema vs DWDFact column list", f.OrgID, f.EventID)
+	}
+	return false, fmt.Errorf("verify dedup for dwd event_id=%s: %w", f.EventID, verr)
 }
 
 // --- CheckpointStore ---

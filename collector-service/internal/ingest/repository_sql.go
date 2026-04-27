@@ -85,7 +85,32 @@ func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte)
 		return false, fmt.Errorf("insert ods event %s: %w", e.EventID, err)
 	}
 	n, _ := res.RowsAffected()
-	return n > 0, nil
+	if n > 0 {
+		return true, nil
+	}
+	// rowsAffected==0 from `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` is
+	// historically misread as "duplicate". It also fires for *any* other
+	// constraint violation that the IGNORE/DO NOTHING swallows (NOT NULL,
+	// CHECK, FK, ...). Verify it's a genuine UNIQUE conflict before
+	// reporting "duplicated"; otherwise surface a real error so the
+	// caller can mark the event rejected with diagnostics rather than
+	// returning HTTP 200 + duplicated:1 while data was silently dropped.
+	// Discovered as F2 on 2026-04-27 during D-plan cross-version-jump
+	// E2E: post-upgrade ODS NOT NULL on legacy_text columns swallowed
+	// every fresh INSERT and reported them as duplicates. See
+	// workflow/CI/bugfix/ for the regression record.
+	var found int
+	verr := r.db.QueryRowContext(ctx,
+		"SELECT 1 FROM usage_event_ods WHERE org_id = ? AND event_id = ? LIMIT 1",
+		e.OrgID, e.EventID,
+	).Scan(&found)
+	if verr == nil && found == 1 {
+		return false, nil // genuine duplicate
+	}
+	if verr == sql.ErrNoRows {
+		return false, fmt.Errorf("ods INSERT silently ignored (no UNIQUE conflict on org_id=%s event_id=%s) — likely NOT NULL/CHECK/FK violation. F2 root cause: NOT NULL on _legacy_text columns left over from v1.0.3 hook is hit when v1.0.4 collector binds only INTEGER columns. Run dbmigrate v1.0.4 hook upgrade to drop legacy NOT NULL", e.OrgID, e.EventID)
+	}
+	return false, fmt.Errorf("verify dedup for event_id=%s: %w", e.EventID, verr)
 }
 
 func nullStr(s string) sql.NullString {
