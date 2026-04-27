@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AiKeyLabs/aikey-config-tool/pkg/dbmigrate"
+	"github.com/AiKeyLabs/aikey-config-tool/pkg/dbmigrate/versions"
 	"github.com/AiKeyLabs/aikey-data/collector-service/config"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/api"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/ingest"
@@ -46,8 +48,18 @@ func main() {
 	}
 	defer db.Close()
 
-	if err := shared.RunMigrations(db, cfg.MigrationsDir); err != nil {
-		slog.Error("run migrations", "error", err)
+	// Apply schema migrations via the unified registry (D plan).
+	// Production collector-service owns ONLY the data component's
+	// tables (usage_event_ods / usage_fact_dwd / projector tasks).
+	//
+	// 4-point readiness contract:
+	//   1. UpgradeComponentsTo runs SYNCHRONOUSLY before any HTTP listener.
+	//   2. Failure is fail-fast os.Exit(1).
+	//   3. Health/readiness endpoints register only after this returns nil.
+	//   4. Verified by `make verify-boot-order`.
+	if err := versions.UpgradeComponentsTo(context.Background(), db, dbmigrate.DialectPostgres,
+		[]dbmigrate.Component{dbmigrate.ComponentData}, ""); err != nil {
+		slog.Error("apply schema migrations", "error", err)
 		os.Exit(1)
 	}
 
