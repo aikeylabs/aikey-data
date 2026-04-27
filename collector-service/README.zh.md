@@ -89,7 +89,7 @@ Go 代码统一使用 `aikeytime.Millis` 作为结构体字段类型，`shared.D
 | `LISTEN_ADDR` | 否 | `0.0.0.0:27300` | HTTP 监听地址 |
 | `MIGRATIONS_DIR` | 否 | `./migrations` | SQL 迁移目录 |
 | `SERVICE_TOKEN` | 否 | — | API 认证 Bearer Token |
-| `LOG_LEVEL` | 否 | `info` | 日志级别（debug/info/warn/error）|
+| `AIKEY_LOG_LEVEL` | 否 | `info` | 日志级别（debug/info/warn/error）|
 
 ## 项目结构
 

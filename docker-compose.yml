@@ -32,7 +32,7 @@ services:
       LISTEN_ADDR: "0.0.0.0:27300"
       MIGRATIONS_DIR: /app/migrations
       SERVICE_TOKEN: "${SERVICE_TOKEN:-dev-token}"
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      AIKEY_LOG_LEVEL: "${AIKEY_LOG_LEVEL:-info}"
     ports:
       - "27300:27300"
 
@@ -54,7 +54,7 @@ services:
       # Auth disabled: control-service acts as facade; query-service is internal-only.
       # TODO: re-enable with shared JWT / service token after SSO implementation.
       SERVICE_TOKEN: ""
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      AIKEY_LOG_LEVEL: "${AIKEY_LOG_LEVEL:-info}"
     ports:
       # Exposed for local dev convenience; production deploys should NOT expose this port.
       - "27310:27310"

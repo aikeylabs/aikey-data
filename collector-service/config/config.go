@@ -25,7 +25,12 @@ func Load() (*Config, error) {
 		ListenAddr:    envOrDefault("LISTEN_ADDR", "0.0.0.0:27300"),
 		MigrationsDir: envOrDefault("MIGRATIONS_DIR", "./migrations"),
 		ServiceToken:  os.Getenv("SERVICE_TOKEN"),
-		LogLevel:      envOrDefault("LOG_LEVEL", "info"),
+		// Why AIKEY_LOG_LEVEL: scheme config-split-system-user §SR8 standardized
+		// log-level env names on the AIKEY_ prefix. Bare LOG_LEVEL collides too
+		// easily with other tools sharing the same container/shell. Reviewer
+		// round 5 F1: docs were always AIKEY_LOG_LEVEL but code read bare
+		// LOG_LEVEL — this aligns code to the documented contract.
+		LogLevel:      envOrDefault("AIKEY_LOG_LEVEL", "info"),
 	}
 	return c, nil
 }

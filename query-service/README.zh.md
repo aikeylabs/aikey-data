@@ -51,7 +51,7 @@ make build
 | `DATABASE_DSN` | 是 | — | PostgreSQL 连接字符串 |
 | `LISTEN_ADDR` | 否 | `0.0.0.0:27310` | HTTP 监听地址 |
 | `SERVICE_TOKEN` | 否 | — | API 认证 Bearer Token |
-| `LOG_LEVEL` | 否 | `info` | 日志级别 |
+| `AIKEY_LOG_LEVEL` | 否 | `info` | 日志级别 |
 
 ## 项目结构
 

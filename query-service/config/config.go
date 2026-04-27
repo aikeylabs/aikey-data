@@ -21,7 +21,9 @@ func Load() (*Config, error) {
 		DatabaseDSN:  dsn,
 		ListenAddr:   envOrDefault("LISTEN_ADDR", "0.0.0.0:27310"),
 		ServiceToken: os.Getenv("SERVICE_TOKEN"),
-		LogLevel:     envOrDefault("LOG_LEVEL", "info"),
+		// Why AIKEY_LOG_LEVEL: see collector-service/config/config.go for full
+		// rationale (scheme §SR8 + reviewer round 5 F1 — align code to docs).
+		LogLevel:     envOrDefault("AIKEY_LOG_LEVEL", "info"),
 	}, nil
 }
 

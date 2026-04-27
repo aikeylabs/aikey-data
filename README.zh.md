@@ -237,11 +237,11 @@ cd ../query-service && go test -race -v ./internal/...
 ```bash
 # 终端 1 — collector-service
 cd collector-service
-DATABASE_DSN=$DATABASE_DSN SERVICE_TOKEN=$SERVICE_TOKEN LOG_LEVEL=debug ./bin/collector-service
+DATABASE_DSN=$DATABASE_DSN SERVICE_TOKEN=$SERVICE_TOKEN AIKEY_LOG_LEVEL=debug ./bin/collector-service
 
 # 终端 2 — query-service
 cd query-service
-DATABASE_DSN=$DATABASE_DSN SERVICE_TOKEN=$SERVICE_TOKEN LOG_LEVEL=debug ./bin/query-service
+DATABASE_DSN=$DATABASE_DSN SERVICE_TOKEN=$SERVICE_TOKEN AIKEY_LOG_LEVEL=debug ./bin/query-service
 ```
 
 验证健康检查：

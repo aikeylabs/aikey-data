@@ -51,7 +51,7 @@ make build
 | `DATABASE_DSN` | Yes | — | PostgreSQL connection string |
 | `LISTEN_ADDR` | No | `0.0.0.0:27310` | HTTP listen address |
 | `SERVICE_TOKEN` | No | — | Bearer token for API auth |
-| `LOG_LEVEL` | No | `info` | Log level |
+| `AIKEY_LOG_LEVEL` | No | `info` | Log level |
 
 ## Project Structure
 

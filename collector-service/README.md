@@ -89,7 +89,7 @@ Migrations are in `migrations/` and run automatically on startup.
 | `LISTEN_ADDR` | No | `0.0.0.0:27300` | HTTP listen address |
 | `MIGRATIONS_DIR` | No | `./migrations` | SQL migrations directory |
 | `SERVICE_TOKEN` | No | — | Bearer token for API auth |
-| `LOG_LEVEL` | No | `info` | Log level (debug/info/warn/error) |
+| `AIKEY_LOG_LEVEL` | No | `info` | Log level (debug/info/warn/error) |
 
 ## Project Structure
 

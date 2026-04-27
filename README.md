@@ -257,11 +257,11 @@ Expected: all tests PASS.
 ```bash
 # Terminal 1 — collector-service
 cd collector-service
-DATABASE_DSN=$DATABASE_DSN SERVICE_TOKEN=$SERVICE_TOKEN LOG_LEVEL=debug ./bin/collector-service
+DATABASE_DSN=$DATABASE_DSN SERVICE_TOKEN=$SERVICE_TOKEN AIKEY_LOG_LEVEL=debug ./bin/collector-service
 
 # Terminal 2 — query-service
 cd query-service
-DATABASE_DSN=$DATABASE_DSN SERVICE_TOKEN=$SERVICE_TOKEN LOG_LEVEL=debug ./bin/query-service
+DATABASE_DSN=$DATABASE_DSN SERVICE_TOKEN=$SERVICE_TOKEN AIKEY_LOG_LEVEL=debug ./bin/query-service
 ```
 
 Verify health:
