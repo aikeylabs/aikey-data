@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/AiKeyLabs/aikey-config-tool/pkg/dbmigrate"
@@ -19,6 +18,7 @@ import (
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/ingest"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/projector"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
+	"github.com/AiKeyLabs/pkg/aikeycompat"
 	"github.com/AiKeyLabs/pkg/buildinfo"
 )
 
@@ -91,7 +91,7 @@ func main() {
 
 	// Graceful shutdown
 	done := make(chan os.Signal, 1)
-	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(done, aikeycompat.ShutdownSignals()...)
 
 	// Start projector worker in background
 	projCtx, projCancel := context.WithCancel(context.Background())

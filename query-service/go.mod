@@ -3,6 +3,7 @@ module github.com/AiKeyLabs/aikey-data/query-service
 go 1.26.1
 
 require (
+	github.com/AiKeyLabs/pkg/aikeycompat v0.0.0
 	github.com/AiKeyLabs/pkg/aikeytime v0.0.0
 	github.com/AiKeyLabs/pkg/buildinfo v0.0.0
 	github.com/lib/pq v1.12.0
@@ -24,3 +25,5 @@ require (
 replace github.com/AiKeyLabs/pkg/buildinfo => ../../pkg/buildinfo
 
 replace github.com/AiKeyLabs/pkg/aikeytime => ../../pkg/aikeytime
+
+replace github.com/AiKeyLabs/pkg/aikeycompat => ../../pkg/aikeycompat

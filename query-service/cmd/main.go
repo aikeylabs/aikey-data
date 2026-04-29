@@ -8,13 +8,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/AiKeyLabs/aikey-data/query-service/config"
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/api"
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/shared"
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/usage"
+	"github.com/AiKeyLabs/pkg/aikeycompat"
 	"github.com/AiKeyLabs/pkg/buildinfo"
 )
 
@@ -56,7 +56,7 @@ func main() {
 	}
 
 	done := make(chan os.Signal, 1)
-	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(done, aikeycompat.ShutdownSignals()...)
 
 	go func() {
 		slog.Info("query-service started", "addr", cfg.ListenAddr, "version", buildinfo.Get().String())
