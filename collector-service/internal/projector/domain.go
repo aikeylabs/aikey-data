@@ -75,7 +75,8 @@ type ODSRecord struct {
 	RequestCount               int
 	InputTokens                sql.NullInt64
 	OutputTokens               sql.NullInt64
-	CachedInputTokens          sql.NullInt64
+	CachedInputTokens          sql.NullInt64 // = Anthropic cache_read_input_tokens
+	CacheCreationInputTokens   sql.NullInt64 // Anthropic cache_creation_input_tokens (1.25× billing)
 	ReasoningTokens            sql.NullInt64
 	TotalTokens                sql.NullInt64
 	BillableAmount             sql.NullString
@@ -145,7 +146,8 @@ type DWDFact struct {
 	RequestCount               int
 	InputTokens                int64
 	OutputTokens               int64
-	CachedInputTokens          int64
+	CachedInputTokens          int64 // = Anthropic cache_read_input_tokens
+	CacheCreationInputTokens   int64 // Anthropic cache_creation_input_tokens
 	ReasoningTokens            int64
 	TotalTokens                int64
 	BillableAmount             *string

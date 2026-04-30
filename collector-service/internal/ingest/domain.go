@@ -63,16 +63,29 @@ type UsageEvent struct {
 	RouteSource    string `json:"route_source,omitempty"`
 	OAuthIdentity  string `json:"oauth_identity,omitempty"` // Email/display name for OAuth accounts
 
-	// usage
-	Model             string  `json:"model,omitempty"`
-	RequestCount      int     `json:"request_count"`
-	InputTokens       *int64  `json:"input_tokens,omitempty"`
-	OutputTokens      *int64  `json:"output_tokens,omitempty"`
-	CachedInputTokens *int64  `json:"cached_input_tokens,omitempty"`
-	ReasoningTokens   *int64  `json:"reasoning_tokens,omitempty"`
-	TotalTokens       *int64  `json:"total_tokens,omitempty"`
-	BillableAmount    *string `json:"billable_amount,omitempty"` // NUMERIC as string
-	Currency          string  `json:"currency,omitempty"`
+	// usage — Anthropic prompt-caching tuple (input / cache_creation /
+	// cache_read / output). For non-Anthropic providers the cache fields
+	// are nil and serialise out as `omitempty`.
+	//
+	// Wire alignment (2026-04-29): `CachedInputTokens` Go field receives
+	// the wire field `cache_read_input_tokens` (Anthropic's name, what
+	// the proxy actually emits). The DB column it's persisted to is
+	// `cached_input_tokens` (legacy storage name pre-dating Anthropic's
+	// split). The struct field name keeps `Cached*` for affinity with
+	// the column it writes; the JSON tag bridges to the canonical
+	// upstream name. Renaming the column to `cache_read_input_tokens`
+	// for total consistency is deferred to the next baseline
+	// consolidation — see v1_0_5_alpha.go for the rationale.
+	Model                    string  `json:"model,omitempty"`
+	RequestCount             int     `json:"request_count"`
+	InputTokens              *int64  `json:"input_tokens,omitempty"`
+	OutputTokens             *int64  `json:"output_tokens,omitempty"`
+	CachedInputTokens        *int64  `json:"cache_read_input_tokens,omitempty"`     // Anthropic cache_read_input_tokens → DB col cached_input_tokens
+	CacheCreationInputTokens *int64  `json:"cache_creation_input_tokens,omitempty"` // Anthropic cache_creation_input_tokens
+	ReasoningTokens          *int64  `json:"reasoning_tokens,omitempty"`
+	TotalTokens              *int64  `json:"total_tokens,omitempty"`
+	BillableAmount           *string `json:"billable_amount,omitempty"` // NUMERIC as string
+	Currency                 string  `json:"currency,omitempty"`
 
 	// result
 	RequestStatus     string `json:"request_status"`

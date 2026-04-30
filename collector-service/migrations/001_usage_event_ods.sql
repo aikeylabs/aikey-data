@@ -1,3 +1,21 @@
+-- ============================================================================
+-- LEGACY / NOT EXECUTED — kept for historical reference only.
+--
+-- Authoritative DDL now lives in:
+--     aikey-config-tool/pkg/dbmigrate/versions/v_*.go
+-- and is applied by every service at boot via versions.UpgradeTo(...).
+--
+-- Per CLAUDE.md "Schema 治理": "Do not add new *.sql files to service
+-- migrations/ dirs." This file pre-dates the D plan registry consolidation
+-- (Stage 2.5 fixture pipeline). It is NOT loaded at runtime; new columns
+-- (e.g. v1.0.4 oauth_identity, v1.0.5 cache_creation_input_tokens) are
+-- added via the registry, not by editing this file.
+--
+-- For the current schema state on a live database, dump the table or read
+-- the post-v1.0.4 canonical CREATE TABLE in v1_0_4_alpha.go (odsRebuildCreateSQL
+-- / dwdRebuildCreateSQL).
+-- ============================================================================
+
 -- ODS: raw usage events received from Local Proxy
 CREATE TABLE IF NOT EXISTS usage_event_ods (
     ods_id                    BIGSERIAL PRIMARY KEY,

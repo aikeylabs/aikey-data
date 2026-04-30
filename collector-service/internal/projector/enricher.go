@@ -91,6 +91,7 @@ func (e *Enricher) buildBaseFact(rec *ODSRecord) *DWDFact {
 		InputTokens:                nullInt64Val(rec.InputTokens),
 		OutputTokens:               nullInt64Val(rec.OutputTokens),
 		CachedInputTokens:          nullInt64Val(rec.CachedInputTokens),
+		CacheCreationInputTokens:   nullInt64Val(rec.CacheCreationInputTokens),
 		ReasoningTokens:            nullInt64Val(rec.ReasoningTokens),
 		TotalTokens:                nullInt64Val(rec.TotalTokens),
 		BillableAmount:             nullStrPtr(rec.BillableAmount),

@@ -57,11 +57,15 @@ type ProtocolTotal struct {
 // sessions stop surfacing as raw `session_<hex>` in the "Usage by Key"
 // chart.
 type KeyTotal struct {
-	VirtualKeyID string `json:"virtual_key_id"`
-	Alias        string `json:"alias,omitempty"`    // human-readable key alias (personal/team BYOK)
-	Identity     string `json:"identity,omitempty"` // email / display_identity (OAuth sessions)
-	TotalTokens  int64  `json:"total_tokens"`
-	RequestCount int64  `json:"request_count"`
+	VirtualKeyID             string `json:"virtual_key_id"`
+	Alias                    string `json:"alias,omitempty"`    // human-readable key alias (personal/team BYOK)
+	Identity                 string `json:"identity,omitempty"` // email / display_identity (OAuth sessions)
+	InputTokens              int64  `json:"input_tokens"`                // Anthropic: total prompt input (incl. cache_read + cache_creation)
+	CachedInputTokens        int64  `json:"cached_input_tokens"`         // = Anthropic cache_read_input_tokens (legacy column name)
+	CacheCreationInputTokens int64  `json:"cache_creation_input_tokens"` // Anthropic cache_creation_input_tokens
+	OutputTokens             int64  `json:"output_tokens"`
+	TotalTokens              int64  `json:"total_tokens"`
+	RequestCount             int64  `json:"request_count"`
 }
 
 // UserRanking is a single entry in the per-user ranking.

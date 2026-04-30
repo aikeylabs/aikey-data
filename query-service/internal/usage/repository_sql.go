@@ -179,7 +179,12 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 		SELECT d.virtual_key_id,
 		       COALESCE(NULLIF(MAX(d.virtual_key_alias), ''), REPLACE(d.virtual_key_id, 'personal:', '')),
 		       COALESCE(id.identity, ''),
-		       COALESCE(SUM(d.total_tokens),0), COALESCE(SUM(d.request_count),0)
+		       COALESCE(SUM(d.input_tokens),0),
+		       COALESCE(SUM(d.cached_input_tokens),0),
+		       COALESCE(SUM(d.cache_creation_input_tokens),0),
+		       COALESCE(SUM(d.output_tokens),0),
+		       COALESCE(SUM(d.total_tokens),0),
+		       COALESCE(SUM(d.request_count),0)
 		FROM usage_fact_dwd AS d
 		LEFT JOIN (
 		    SELECT virtual_key_id, MAX(oauth_identity) AS identity
@@ -201,7 +206,7 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 	var result []KeyTotal
 	for rows.Next() {
 		var kt KeyTotal
-		if err := rows.Scan(&kt.VirtualKeyID, &kt.Alias, &kt.Identity, &kt.TotalTokens, &kt.RequestCount); err != nil {
+		if err := rows.Scan(&kt.VirtualKeyID, &kt.Alias, &kt.Identity, &kt.InputTokens, &kt.CachedInputTokens, &kt.CacheCreationInputTokens, &kt.OutputTokens, &kt.TotalTokens, &kt.RequestCount); err != nil {
 			return nil, err
 		}
 		result = append(result, kt)
