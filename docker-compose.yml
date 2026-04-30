@@ -5,7 +5,7 @@
 #
 # Prerequisites:
 #   aikey-control's PostgreSQL must be running on localhost:5432.
-#   Start it first:  cd ../aikey-control/service && docker compose up -d postgres
+#   Start it first:  cd ../aikey-control-master/service && docker compose up -d postgres
 #
 # Services connect to the host PostgreSQL via host.docker.internal,
 # sharing the same database as aikey-control (no duplicate PG instance).
