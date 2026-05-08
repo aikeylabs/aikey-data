@@ -34,7 +34,7 @@ type HourlyPoint struct {
 
 // ProtocolTimelinePoint adds provider dimension to a timeline point.
 // JSON field is "protocol_type" for backward compatibility, but the value
-// is provider_code (e.g. "kimi", "anthropic") not the wire protocol.
+// is provider_code (e.g. "kimi_code", "moonshot", "anthropic") not the wire protocol.
 type ProtocolTimelinePoint struct {
 	Date         string `json:"date"`
 	ProtocolType string `json:"protocol_type"` // actually provider_code
