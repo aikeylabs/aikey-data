@@ -25,6 +25,13 @@ type Repository interface {
 	// PersonalByKeyTotal returns total_tokens per virtual_key_id.
 	PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyTotal, error)
 
+	// PersonalRecent returns the N most recent non-canary requests
+	// straight from `usage_event_ods` (not DWD aggregates) so the
+	// route_source filter excluding 'canary' is possible. Used by the
+	// Overview "Recent Requests" card. Default/max N enforced at the
+	// handler boundary so this layer trusts whatever Limit is set.
+	PersonalRecent(ctx context.Context, p QueryParams) ([]RecentRequest, error)
+
 	// --- Master page ---
 
 	// MasterUserRanking returns top users by total_tokens within an org.

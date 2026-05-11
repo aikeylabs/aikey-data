@@ -66,6 +66,25 @@ func (m *mockRepo) PersonalByKeyTotal(_ context.Context, p usage.QueryParams) ([
 	}, nil
 }
 
+// PersonalRecent — Phase 3B R23 (2026-05-11). Returns a small fixture
+// row so the handler test (if added later) sees a non-empty payload.
+// Existing tests don't exercise the Recent path; this just satisfies
+// the Repository interface contract.
+func (m *mockRepo) PersonalRecent(_ context.Context, p usage.QueryParams) ([]usage.RecentRequest, error) {
+	return []usage.RecentRequest{
+		{
+			RequestID:      "req-test",
+			EventTimeMs:    1700000000000,
+			ProviderCode:   "anthropic",
+			Model:          "claude-test",
+			TotalTokens:    100,
+			HTTPStatusCode: 200,
+			VirtualKeyID:   "personal:my-key",
+			RequestStatus:  "success",
+		},
+	}, nil
+}
+
 func TestPersonalTimeline(t *testing.T) {
 	h := NewUsageHandler(&mockRepo{})
 	req := httptest.NewRequest("GET", "/v1/usage/personal/timeline?seat_id=seat1", nil)

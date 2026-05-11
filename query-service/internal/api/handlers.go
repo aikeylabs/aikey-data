@@ -124,6 +124,44 @@ func (h *UsageHandler) PersonalByProtocolTotal(w http.ResponseWriter, r *http.Re
 	shared.JSON(w, http.StatusOK, data)
 }
 
+// GET /v1/usage/personal/recent?seat_id=...&limit=5  (or account_id / org_id=personal)
+// Returns the most recent non-canary requests as raw usage_event_ods
+// rows. Default limit 5, capped at 50 to keep the response small —
+// callers wanting paginated history should use a dedicated history
+// endpoint (not this one, which is shaped for the Overview "Recent
+// Requests" mini-card). Phase 3B R23.
+func (h *UsageHandler) PersonalRecent(w http.ResponseWriter, r *http.Request) {
+	p, err := parsePersonalParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	// Override the generic Limit (which defaults to 50 in Defaults())
+	// with the smaller "recent card" default so callers without
+	// ?limit= get a reasonable size payload.
+	limit := 5
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	p.Limit = limit
+
+	data, err := h.repo.PersonalRecent(r.Context(), p)
+	if err != nil {
+		slog.Error("PersonalRecent query failed", "error", err)
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	if data == nil {
+		data = []usage.RecentRequest{}
+	}
+	shared.JSON(w, http.StatusOK, map[string]any{"requests": data})
+}
+
 // GET /v1/usage/personal/by-key/total?seat_id=...&start_date=...&end_date=...
 // OR account_id=...
 func (h *UsageHandler) PersonalByKeyTotal(w http.ResponseWriter, r *http.Request) {

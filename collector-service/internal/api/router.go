@@ -24,9 +24,17 @@ type MetricsResponse struct {
 //   - they are read-only and return pipeline freshness metadata, no business data
 //   - the proxy's canary probe hits /internal/canary-check without a bearer token
 //   - aikey doctor (CLI) reads /v1/diagnostics/pipeline without a bearer token
-// If you need to restrict them, wrap both with shared.ServiceTokenAuth and
+// If you need to restrict them, wrap both with shared.IngestAuth and
 // update the proxy/CLI callers accordingly.
-func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, projWorker *projector.Worker, db *sql.DB, serviceToken string) http.Handler {
+//
+// jwtSecret + serviceToken together drive shared.IngestAuth:
+//   - JWT path (preferred): bearer is a HS256 JWT signed by control-service
+//     with the same secret; account_id from claims is auto-attached to
+//     ingest request context for force-overwrite (see HandleBatch).
+//   - service_token path (escape hatch): legacy S2S token; client may
+//     claim any account_id in event payloads.
+// Either may be empty. Both empty = open ingest (dev / CI default).
+func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, projWorker *projector.Worker, db *sql.DB, jwtSecret []byte, serviceToken string) http.Handler {
 	mux := http.NewServeMux()
 
 	// Health check — unauthenticated
@@ -68,7 +76,7 @@ func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, projWorker *pr
 	authed := http.NewServeMux()
 	authed.HandleFunc("POST /v1/usage-events:batch", ingestH.HandleBatch)
 
-	mux.Handle("/v1/", shared.ServiceTokenAuth(serviceToken, authed))
+	mux.Handle("/v1/", shared.IngestAuth(jwtSecret, serviceToken, authed))
 
 	return mux
 }

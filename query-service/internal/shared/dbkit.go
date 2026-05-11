@@ -144,7 +144,15 @@ func (d *DB) DateOf(col string) string {
 	if d.Dialect == DialectSQLite {
 		return fmt.Sprintf("DATE(%s/1000, 'unixepoch')", col)
 	}
-	return fmt.Sprintf("DATE(%s AT TIME ZONE 'UTC')", col)
+	// PG dialect-parity fix (2026-05-11, same root cause as DateOfLocal):
+	// `DATE(... AT TIME ZONE 'UTC')` returns PG `date` type which lib/pq
+	// serialises into a Go string as "2026-05-11T00:00:00Z" (RFC3339),
+	// not "2026-05-11" — breaking the contract clients depend on (string
+	// equality / <= compare). TO_CHAR forces a stable short-form text
+	// result that matches SQLite's `DATE()` output. Currently DateOf has
+	// no live callers (all timeline paths use DateOfLocal), but we keep
+	// parity so future authors can pick either safely.
+	return fmt.Sprintf("TO_CHAR(%s AT TIME ZONE 'UTC', 'YYYY-MM-DD')", col)
 }
 
 // HourBucketLocal is the tz-aware counterpart to HourBucket. Shifts the
@@ -178,12 +186,25 @@ func (d *DB) HourBucketLocal(col string, offsetMs int64, tzName string) string {
 }
 
 // DateOfLocal is the tz-aware counterpart to DateOf. Projects the
-// millis column as a local YYYY-MM-DD string.
+// millis / TIMESTAMPTZ column as a local YYYY-MM-DD string.
+//
+// Dialect parity (2026-05-11 fix): the JSON contract for timeline
+// endpoints declares `date` as `YYYY-MM-DD` (TimelinePoint docstring
+// in domain.go); the web client compares `d.date <= today` with
+// `today` built from local Date() → "YYYY-MM-DD" short form. SQLite's
+// `DATE((ms+offset)/1000, 'unixepoch')` returns exactly that; but
+// PostgreSQL's `DATE(... AT TIME ZONE 'xxx')` returns a `date` type
+// which lib/pq serialises as the full RFC3339 timestamp
+// `YYYY-MM-DDT00:00:00Z` when Scan()ed into a Go string. The web
+// then string-compares `"2026-05-11T00:00:00Z" <= "2026-05-11"` =
+// false, drops the row, pads zeros — chart renders blank despite
+// non-zero data in DWD. Force PG to TO_CHAR the result so both
+// dialects produce the same short form.
 func (d *DB) DateOfLocal(col string, offsetMs int64, tzName string) string {
 	if d.Dialect == DialectSQLite {
 		return fmt.Sprintf("DATE((%s + %d)/1000, 'unixepoch')", col, offsetMs)
 	}
-	return fmt.Sprintf("DATE(%s AT TIME ZONE %s)", col, pgLiteral(tzName))
+	return fmt.Sprintf("TO_CHAR(%s AT TIME ZONE %s, 'YYYY-MM-DD')", col, pgLiteral(tzName))
 }
 
 // pgLiteral wraps a string in single quotes with minimal escaping for

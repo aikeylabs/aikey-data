@@ -68,6 +68,31 @@ type KeyTotal struct {
 	RequestCount             int64  `json:"request_count"`
 }
 
+// RecentRequest is a single raw usage event surfaced to the Overview
+// "Recent Requests" card. Sourced directly from `usage_event_ods` (not
+// the DWD layer) so canary probe rows can be filtered out by the SQL
+// `route_source != 'canary'` clause — DWD aggregates strip the
+// route_source dimension. Each entry shows the user a recent KEY /
+// OAuth-backed forward through aikey-proxy.
+//
+// Field choice rationale: smallest set that lets the UI render a
+// useful row — when, which provider/model, how big, success/failure,
+// and which key. We deliberately omit the long ID columns (binding,
+// credential, trace) — they bloat the JSON and the UI doesn't show
+// them. If a future feature needs deeper detail, link to a separate
+// `/v1/usage/personal/request/:id` rather than enlarging this list
+// payload.
+type RecentRequest struct {
+	RequestID      string `json:"request_id"`
+	EventTimeMs    int64  `json:"event_time_ms"`
+	ProviderCode   string `json:"provider_code"`
+	Model          string `json:"model"`
+	TotalTokens    int64  `json:"total_tokens"`
+	HTTPStatusCode int    `json:"http_status_code"`
+	VirtualKeyID   string `json:"virtual_key_id"`
+	RequestStatus  string `json:"request_status"` // "success" | "error" | ...
+}
+
 // UserRanking is a single entry in the per-user ranking.
 type UserRanking struct {
 	AccountID   string `json:"account_id"`

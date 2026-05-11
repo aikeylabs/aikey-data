@@ -79,7 +79,13 @@ func main() {
 	enricher := projector.NewEnricher(controlReader)
 	projWorker := projector.NewWorker(odsReader, dwdWriter, checkpoint, enricher)
 
-	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, cfg.ServiceToken)
+	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, cfg.JWTSecret, cfg.ServiceToken)
+	if cfg.ServiceToken != "" {
+		slog.Warn(
+			"ingest auth: service_token fallback ENABLED — clients holding this token can forge events for any account. Prefer per-user JWT (set JWT_SECRET + clear SERVICE_TOKEN).",
+			"event.name", "ingest.auth.service_token_enabled",
+		)
+	}
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,

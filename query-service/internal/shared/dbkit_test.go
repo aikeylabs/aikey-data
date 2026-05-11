@@ -150,3 +150,66 @@ func TestStripPgCasts(t *testing.T) {
 		}
 	}
 }
+
+// --- DateOfLocal / DateOf: PG must format as YYYY-MM-DD text via TO_CHAR ---
+//
+// 2026-05-11 regression guard for workflow/CI/bugfix/
+// 20260511-pg-timeline-date-format.md. lib/pq serialises PG `date` →
+// Go string as `"2026-05-11T00:00:00Z"`, breaking the JSON contract
+// (TimelinePoint.Date docstring: "YYYY-MM-DD"). The fix forces TO_CHAR
+// so PG returns a text in the same shape SQLite's DATE() already does.
+//
+// These tests assert the SQL fragment text — they do NOT execute against
+// a real PG instance (that would need testcontainers). A future statement-
+// level change that drops TO_CHAR (e.g. a "cleanup" PR) is caught here.
+
+func TestDateOfLocal_PostgresUsesToCharShortDate(t *testing.T) {
+	d := &DB{Dialect: DialectPostgres}
+	got := d.DateOfLocal("event_time", 0, "Asia/Shanghai")
+	if !strings.Contains(got, "TO_CHAR") {
+		t.Errorf("PG DateOfLocal must use TO_CHAR for stable YYYY-MM-DD text;\n got: %s", got)
+	}
+	if !strings.Contains(got, "'YYYY-MM-DD'") {
+		t.Errorf("PG DateOfLocal must format as YYYY-MM-DD;\n got: %s", got)
+	}
+	if !strings.Contains(got, "AT TIME ZONE 'Asia/Shanghai'") {
+		t.Errorf("PG DateOfLocal must apply the caller's tz;\n got: %s", got)
+	}
+}
+
+func TestDateOfLocal_SQLiteUnchanged(t *testing.T) {
+	d := &DB{Dialect: DialectSQLite}
+	got := d.DateOfLocal("event_time", 28800000, "Asia/Shanghai")
+	if !strings.Contains(got, "DATE(") {
+		t.Errorf("SQLite DateOfLocal should use DATE() with unixepoch;\n got: %s", got)
+	}
+	if strings.Contains(got, "TO_CHAR") {
+		t.Errorf("SQLite DateOfLocal must NOT use TO_CHAR (PG-only);\n got: %s", got)
+	}
+}
+
+func TestDateOf_PostgresUsesToCharShortDate(t *testing.T) {
+	// DateOf is dead code today (DateOfLocal covers all callers), but
+	// kept symmetric to DateOfLocal so a future author can pick either
+	// safely. Same TO_CHAR enforcement to keep the dialect parity
+	// invariant clear.
+	d := &DB{Dialect: DialectPostgres}
+	got := d.DateOf("event_time")
+	if !strings.Contains(got, "TO_CHAR") {
+		t.Errorf("PG DateOf must use TO_CHAR;\n got: %s", got)
+	}
+	if !strings.Contains(got, "'YYYY-MM-DD'") {
+		t.Errorf("PG DateOf must format as YYYY-MM-DD;\n got: %s", got)
+	}
+}
+
+func TestDateOf_SQLiteUnchanged(t *testing.T) {
+	d := &DB{Dialect: DialectSQLite}
+	got := d.DateOf("event_time")
+	if !strings.Contains(got, "DATE(") {
+		t.Errorf("SQLite DateOf should still use DATE();\n got: %s", got)
+	}
+	if strings.Contains(got, "TO_CHAR") {
+		t.Errorf("SQLite DateOf must NOT use TO_CHAR;\n got: %s", got)
+	}
+}

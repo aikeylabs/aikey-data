@@ -214,6 +214,74 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 	return result, rows.Err()
 }
 
+// PersonalRecent returns the most recent N non-canary requests as raw
+// usage_event_ods rows. Unlike the other Personal queries, this one
+// touches the ODS layer directly (not DWD aggregates) because:
+//
+//   - Canary probes (route_source='canary') need to be excluded — DWD
+//     aggregates already strip route_source as a dimension, so the
+//     aggregated tables don't let us discriminate.
+//   - "Recent" semantically means raw rows, one per request — not
+//     daily/hourly buckets.
+//
+// Date-window filter is intentionally omitted: Recent always means
+// "newest", regardless of where the caller's chart window sits. If
+// QueryParams.StartDate / EndDate were applied here, the card would
+// render empty on a stale window (e.g. 30-day chart starting 30 days
+// ago — recent activity today would be excluded).
+func (r *sqlRepo) PersonalRecent(ctx context.Context, p QueryParams) ([]RecentRequest, error) {
+	filter, id := personalFilter(p)
+	limit := p.Limit
+	if limit <= 0 {
+		limit = 5
+	}
+	// NOTE: `request_id`, `provider_code`, `model`, and other text
+	// columns can be NULL in the wild (proxy may emit rows before the
+	// upstream response is parsed). Wrap all scanned strings/ints in
+	// COALESCE so the Go-side Scan never hits "converting NULL to
+	// string is unsupported". Empty-string defaults are safer than
+	// switching to sql.NullString — the UI doesn't need to
+	// distinguish "missing" from "empty" for a recent-list card.
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT
+			COALESCE(request_id, '') AS request_id,
+			event_time,
+			COALESCE(provider_code, '') AS provider_code,
+			COALESCE(model, '') AS model,
+			COALESCE(total_tokens, 0) AS total_tokens,
+			COALESCE(http_status_code, 0) AS http_status_code,
+			COALESCE(virtual_key_id, '') AS virtual_key_id,
+			COALESCE(request_status, '') AS request_status
+		FROM usage_event_ods
+		WHERE %s
+		  AND route_source != 'canary'
+		ORDER BY event_time DESC
+		LIMIT ?`, filter),
+		id, limit)
+	if err != nil {
+		return nil, fmt.Errorf("personal recent: %w", err)
+	}
+	defer rows.Close()
+
+	var result []RecentRequest
+	for rows.Next() {
+		var rr RecentRequest
+		// NOTE: http_status_code and total_tokens may be NULL for
+		// in-flight rows. sql.NullInt64 / NullString would be more
+		// careful but the schema declares NOT NULL with zero defaults
+		// on these columns, so direct Scan works on real data.
+		if err := rows.Scan(
+			&rr.RequestID, &rr.EventTimeMs, &rr.ProviderCode, &rr.Model,
+			&rr.TotalTokens, &rr.HTTPStatusCode, &rr.VirtualKeyID,
+			&rr.RequestStatus,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, rr)
+	}
+	return result, rows.Err()
+}
+
 // --- Master page ---
 
 func (r *sqlRepo) MasterUserRanking(ctx context.Context, p QueryParams) ([]UserRanking, error) {

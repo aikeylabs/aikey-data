@@ -19,8 +19,18 @@ import (
 type Config struct {
 	// DBDialect selects placeholder rewriting: "postgres" or "sqlite".
 	DBDialect string
-	// ServiceToken is the bearer token for authenticated ingest endpoints.
+	// ServiceToken is the legacy single-token bearer for ingest. Kept as
+	// an admin escape hatch — when set, the collector accepts a matching
+	// Authorization header AND trusts client-claimed account_id verbatim.
+	// Preferred path is JWTSecret (per-user JWT, server-side account_id
+	// overwrite). See roadmap update 20260511-user-jwt-collector-ingest.md.
 	ServiceToken string
+	// JWTSecret is the HS256 signing secret control-service uses to issue
+	// user access tokens. The collector verifies inbound bearers against
+	// this. When set, ingest requests carrying a valid JWT have the
+	// JWT's account_id force-overwritten onto every event in the batch.
+	// Empty means "no JWT path; only ServiceToken accepted".
+	JWTSecret []byte
 	// Logger for collector output.
 	Logger *slog.Logger
 }
@@ -39,6 +49,17 @@ func New(db *sql.DB, cfg Config) Result {
 		logger = slog.Default()
 	}
 
+	// 2026-05-11 B-phase admin-escape-hatch surfacing: legacy
+	// ServiceToken is still accepted but is an admin trust-mode path
+	// (event payloads' account_id is honoured verbatim). Loud startup
+	// log so operators see they've enabled the S2S fallback.
+	if cfg.ServiceToken != "" {
+		logger.Warn(
+			"ingest auth: service_token fallback ENABLED — clients holding this token can forge events for any account. Prefer per-user JWT (set JWTSecret + clear ServiceToken).",
+			"event.name", "ingest.auth.service_token_enabled",
+		)
+	}
+
 	ddb := shared.NewDB(db, cfg.DBDialect)
 
 	odsRepo := ingest.NewSQLODSRepository(ddb)
@@ -52,7 +73,7 @@ func New(db *sql.DB, cfg Config) Result {
 	enricher := projector.NewEnricher(ctrlReader)
 	projWorker := projector.NewWorker(odsReader, dwdWriter, checkpoint, enricher)
 
-	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, cfg.ServiceToken)
+	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, cfg.JWTSecret, cfg.ServiceToken)
 
 	return Result{
 		Handler:      router,
