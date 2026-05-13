@@ -25,6 +25,12 @@ type Repository interface {
 	// PersonalByKeyTotal returns total_tokens per virtual_key_id.
 	PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyTotal, error)
 
+	// PersonalByModelTotal returns per-model token & request totals,
+	// sorted by total_tokens DESC and capped at 20 rows. Powers the
+	// `/user/cost` "Usage by model" chart. NULL / empty `model` values
+	// are coalesced to "unknown" so the SUM never silently drops them.
+	PersonalByModelTotal(ctx context.Context, p QueryParams) ([]ModelTotal, error)
+
 	// PersonalRecent returns the N most recent non-canary requests
 	// straight from `usage_event_ods` (not DWD aggregates) so the
 	// route_source filter excluding 'canary' is possible. Used by the

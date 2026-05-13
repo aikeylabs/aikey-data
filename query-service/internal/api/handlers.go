@@ -162,6 +162,30 @@ func (h *UsageHandler) PersonalRecent(w http.ResponseWriter, r *http.Request) {
 	shared.JSON(w, http.StatusOK, map[string]any{"requests": data})
 }
 
+// GET /v1/usage/personal/by-model/total?seat_id=...&start_date=...&end_date=...
+// OR account_id= / org_id=personal
+//
+// Powers `/user/cost` "Usage by model". Returns rows sorted by
+// total_tokens DESC, capped at 20 in the repo layer. Model strings
+// are kept as provider-reported (no snapshot normalization).
+func (h *UsageHandler) PersonalByModelTotal(w http.ResponseWriter, r *http.Request) {
+	p, err := parsePersonalParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	data, err := h.repo.PersonalByModelTotal(r.Context(), p)
+	if err != nil {
+		slog.Error("PersonalByModelTotal query failed", "error", err)
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	if data == nil {
+		data = []usage.ModelTotal{}
+	}
+	shared.JSON(w, http.StatusOK, data)
+}
+
 // GET /v1/usage/personal/by-key/total?seat_id=...&start_date=...&end_date=...
 // OR account_id=...
 func (h *UsageHandler) PersonalByKeyTotal(w http.ResponseWriter, r *http.Request) {

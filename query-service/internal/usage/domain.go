@@ -49,6 +49,29 @@ type ProtocolTotal struct {
 	RequestCount int64  `json:"request_count"`
 }
 
+// ModelTotal is a single entry in the per-model usage breakdown for the
+// `/user/cost` "Usage by model" chart. Same 4-segment Anthropic cache
+// shape as KeyTotal so the FE can reuse the existing stacked-bar idiom
+// (uncached / cache_creation / cache_read / output) when rendering.
+//
+// Model identity is the raw `model` string the provider reported, with
+// NULL / empty coalesced to "unknown" at the SQL layer (matches the
+// by-protocol "uncategorized" handling). Snapshot-versioned models
+// (e.g. `claude-sonnet-4-5-20250929` vs `claude-sonnet-4-6`) are
+// surfaced as separate rows — no normalization. Reason: this is the
+// minimum-surface design; if snapshot fragmentation becomes a UX
+// complaint, add a normalization config table rather than baking
+// regex logic into SQL.
+type ModelTotal struct {
+	Model                    string `json:"model"`
+	InputTokens              int64  `json:"input_tokens"`                // total prompt input (incl. cached + creation)
+	CachedInputTokens        int64  `json:"cached_input_tokens"`         // Anthropic cache_read_input_tokens
+	CacheCreationInputTokens int64  `json:"cache_creation_input_tokens"` // Anthropic cache_creation_input_tokens
+	OutputTokens             int64  `json:"output_tokens"`
+	TotalTokens              int64  `json:"total_tokens"`
+	RequestCount             int64  `json:"request_count"`
+}
+
 // KeyTotal is a single entry in the per-key usage breakdown.
 //
 // Priority for display labels on the client (see web/src/pages/user/

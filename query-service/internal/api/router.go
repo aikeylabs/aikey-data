@@ -42,6 +42,7 @@ func NewRouter(h *UsageHandler, db *sql.DB, serviceToken string) http.Handler {
 	authed.HandleFunc("GET /v1/usage/personal/by-protocol/timeline", h.PersonalByProtocolTimeline)
 	authed.HandleFunc("GET /v1/usage/personal/by-protocol/total", h.PersonalByProtocolTotal)
 	authed.HandleFunc("GET /v1/usage/personal/by-key/total", h.PersonalByKeyTotal)
+	authed.HandleFunc("GET /v1/usage/personal/by-model/total", h.PersonalByModelTotal)
 	// Phase 3B R23 (2026-05-11): raw recent requests for Overview card.
 	authed.HandleFunc("GET /v1/usage/personal/recent", h.PersonalRecent)
 

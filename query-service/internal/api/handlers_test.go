@@ -66,6 +66,13 @@ func (m *mockRepo) PersonalByKeyTotal(_ context.Context, p usage.QueryParams) ([
 	}, nil
 }
 
+func (m *mockRepo) PersonalByModelTotal(_ context.Context, p usage.QueryParams) ([]usage.ModelTotal, error) {
+	return []usage.ModelTotal{
+		{Model: "claude-sonnet-4-6", TotalTokens: 4000, RequestCount: 20, InputTokens: 2500, OutputTokens: 1500},
+		{Model: "kimi-k2-0905-preview", TotalTokens: 1200, RequestCount: 6, InputTokens: 900, OutputTokens: 300},
+	}, nil
+}
+
 // PersonalRecent — Phase 3B R23 (2026-05-11). Returns a small fixture
 // row so the handler test (if added later) sees a non-empty payload.
 // Existing tests don't exercise the Recent path; this just satisfies
@@ -125,6 +132,33 @@ func TestPersonalByProtocolTotal(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&result)
 	if len(result) != 2 {
 		t.Errorf("expected 2 protocols, got %d", len(result))
+	}
+}
+
+func TestPersonalByModelTotal(t *testing.T) {
+	h := NewUsageHandler(&mockRepo{})
+	req := httptest.NewRequest("GET", "/v1/usage/personal/by-model/total?seat_id=seat1&start_date=2026-03-01&end_date=2026-03-31", nil)
+	w := httptest.NewRecorder()
+	h.PersonalByModelTotal(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var result []usage.ModelTotal
+	json.NewDecoder(w.Body).Decode(&result)
+	if len(result) != 2 {
+		t.Errorf("expected 2 models, got %d", len(result))
+	}
+}
+
+func TestPersonalByModelTotal_MissingIdentity(t *testing.T) {
+	h := NewUsageHandler(&mockRepo{})
+	req := httptest.NewRequest("GET", "/v1/usage/personal/by-model/total", nil)
+	w := httptest.NewRecorder()
+	h.PersonalByModelTotal(w, req)
+
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
 

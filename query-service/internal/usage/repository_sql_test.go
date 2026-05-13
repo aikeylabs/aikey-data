@@ -591,3 +591,162 @@ func TestPersonalTimeline_LocalTZDayBoundary(t *testing.T) {
 		}
 	})
 }
+
+// --- PersonalByModelTotal ---
+//
+// FIXME(schema-fidelity, 2026-05-12): this setup follows the existing
+// inline-schema convention used elsewhere in this file. Per
+// workflow/CI/IDE/claude/principles/test-fixture-real-schema.md
+// schema-touching tests should run against the real baseline /
+// migration chain. The whole file should migrate, not just this test
+// — tracking that as a separate cleanup so we don't drift the
+// convention partway.
+
+// setupByModelTestDB creates a DWD table that includes `model` and the
+// 4-segment token columns the by-model query reads. Kept separate from
+// setupUsageTestDB so existing tests (which don't INSERT these
+// columns) aren't perturbed.
+func setupByModelTestDB(t *testing.T) *shared.DB {
+	t.Helper()
+	raw, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	schema := `
+	CREATE TABLE usage_fact_dwd (
+		event_id                    TEXT,
+		org_id                      TEXT,
+		seat_id                     TEXT,
+		account_id                  TEXT,
+		model                       TEXT,
+		provider_code               TEXT,
+		event_time                  INTEGER,
+		usage_date                  TEXT,
+		input_tokens                INTEGER,
+		cached_input_tokens         INTEGER,
+		cache_creation_input_tokens INTEGER,
+		output_tokens               INTEGER,
+		total_tokens                INTEGER,
+		request_count               INTEGER
+	);`
+	if _, err := raw.Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+	return shared.NewDB(raw, shared.DialectSQLite)
+}
+
+func insertModelRow(t *testing.T, db *shared.DB, model, seat string, atUTC string, total int64) {
+	t.Helper()
+	ts, err := time.Parse(time.RFC3339, atUTC)
+	if err != nil {
+		t.Fatalf("parse %q: %v", atUTC, err)
+	}
+	// `model` may be NULL or empty in production for rows captured
+	// before the upstream response is parsed. The test passes them in
+	// verbatim so the COALESCE(NULLIF(model,''),'unknown') path can be
+	// asserted end-to-end.
+	var modelArg any = model
+	if model == "<NULL>" {
+		modelArg = nil
+	}
+	_, err = db.DB.Exec(`
+		INSERT INTO usage_fact_dwd
+			(event_id, org_id, seat_id, model, event_time, usage_date,
+			 input_tokens, cached_input_tokens, cache_creation_input_tokens,
+			 output_tokens, total_tokens, request_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		atUTC+"-"+model, "org1", seat, modelArg, ts.UTC().UnixMilli(), ts.UTC().Format("2006-01-02"),
+		total/2, 0, 0, total/2, total, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPersonalByModelTotal_SortsAndCoalesces covers the three behaviours
+// the `/user/cost` "Usage by model" chart depends on:
+//
+//  1. Rows sort by SUM(total_tokens) DESC — the chart shows the
+//     biggest cost driver at the top.
+//  2. NULL and empty `model` collapse into a single "unknown" group —
+//     no silent NULL drops that would underreport total tokens vs the
+//     by-key chart on the same page.
+//  3. Provider-reported model strings are kept verbatim (no
+//     snapshot normalization) — `claude-sonnet-4-5-20250929` and
+//     `claude-sonnet-4-6` are separate rows.
+func TestPersonalByModelTotal_SortsAndCoalesces(t *testing.T) {
+	db := setupByModelTestDB(t)
+
+	// Two snapshots of Claude Sonnet — must stay separate rows.
+	insertModelRow(t, db, "claude-sonnet-4-6", "seat1", "2026-04-24T10:00:00Z", 5000)
+	insertModelRow(t, db, "claude-sonnet-4-5-20250929", "seat1", "2026-04-24T11:00:00Z", 3000)
+	// Kimi K2 — separate provider, separate group.
+	insertModelRow(t, db, "kimi-k2-0905-preview", "seat1", "2026-04-24T12:00:00Z", 2000)
+	// NULL and empty model — must coalesce to "unknown".
+	insertModelRow(t, db, "<NULL>", "seat1", "2026-04-24T13:00:00Z", 400)
+	insertModelRow(t, db, "", "seat1", "2026-04-24T14:00:00Z", 100)
+	// Other seat — must be filtered out.
+	insertModelRow(t, db, "claude-sonnet-4-6", "seat2", "2026-04-24T10:30:00Z", 9999)
+
+	repo := NewSQLRepository(db)
+	start, _ := time.Parse("2006-01-02", "2026-04-01")
+	end, _ := time.Parse("2006-01-02", "2026-04-30")
+
+	got, err := repo.PersonalByModelTotal(context.Background(), QueryParams{
+		SeatID:    "seat1",
+		StartDate: start,
+		EndDate:   end,
+	})
+	if err != nil {
+		t.Fatalf("PersonalByModelTotal: %v", err)
+	}
+
+	if len(got) != 4 {
+		t.Fatalf("want 4 rows (2 claude snapshots + kimi + unknown), got %d: %+v", len(got), got)
+	}
+	// (1) sort by tokens DESC.
+	expectOrder := []struct {
+		model  string
+		tokens int64
+	}{
+		{"claude-sonnet-4-6", 5000},
+		{"claude-sonnet-4-5-20250929", 3000},
+		{"kimi-k2-0905-preview", 2000},
+		{"unknown", 500}, // NULL (400) + "" (100) collapsed
+	}
+	for i, want := range expectOrder {
+		if got[i].Model != want.model {
+			t.Errorf("row %d: model = %q, want %q", i, got[i].Model, want.model)
+		}
+		if got[i].TotalTokens != want.tokens {
+			t.Errorf("row %d (%s): total_tokens = %d, want %d", i, want.model, got[i].TotalTokens, want.tokens)
+		}
+	}
+}
+
+// TestPersonalByModelTotal_LimitsTop20 verifies the LIMIT 20 cap so a
+// runaway model count doesn't blow the chart row layout. Seed 25
+// distinct models, expect only the top 20 by tokens.
+func TestPersonalByModelTotal_LimitsTop20(t *testing.T) {
+	db := setupByModelTestDB(t)
+	for i := 0; i < 25; i++ {
+		modelName := "model-" + itoa(i)
+		// Tokens descending with i so model-0 has the largest sum.
+		insertModelRow(t, db, modelName, "seat1", "2026-04-24T10:00:00Z", int64((25-i)*100))
+	}
+	repo := NewSQLRepository(db)
+	start, _ := time.Parse("2006-01-02", "2026-04-01")
+	end, _ := time.Parse("2006-01-02", "2026-04-30")
+	got, err := repo.PersonalByModelTotal(context.Background(), QueryParams{
+		SeatID: "seat1", StartDate: start, EndDate: end,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 20 {
+		t.Errorf("LIMIT 20 not applied: got %d rows", len(got))
+	}
+	if got[0].Model != "model-0" {
+		t.Errorf("top row should be model-0 (largest tokens), got %s", got[0].Model)
+	}
+}

@@ -214,6 +214,63 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 	return result, rows.Err()
 }
 
+// PersonalByModelTotal aggregates DWD rows by the provider-reported
+// `model` string and returns the top 20 rows sorted by total_tokens
+// DESC. Powers the `/user/cost` "Usage by model" chart.
+//
+// Why "model" raw (no normalization): snapshot-versioned strings
+// (`claude-sonnet-4-5-20250929` vs `claude-sonnet-4-6`) are kept as
+// separate rows. A normalization layer (regex → "claude-sonnet-4.5")
+// would be a configuration-table concern, not SQL-embedded logic, so
+// we defer it until snapshot fragmentation becomes a measurable UX
+// problem. See `roadmap20260320/技术实现/update/` if introducing
+// model-version normalization later.
+//
+// Why LIMIT 20: per-tenant model count is bounded in practice
+// (single user rarely talks to >10 distinct models in a window). 20
+// preserves a long tail for power users while keeping the chart
+// readable and the FE row count predictable.
+//
+// Why COALESCE(NULLIF(model,''), 'unknown'): the `model` column can
+// be NULL or empty for rows captured before the upstream response was
+// parsed (proxy fast-path). Bucketing them into an explicit
+// "unknown" group preserves SUM accuracy — silent NULL drops would
+// under-report total tokens versus the by-key chart on the same
+// page.
+func (r *sqlRepo) PersonalByModelTotal(ctx context.Context, p QueryParams) ([]ModelTotal, error) {
+	filter, id := personalFilter(p)
+	startMs, endMs := p.LocalWindowMs()
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT COALESCE(NULLIF(model, ''), 'unknown') AS model_grp,
+		       COALESCE(SUM(input_tokens),0),
+		       COALESCE(SUM(cached_input_tokens),0),
+		       COALESCE(SUM(cache_creation_input_tokens),0),
+		       COALESCE(SUM(output_tokens),0),
+		       COALESCE(SUM(total_tokens),0),
+		       COALESCE(SUM(request_count),0)
+		FROM usage_fact_dwd
+		WHERE %s
+		  AND event_time >= ? AND event_time < ?
+		GROUP BY COALESCE(NULLIF(model, ''), 'unknown')
+		ORDER BY SUM(total_tokens) DESC
+		LIMIT 20`, filter),
+		id, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
+	if err != nil {
+		return nil, fmt.Errorf("personal by-model total: %w", err)
+	}
+	defer rows.Close()
+
+	var result []ModelTotal
+	for rows.Next() {
+		var mt ModelTotal
+		if err := rows.Scan(&mt.Model, &mt.InputTokens, &mt.CachedInputTokens, &mt.CacheCreationInputTokens, &mt.OutputTokens, &mt.TotalTokens, &mt.RequestCount); err != nil {
+			return nil, err
+		}
+		result = append(result, mt)
+	}
+	return result, rows.Err()
+}
+
 // PersonalRecent returns the most recent N non-canary requests as raw
 // usage_event_ods rows. Unlike the other Personal queries, this one
 // touches the ODS layer directly (not DWD aggregates) because:
