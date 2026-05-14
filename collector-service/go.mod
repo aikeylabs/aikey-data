@@ -7,13 +7,14 @@ require (
 	github.com/AiKeyLabs/pkg/aikeycompat v0.0.0
 	github.com/AiKeyLabs/pkg/aikeytime v0.0.0
 	github.com/AiKeyLabs/pkg/buildinfo v0.0.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/lib/pq v1.12.3
 	modernc.org/sqlite v1.48.2
 )
 
 require (
+	github.com/AiKeyLabs/aikey-data/baseline v0.0.0-00010101000000-000000000000 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
@@ -31,3 +32,5 @@ replace github.com/AiKeyLabs/pkg/buildinfo => ../../pkg/buildinfo
 replace github.com/AiKeyLabs/pkg/aikeytime => ../../pkg/aikeytime
 
 replace github.com/AiKeyLabs/pkg/aikeycompat => ../../pkg/aikeycompat
+
+replace github.com/AiKeyLabs/aikey-data/baseline => ../baseline

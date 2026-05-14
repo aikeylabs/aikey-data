@@ -4,7 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"strings"
 )
+
+// personalVKPrefix marks a virtual-key as a Personal-vault local key
+// (origin: aikey-cli's local vault, not a team-issued managed key).
+// Examples: "personal:kimi-official", "personal:default", etc. These
+// VKs deliberately do NOT have a corresponding row in
+// managed_key_control_events — the team-issuance pipeline never sees
+// them. Looking them up would (a) be 100% a miss in Trial / Production
+// where the table exists but is empty for personal: keys, or (b) error
+// out with "no such table" in Personal edition where the Control
+// component is not installed.
+const personalVKPrefix = "personal:"
 
 const projectorVersion = "0.1.0"
 
@@ -30,6 +42,25 @@ func (e *Enricher) Enrich(ctx context.Context, rec *ODSRecord) (*DWDFact, error)
 		fact.UserUsageScope = UsageScopeExcluded
 		fact.AnomalyType = AnomalyPendingReview
 		fact.AnomalyReason = "missing virtual_key_id, cannot verify ownership"
+		return fact, nil
+	}
+
+	// Personal-vault VK short-circuit (2026-05-13 binary-isolation refactor).
+	// VKs prefixed with "personal:" originate from aikey-cli's local vault
+	// and have no managed_key_control_events row by design. In Personal
+	// edition (control component not installed), querying the table would
+	// raise "no such table" and stall the projector in retry loop. In Trial /
+	// Production it would always return nil (table empty for this key) and
+	// fall through to the no_control_event branch with the same observable
+	// shape — short-circuiting here makes the intent explicit and saves a DB
+	// round-trip. UserUsageScope=normal so the row surfaces on /user/overview
+	// (Personal queries don't filter on scope, but explicit is clearer).
+	if strings.HasPrefix(rec.VirtualKeyID.String, personalVKPrefix) {
+		fact.CompletionSource = "personal_vault_key"
+		fact.QualityStatus = QualityPartial
+		fact.BillingScope = BillOrgOnly
+		fact.UserUsageScope = UsageScopeNormal
+		fact.AnomalyType = AnomalyNone
 		return fact, nil
 	}
 

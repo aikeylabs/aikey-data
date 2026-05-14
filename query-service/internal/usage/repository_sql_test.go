@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AiKeyLabs/aikey-data/baseline"
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/shared"
 	_ "modernc.org/sqlite"
 )
@@ -17,8 +18,19 @@ import (
 // Postgres instance, which we don't run in CI — the Postgres path is
 // covered separately by the dialect unit tests in dbkit_test.go.
 
-// setupUsageTestDB creates a minimal usage_fact_dwd table and seeds rows
-// at specific hours so repository queries can be asserted deterministically.
+// setupUsageTestDB bootstraps an in-memory SQLite with the **real
+// v1.0.0 baseline data schema** (usage_event_ods + usage_fact_dwd +
+// usage_dwd_projector_tasks) so repository tests run against the
+// production-shape tables — including the NOT NULL / UNIQUE / DEFAULT
+// constraints. See
+// workflow/CI/IDE/claude/principles/test-fixture-real-schema.md for
+// why inline simplified CREATE TABLEs are no longer acceptable.
+//
+// The DDL is sourced from the aikey-data/baseline public package
+// (which is the same source aikey-config-tool's migration registry
+// delegates to for ComponentData), so a drift between fixture and
+// production schema becomes a compile / build error rather than a
+// silent test miscoverage.
 func setupUsageTestDB(t *testing.T) *shared.DB {
 	t.Helper()
 	raw, err := sql.Open("sqlite", ":memory:")
@@ -26,40 +38,99 @@ func setupUsageTestDB(t *testing.T) *shared.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = raw.Close() })
-
-	// Schema is a trimmed subset of aikey-data/collector-service/migrations
-	// — just enough columns for the personal* / master* queries. SQLite
-	// is untyped so we don't bother with NOT NULL / defaults.
-	//
-	// event_time is INTEGER (Unix epoch millis) after v1.0.3-alpha to
-	// match the real schema. Tests that insert timestamp values must
-	// use int64 millis (see seedHourlyRows → time.Parse + UnixMilli).
-	schema := `
-	CREATE TABLE usage_fact_dwd (
-		event_id         TEXT,
-		org_id           TEXT,
-		seat_id          TEXT,
-		account_id       TEXT,
-		virtual_key_id   TEXT,
-		virtual_key_alias TEXT,
-		provider_code    TEXT,
-		protocol_type    TEXT,
-		billing_scope    TEXT,
-		event_time       INTEGER,  -- Unix epoch millis, UTC
-		usage_date       TEXT,     -- YYYY-MM-DD
-		total_tokens     INTEGER,
-		request_count    INTEGER
-	);`
-	if _, err := raw.Exec(schema); err != nil {
-		t.Fatal(err)
+	for _, stmt := range baseline.DDLFor(baseline.ComponentData, baseline.DialectSQLite) {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("baseline DDL exec failed: %v\nstmt prefix=%.120s", err, stmt)
+		}
 	}
 	return shared.NewDB(raw, shared.DialectSQLite)
 }
 
-// seedHourlyRows inserts one row per (hour, tokens) entry at the given UTC date.
-// event_time is written as int64 epoch millis — matches production schema post
-// v1.0.3-alpha. Using time.Parse of an RFC3339 string makes the intent explicit
-// ("2026-04-24T14:30:00Z" → millis) while staying self-contained in the test.
+// dwdRow describes a single usage_fact_dwd row to seed via insertDWD.
+// Only fields the queries under test actually read are exposed; every
+// NOT NULL column not listed here gets a sensible default
+// (request_status='success', completion_source='test',
+// quality_status='ok', user_usage_scope='normal',
+// projector_version='test', billing_scope='user_only') inside
+// insertDWD so the baseline schema's constraints are satisfied without
+// per-test boilerplate.
+//
+// Model: pass the literal sentinel "<NULL>" to test the SQL NULL
+// branch (insertDWD translates it to `nil`); pass `""` to test the
+// empty-string branch; any other value is stored verbatim. This
+// asymmetry exists so the empty-string case stays addressable from
+// table-driven tests without resorting to *string everywhere.
+type dwdRow struct {
+	EventID                  string // required (NOT NULL UNIQUE per org_id)
+	OrgID                    string
+	SeatID                   string
+	AccountID                string
+	VirtualKeyID             string
+	VirtualKeyAlias          string
+	ProviderCode             string
+	ProtocolType             string
+	Model                    string // "<NULL>" sentinel → SQL NULL; "" stored as empty string
+	EventTimeMs              int64
+	UsageDate                string // YYYY-MM-DD
+	TotalTokens              int64
+	RequestCount             int64 // defaults to 1 if zero
+	InputTokens              int64
+	CachedInputTokens        int64
+	CacheCreationInputTokens int64
+	OutputTokens             int64
+	BillingScope             string // defaults to "user_only" if empty
+}
+
+// odsIDSeq generates unique ods_id values per inserted DWD row so the
+// `UNIQUE (ods_id)` constraint doesn't collide within or across tests.
+// Starts high enough that production-style ODS sequences seeded in
+// future integration tests don't overlap.
+var odsIDSeq int64 = 1_000_000
+
+// insertDWD seeds one row into usage_fact_dwd, filling all baseline
+// NOT NULL columns. Returns nothing — caller doesn't need the assigned
+// dwd_id (SQLite AUTOINCREMENT) for any current assertion.
+func insertDWD(t *testing.T, db *shared.DB, r dwdRow) {
+	t.Helper()
+	if r.EventID == "" {
+		t.Fatalf("insertDWD: event_id is required")
+	}
+	if r.RequestCount == 0 {
+		r.RequestCount = 1
+	}
+	if r.BillingScope == "" {
+		r.BillingScope = "user_only"
+	}
+	odsIDSeq++
+	var modelArg any = r.Model
+	if r.Model == "<NULL>" {
+		modelArg = nil
+	}
+	_, err := db.DB.Exec(`
+		INSERT INTO usage_fact_dwd (
+			event_id, ods_id, occurred_at, event_time, usage_date,
+			org_id, account_id, seat_id, virtual_key_id, virtual_key_alias,
+			provider_code, protocol_type, model,
+			request_count, total_tokens,
+			input_tokens, cached_input_tokens, cache_creation_input_tokens, output_tokens,
+			request_status, completion_source, quality_status,
+			billing_scope, user_usage_scope, projector_version
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.EventID, odsIDSeq, r.EventTimeMs, r.EventTimeMs, r.UsageDate,
+		r.OrgID, r.AccountID, r.SeatID, r.VirtualKeyID, r.VirtualKeyAlias,
+		r.ProviderCode, r.ProtocolType, modelArg,
+		r.RequestCount, r.TotalTokens,
+		r.InputTokens, r.CachedInputTokens, r.CacheCreationInputTokens, r.OutputTokens,
+		"success", "test", "ok",
+		r.BillingScope, "normal", "test")
+	if err != nil {
+		t.Fatalf("insertDWD %q: %v", r.EventID, err)
+	}
+}
+
+// seedHourlyRows inserts one DWD row per (hour, tokens) entry on the
+// given UTC date. Thin wrapper around insertDWD that derives the
+// event_time millis from "<date>T<HH>:30:00Z".
 func seedHourlyRows(t *testing.T, db *shared.DB, date string, seatID string, rows []struct {
 	hour   int
 	tokens int64
@@ -72,15 +143,15 @@ func seedHourlyRows(t *testing.T, db *shared.DB, date string, seatID string, row
 		if err != nil {
 			t.Fatalf("parse %q: %v", iso, err)
 		}
-		eventTime := parsed.UTC().UnixMilli()
-		_, err = db.DB.Exec(`
-			INSERT INTO usage_fact_dwd
-				(event_id, org_id, seat_id, event_time, usage_date, total_tokens, request_count)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			eventForHour(date, r.hour, i), "org1", seatID, eventTime, date, r.tokens, r.reqs)
-		if err != nil {
-			t.Fatal(err)
-		}
+		insertDWD(t, db, dwdRow{
+			EventID:      eventForHour(date, seatID, r.hour, i),
+			OrgID:        "org1",
+			SeatID:       seatID,
+			EventTimeMs:  parsed.UTC().UnixMilli(),
+			UsageDate:    date,
+			TotalTokens:  r.tokens,
+			RequestCount: r.reqs,
+		})
 	}
 }
 
@@ -104,8 +175,13 @@ func itoa(n int) string {
 	}
 	return string(buf[i:])
 }
-func eventForHour(date string, hour, idx int) string {
-	return date + "-h" + itoa(hour) + "-" + itoa(idx)
+// eventForHour generates a stable, per-seat-scoped event_id. Seat is
+// included to keep cross-seat seeds from colliding on the
+// UNIQUE (org_id, event_id) baseline constraint (the previous version
+// dropped seat and worked only because the inline test schema had no
+// such constraint).
+func eventForHour(date, seatID string, hour, idx int) string {
+	return date + "-" + seatID + "-h" + itoa(hour) + "-" + itoa(idx)
 }
 
 // --- PersonalHourlyTimeline ---
@@ -243,14 +319,17 @@ func insertDailyRow(t *testing.T, db *shared.DB, date, seatID, orgID, providerCo
 	if err != nil {
 		t.Fatalf("parse date %s: %v", date, err)
 	}
-	_, err = db.DB.Exec(`INSERT INTO usage_fact_dwd
-		(event_id, org_id, seat_id, provider_code, billing_scope, event_time, usage_date, total_tokens, request_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		date+"-"+seatID+"-"+providerCode, orgID, seatID, providerCode, billingScope,
-		parsed.UTC().UnixMilli(), date, tokens, reqs)
-	if err != nil {
-		t.Fatal(err)
-	}
+	insertDWD(t, db, dwdRow{
+		EventID:      date + "-" + seatID + "-" + providerCode,
+		OrgID:        orgID,
+		SeatID:       seatID,
+		ProviderCode: providerCode,
+		BillingScope: billingScope,
+		EventTimeMs:  parsed.UTC().UnixMilli(),
+		UsageDate:    date,
+		TotalTokens:  tokens,
+		RequestCount: reqs,
+	})
 }
 
 func TestPersonalTimeline_AggregatesByDay(t *testing.T) {
@@ -390,13 +469,14 @@ func TestPersonalHourlyTimeline_OrgIDPersonal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	_, err = db.DB.Exec(`INSERT INTO usage_fact_dwd
-		(event_id, org_id, event_time, usage_date, total_tokens, request_count)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		"ev1", "personal", parsed.UTC().UnixMilli(), date, 42, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	insertDWD(t, db, dwdRow{
+		EventID:      "ev1",
+		OrgID:        "personal",
+		EventTimeMs:  parsed.UTC().UnixMilli(),
+		UsageDate:    date,
+		TotalTokens:  42,
+		RequestCount: 1,
+	})
 	repo := NewSQLRepository(db)
 	day, _ := time.Parse("2006-01-02", date)
 	points, err := repo.PersonalHourlyTimeline(context.Background(), QueryParams{
@@ -438,15 +518,17 @@ func TestCrossDayBoundary_TodayUseAndTimelineAgree(t *testing.T) {
 	ms := utcInstant.UTC().UnixMilli()
 	const date = "2026-04-24"
 
-	_, err = db.DB.Exec(`INSERT INTO usage_fact_dwd
-		(event_id, org_id, seat_id, provider_code, billing_scope,
-		 event_time, usage_date, total_tokens, request_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		"boundary-ev1", "org1", "seat1", "anthropic", "org_and_user",
-		ms, date, 1234, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	insertDWD(t, db, dwdRow{
+		EventID:      "boundary-ev1",
+		OrgID:        "org1",
+		SeatID:       "seat1",
+		ProviderCode: "anthropic",
+		BillingScope: "org_and_user",
+		EventTimeMs:  ms,
+		UsageDate:    date,
+		TotalTokens:  1234,
+		RequestCount: 1,
+	})
 
 	repo := NewSQLRepository(db)
 
@@ -509,13 +591,15 @@ func TestPersonalHourlyTimeline_LocalTZShiftsHourBucket(t *testing.T) {
 	db := setupUsageTestDB(t)
 
 	a, _ := time.Parse(time.RFC3339, "2026-04-24T04:00:00Z")
-	_, err := db.DB.Exec(`INSERT INTO usage_fact_dwd
-		(event_id, org_id, seat_id, event_time, usage_date, total_tokens, request_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"evA", "org1", "seat1", a.UTC().UnixMilli(), "2026-04-24", 100, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	insertDWD(t, db, dwdRow{
+		EventID:      "evA",
+		OrgID:        "org1",
+		SeatID:       "seat1",
+		EventTimeMs:  a.UTC().UnixMilli(),
+		UsageDate:    "2026-04-24",
+		TotalTokens:  100,
+		RequestCount: 1,
+	})
 
 	repo := NewSQLRepository(db)
 	day, _ := time.Parse("2006-01-02", "2026-04-24")
@@ -555,13 +639,15 @@ func TestPersonalTimeline_LocalTZDayBoundary(t *testing.T) {
 	db := setupUsageTestDB(t)
 
 	b, _ := time.Parse(time.RFC3339, "2026-04-24T17:00:00Z")
-	_, err := db.DB.Exec(`INSERT INTO usage_fact_dwd
-		(event_id, org_id, seat_id, event_time, usage_date, total_tokens, request_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"evB", "org1", "seat1", b.UTC().UnixMilli(), "2026-04-24", 200, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	insertDWD(t, db, dwdRow{
+		EventID:      "evB",
+		OrgID:        "org1",
+		SeatID:       "seat1",
+		EventTimeMs:  b.UTC().UnixMilli(),
+		UsageDate:    "2026-04-24",
+		TotalTokens:  200,
+		RequestCount: 1,
+	})
 
 	repo := NewSQLRepository(db)
 	start, _ := time.Parse("2006-01-02", "2026-04-23")
@@ -593,74 +679,31 @@ func TestPersonalTimeline_LocalTZDayBoundary(t *testing.T) {
 }
 
 // --- PersonalByModelTotal ---
-//
-// FIXME(schema-fidelity, 2026-05-12): this setup follows the existing
-// inline-schema convention used elsewhere in this file. Per
-// workflow/CI/IDE/claude/principles/test-fixture-real-schema.md
-// schema-touching tests should run against the real baseline /
-// migration chain. The whole file should migrate, not just this test
-// — tracking that as a separate cleanup so we don't drift the
-// convention partway.
 
-// setupByModelTestDB creates a DWD table that includes `model` and the
-// 4-segment token columns the by-model query reads. Kept separate from
-// setupUsageTestDB so existing tests (which don't INSERT these
-// columns) aren't perturbed.
-func setupByModelTestDB(t *testing.T) *shared.DB {
-	t.Helper()
-	raw, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = raw.Close() })
-	schema := `
-	CREATE TABLE usage_fact_dwd (
-		event_id                    TEXT,
-		org_id                      TEXT,
-		seat_id                     TEXT,
-		account_id                  TEXT,
-		model                       TEXT,
-		provider_code               TEXT,
-		event_time                  INTEGER,
-		usage_date                  TEXT,
-		input_tokens                INTEGER,
-		cached_input_tokens         INTEGER,
-		cache_creation_input_tokens INTEGER,
-		output_tokens               INTEGER,
-		total_tokens                INTEGER,
-		request_count               INTEGER
-	);`
-	if _, err := raw.Exec(schema); err != nil {
-		t.Fatal(err)
-	}
-	return shared.NewDB(raw, shared.DialectSQLite)
-}
-
-func insertModelRow(t *testing.T, db *shared.DB, model, seat string, atUTC string, total int64) {
+// insertByModelDWDRow is a thin wrapper over insertDWD specialized for
+// the by-model tests: an event_time / usage_date pair derived from an
+// RFC3339 instant, plus the four token segments split 50/50
+// input/output for non-zero totals. Centralizes the parse + math so
+// the table-driven assertions below stay focused on (model, tokens)
+// shape.
+func insertByModelDWDRow(t *testing.T, db *shared.DB, model, seat, atUTC string, total int64) {
 	t.Helper()
 	ts, err := time.Parse(time.RFC3339, atUTC)
 	if err != nil {
 		t.Fatalf("parse %q: %v", atUTC, err)
 	}
-	// `model` may be NULL or empty in production for rows captured
-	// before the upstream response is parsed. The test passes them in
-	// verbatim so the COALESCE(NULLIF(model,''),'unknown') path can be
-	// asserted end-to-end.
-	var modelArg any = model
-	if model == "<NULL>" {
-		modelArg = nil
-	}
-	_, err = db.DB.Exec(`
-		INSERT INTO usage_fact_dwd
-			(event_id, org_id, seat_id, model, event_time, usage_date,
-			 input_tokens, cached_input_tokens, cache_creation_input_tokens,
-			 output_tokens, total_tokens, request_count)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		atUTC+"-"+model, "org1", seat, modelArg, ts.UTC().UnixMilli(), ts.UTC().Format("2006-01-02"),
-		total/2, 0, 0, total/2, total, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	insertDWD(t, db, dwdRow{
+		EventID:      atUTC + "-" + model + "-" + seat,
+		OrgID:        "org1",
+		SeatID:       seat,
+		Model:        model, // "<NULL>" sentinel and "" both honored by insertDWD
+		EventTimeMs:  ts.UTC().UnixMilli(),
+		UsageDate:    ts.UTC().Format("2006-01-02"),
+		InputTokens:  total / 2,
+		OutputTokens: total / 2,
+		TotalTokens:  total,
+		RequestCount: 1,
+	})
 }
 
 // TestPersonalByModelTotal_SortsAndCoalesces covers the three behaviours
@@ -675,18 +718,18 @@ func insertModelRow(t *testing.T, db *shared.DB, model, seat string, atUTC strin
 //     snapshot normalization) — `claude-sonnet-4-5-20250929` and
 //     `claude-sonnet-4-6` are separate rows.
 func TestPersonalByModelTotal_SortsAndCoalesces(t *testing.T) {
-	db := setupByModelTestDB(t)
+	db := setupUsageTestDB(t)
 
 	// Two snapshots of Claude Sonnet — must stay separate rows.
-	insertModelRow(t, db, "claude-sonnet-4-6", "seat1", "2026-04-24T10:00:00Z", 5000)
-	insertModelRow(t, db, "claude-sonnet-4-5-20250929", "seat1", "2026-04-24T11:00:00Z", 3000)
+	insertByModelDWDRow(t, db, "claude-sonnet-4-6", "seat1", "2026-04-24T10:00:00Z", 5000)
+	insertByModelDWDRow(t, db, "claude-sonnet-4-5-20250929", "seat1", "2026-04-24T11:00:00Z", 3000)
 	// Kimi K2 — separate provider, separate group.
-	insertModelRow(t, db, "kimi-k2-0905-preview", "seat1", "2026-04-24T12:00:00Z", 2000)
+	insertByModelDWDRow(t, db, "kimi-k2-0905-preview", "seat1", "2026-04-24T12:00:00Z", 2000)
 	// NULL and empty model — must coalesce to "unknown".
-	insertModelRow(t, db, "<NULL>", "seat1", "2026-04-24T13:00:00Z", 400)
-	insertModelRow(t, db, "", "seat1", "2026-04-24T14:00:00Z", 100)
+	insertByModelDWDRow(t, db, "<NULL>", "seat1", "2026-04-24T13:00:00Z", 400)
+	insertByModelDWDRow(t, db, "", "seat1", "2026-04-24T14:00:00Z", 100)
 	// Other seat — must be filtered out.
-	insertModelRow(t, db, "claude-sonnet-4-6", "seat2", "2026-04-24T10:30:00Z", 9999)
+	insertByModelDWDRow(t, db, "claude-sonnet-4-6", "seat2", "2026-04-24T10:30:00Z", 9999)
 
 	repo := NewSQLRepository(db)
 	start, _ := time.Parse("2006-01-02", "2026-04-01")
@@ -728,11 +771,11 @@ func TestPersonalByModelTotal_SortsAndCoalesces(t *testing.T) {
 // runaway model count doesn't blow the chart row layout. Seed 25
 // distinct models, expect only the top 20 by tokens.
 func TestPersonalByModelTotal_LimitsTop20(t *testing.T) {
-	db := setupByModelTestDB(t)
+	db := setupUsageTestDB(t)
 	for i := 0; i < 25; i++ {
 		modelName := "model-" + itoa(i)
 		// Tokens descending with i so model-0 has the largest sum.
-		insertModelRow(t, db, modelName, "seat1", "2026-04-24T10:00:00Z", int64((25-i)*100))
+		insertByModelDWDRow(t, db, modelName, "seat1", "2026-04-24T10:00:00Z", int64((25-i)*100))
 	}
 	repo := NewSQLRepository(db)
 	start, _ := time.Parse("2006-01-02", "2026-04-01")

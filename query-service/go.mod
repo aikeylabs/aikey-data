@@ -3,11 +3,12 @@ module github.com/AiKeyLabs/aikey-data/query-service
 go 1.26.1
 
 require (
-	github.com/AiKeyLabs/aikey-config-tool v0.0.0-00010101000000-000000000000
+	github.com/AiKeyLabs/aikey-data/baseline v0.0.0-00010101000000-000000000000
 	github.com/AiKeyLabs/pkg/aikeycompat v0.0.0
 	github.com/AiKeyLabs/pkg/aikeytime v0.0.0
 	github.com/AiKeyLabs/pkg/buildinfo v0.0.0
 	github.com/lib/pq v1.12.0
+	modernc.org/sqlite v1.48.1
 )
 
 require (
@@ -20,7 +21,6 @@ require (
 	modernc.org/libc v1.70.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.48.1 // indirect
 )
 
 replace github.com/AiKeyLabs/pkg/buildinfo => ../../pkg/buildinfo
@@ -29,4 +29,4 @@ replace github.com/AiKeyLabs/pkg/aikeytime => ../../pkg/aikeytime
 
 replace github.com/AiKeyLabs/pkg/aikeycompat => ../../pkg/aikeycompat
 
-replace github.com/AiKeyLabs/aikey-config-tool => ../../aikey-config-tool
+replace github.com/AiKeyLabs/aikey-data/baseline => ../baseline
