@@ -7,16 +7,42 @@ import (
 	"strings"
 )
 
-// personalVKPrefix marks a virtual-key as a Personal-vault local key
-// (origin: aikey-cli's local vault, not a team-issued managed key).
-// Examples: "personal:kimi-official", "personal:default", etc. These
-// VKs deliberately do NOT have a corresponding row in
-// managed_key_control_events — the team-issuance pipeline never sees
-// them. Looking them up would (a) be 100% a miss in Trial / Production
-// where the table exists but is empty for personal: keys, or (b) error
-// out with "no such table" in Personal edition where the Control
-// component is not installed.
-const personalVKPrefix = "personal:"
+// Virtual-key prefixes that originate from the user's local vault and
+// thus deliberately do NOT have a corresponding row in
+// managed_key_control_events:
+//
+//   - "personal:<alias>"            aikey-cli adds a personal-route VK
+//   - "oauth:<session_id>"          aikey-proxy issues per-OAuth-session VK
+//                                   (e.g. claude / codex login flows)
+//   - "app:<app_slug>"              aikey-cli registers an app and proxy
+//                                   issues "app:<slug>" VK (2026-05 phase 4)
+//
+// Looking these up would (a) be 100% a miss in Trial / Production where
+// the table exists but is empty for these VK families, or (b) error out
+// with "no such table" in Personal edition where the Control component
+// is not installed — which used to stall the projector in retry loop
+// (see bugfix 20260522-projector-stuck-mark-dead-letter-param-order.md
+// for the cascade that exposed this gap).
+const (
+	personalVKPrefix = "personal:"
+	oauthVKPrefix    = "oauth:"
+	appVKPrefix      = "app:"
+)
+
+// vaultOriginVKPrefixes lists all VK prefixes that originate from the
+// user's local vault (any edition). Adding a new vault-origin VK family
+// requires extending this list AND adding a corresponding enricher test
+// — otherwise the projector will enter the retry loop the new family.
+var vaultOriginVKPrefixes = []string{personalVKPrefix, oauthVKPrefix, appVKPrefix}
+
+func isVaultOriginVK(vk string) bool {
+	for _, p := range vaultOriginVKPrefixes {
+		if strings.HasPrefix(vk, p) {
+			return true
+		}
+	}
+	return false
+}
 
 const projectorVersion = "0.1.0"
 
@@ -45,17 +71,27 @@ func (e *Enricher) Enrich(ctx context.Context, rec *ODSRecord) (*DWDFact, error)
 		return fact, nil
 	}
 
-	// Personal-vault VK short-circuit (2026-05-13 binary-isolation refactor).
-	// VKs prefixed with "personal:" originate from aikey-cli's local vault
-	// and have no managed_key_control_events row by design. In Personal
-	// edition (control component not installed), querying the table would
-	// raise "no such table" and stall the projector in retry loop. In Trial /
-	// Production it would always return nil (table empty for this key) and
-	// fall through to the no_control_event branch with the same observable
-	// shape — short-circuiting here makes the intent explicit and saves a DB
-	// round-trip. UserUsageScope=normal so the row surfaces on /user/overview
+	// Vault-origin VK short-circuit (2026-05-13 binary-isolation refactor
+	// extended 2026-05-22 to cover oauth: + app: prefixes per
+	// bugfix 20260522-projector-stuck-mark-dead-letter-param-order.md).
+	//
+	// All VKs minted from the user's local vault (personal: / oauth: /
+	// app:) deliberately have no managed_key_control_events row. In
+	// Personal edition (control component not installed) querying the
+	// table raises "no such table" and stalls the projector in a retry
+	// loop. In Trial / Production it always returns nil (table empty
+	// for these VK families) and falls through to no_control_event with
+	// the same observable shape — short-circuiting here makes the intent
+	// explicit and saves a DB round-trip.
+	//
+	// UserUsageScope=normal so the row surfaces on /user/overview
 	// (Personal queries don't filter on scope, but explicit is clearer).
-	if strings.HasPrefix(rec.VirtualKeyID.String, personalVKPrefix) {
+	if isVaultOriginVK(rec.VirtualKeyID.String) {
+		// CompletionSource stays "personal_vault_key" verbatim (not
+		// renamed) so DWD enum stays back-compatible with 5/13 ~ 5/22
+		// rows already in usage_fact_dwd. The label is now a
+		// historical artifact — the actual classifier is the prefix
+		// list above (personal: / oauth: / app:).
 		fact.CompletionSource = "personal_vault_key"
 		fact.QualityStatus = QualityPartial
 		fact.BillingScope = BillOrgOnly
@@ -133,6 +169,9 @@ func (e *Enricher) buildBaseFact(rec *ODSRecord) *DWDFact {
 		UpstreamRequestID:          rec.UpstreamRequestID.String,
 
 		ProjectorVersion:           projectorVersion,
+
+		// Phase 4 Connected Apps (v1.0.0-rc.5): copy from ODS verbatim.
+		AppSlug:                    rec.AppSlug.String,
 	}
 }
 

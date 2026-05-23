@@ -30,6 +30,9 @@ func NewSQLODSRepository(db *shared.DB) ODSRepository {
 // Go keeps upgraded and fresh installs behaviour-identical — the
 // schema DEFAULT becomes redundant belt-and-braces. See bugfix
 // 20260424 review finding #2.
+// Column order: keep `app_slug` at the tail so insertion order matches
+// the bind list in InsertEvent without shifting historic positions —
+// see Phase 4 Stage B migration (v1.0.0-rc.5) for the column add.
 const odsColumns = `event_id, request_id, trace_id, proxy_instance_id, device_id,
     schema_version, source_type, source_version, client_version,
     proxy_config_version, proxy_loaded_control_seq,
@@ -44,7 +47,8 @@ const odsColumns = `event_id, request_id, trace_id, proxy_instance_id, device_id
     input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens, reasoning_tokens, total_tokens,
     billable_amount, currency,
     request_status, http_status_code, error_code, error_message, upstream_request_id,
-    raw_usage_json, raw_headers_json, ext_json, raw_event_json`
+    raw_usage_json, raw_headers_json, ext_json, raw_event_json,
+    app_slug`
 
 const odsPlaceholders = `?,?,?,?,?,
     ?,?,?,?,
@@ -60,7 +64,8 @@ const odsPlaceholders = `?,?,?,?,?,
     ?,?,?,?,?,?,
     ?,?,
     ?,?,?,?,?,
-    ?,?,?,?`
+    ?,?,?,?,
+    ?`
 
 func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte) (bool, error) {
 	insertODS := r.db.InsertOrIgnoreOn("usage_event_ods", odsColumns, odsPlaceholders, "org_id, event_id")
@@ -80,6 +85,7 @@ func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte)
 		nullStr(ptrStr(e.BillableAmount)), nullStr(e.Currency),
 		e.RequestStatus, e.HTTPStatusCode, nullStr(e.ErrorCode), nullStr(e.ErrorMessage), nullStr(e.UpstreamRequestID),
 		jsonbOrNull(e.RawUsageJSON), jsonbOrNull(e.RawHeadersJSON), jsonbOrNull(e.ExtJSON), rawJSON,
+		nullStr(e.AppSlug),
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert ods event %s: %w", e.EventID, err)

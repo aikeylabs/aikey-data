@@ -129,7 +129,11 @@ func newSQLiteODSTestDB(t *testing.T) *shared.DB {
 			upstream_request_id TEXT,
 			dwd_retry_count INTEGER DEFAULT 0,
 			dwd_status TEXT,
-			dwd_next_retry_at INTEGER
+			dwd_next_retry_at INTEGER,
+			dwd_last_error_code TEXT,
+			dwd_last_error_msg TEXT,
+			-- Phase 4 Connected Apps (v1.0.0-rc.5)
+			app_slug TEXT
 		);
 	`)
 	if err != nil {
@@ -289,6 +293,8 @@ func newSQLiteDWDTestDB(t *testing.T, includeSQLDefaults bool) *shared.DB {
 			control_event_revision TEXT,
 			projector_version TEXT NOT NULL,
 			` + projectedAtCol + `,
+			-- Phase 4 Connected Apps (v1.0.0-rc.5)
+			app_slug TEXT,
 			UNIQUE (org_id, event_id)
 		);
 	`)
@@ -296,4 +302,63 @@ func newSQLiteDWDTestDB(t *testing.T, includeSQLDefaults bool) *shared.DB {
 		t.Fatal(err)
 	}
 	return shared.NewDB(raw, shared.DialectSQLite)
+}
+
+// TestMarkDeadLetter_UpdatesStatusAndErrorFields is the regression guard
+// for bugfix 20260522-projector-stuck-mark-dead-letter-param-order.
+//
+// Before the fix:  MarkDeadLetter bound (odsID, errCode, errMsg) into
+// (dwd_last_error_code=?, dwd_last_error_msg=?, WHERE ods_id=?). Since
+// ods_id is an INTEGER and errMsg is a TEXT, the WHERE never matched —
+// the UPDATE affected 0 rows. dwd_status stayed at 'retry' and the
+// worker re-fetched the same event every scan, stalling progress for
+// every later ods_id.
+//
+// After the fix:  bind order is (errCode, errMsg, odsID), so the row
+// transitions to dwd_status='dead_letter' and the worker advances past
+// it on the next FetchPending.
+func TestMarkDeadLetter_UpdatesStatusAndErrorFields(t *testing.T) {
+	db := newSQLiteODSTestDB(t)
+	insertODSTestRow(t, db, 42, "retry", aikeytime.Millis(0))
+
+	// Sanity precondition: row exists in 'retry' state with no error fields.
+	var preStatus string
+	if err := db.DB.QueryRow(
+		`SELECT dwd_status FROM usage_event_ods WHERE ods_id = ?`, 42,
+	).Scan(&preStatus); err != nil {
+		t.Fatalf("pre-check select: %v", err)
+	}
+	if preStatus != "retry" {
+		t.Fatalf("pre-check: expected dwd_status='retry', got %q", preStatus)
+	}
+
+	reader := NewSQLODSReader(db)
+	if err := reader.MarkDeadLetter(context.Background(), 42, "ENRICH_FAILED", "schema mismatch"); err != nil {
+		t.Fatalf("MarkDeadLetter: %v", err)
+	}
+
+	// Post-check: the row must now be 'dead_letter' AND carry the
+	// error fields we passed. The pre-fix bug would leave dwd_status
+	// at 'retry' (UPDATE 0 rows) — that single assertion catches it.
+	var (
+		gotStatus    string
+		gotErrCode   sql.NullString
+		gotErrMsg    sql.NullString
+	)
+	if err := db.DB.QueryRow(
+		`SELECT dwd_status, dwd_last_error_code, dwd_last_error_msg
+		 FROM usage_event_ods WHERE ods_id = ?`, 42,
+	).Scan(&gotStatus, &gotErrCode, &gotErrMsg); err != nil {
+		t.Fatalf("post-check select: %v", err)
+	}
+
+	if gotStatus != "dead_letter" {
+		t.Errorf("dwd_status: want 'dead_letter', got %q — MarkDeadLetter UPDATE missed the row (likely parameter-order regression)", gotStatus)
+	}
+	if !gotErrCode.Valid || gotErrCode.String != "ENRICH_FAILED" {
+		t.Errorf("dwd_last_error_code: want 'ENRICH_FAILED', got %#v — parameter binding swapped errCode with something else", gotErrCode)
+	}
+	if !gotErrMsg.Valid || gotErrMsg.String != "schema mismatch" {
+		t.Errorf("dwd_last_error_msg: want 'schema mismatch', got %#v — parameter binding swapped errMsg with something else", gotErrMsg)
+	}
 }

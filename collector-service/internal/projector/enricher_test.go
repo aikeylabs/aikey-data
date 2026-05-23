@@ -363,3 +363,65 @@ func TestEnrich_SeatEnrichedFromControlEvent(t *testing.T) {
 		t.Errorf("expected completed_from_control_event, got %s", fact.QualityStatus)
 	}
 }
+
+// TestEnrich_VaultOriginVKShortCircuit is the regression guard for
+// bugfix 20260522-projector-stuck-mark-dead-letter-param-order.md.
+//
+// All VKs with vault-origin prefixes (personal: / oauth: / app:) must
+// short-circuit BEFORE the controlReader.FindByVirtualKeyAtTime call,
+// otherwise Personal SQLite installs would raise "no such table:
+// managed_key_control_events" and the projector worker would stall in
+// retry loop. This test uses a panicOnLookupReader sentinel that fails
+// the test loudly on any DB call — if the short-circuit is removed or
+// a prefix is missed, the test will surface the regression immediately
+// rather than letting it silently re-introduce the projector stall.
+func TestEnrich_VaultOriginVKShortCircuit(t *testing.T) {
+	sentinel := &panicOnLookupReader{t: t}
+	enricher := NewEnricher(sentinel)
+
+	cases := []struct {
+		name string
+		vk   string
+	}{
+		{"personal prefix", "personal:my-claude"},
+		{"oauth prefix", "oauth:session_abc123"},
+		{"app prefix", "app:degrade-detector"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec := &ODSRecord{
+				OdsID:         1,
+				EventID:       "e-" + c.name,
+				EventTime:     aikeytime.Now(),
+				OccurredAt:    aikeytime.Now(),
+				OrgID:         "personal",
+				VirtualKeyID:  sql.NullString{String: c.vk, Valid: true},
+				RequestCount:  1,
+				RequestStatus: "success",
+			}
+			fact, err := enricher.Enrich(context.Background(), rec)
+			if err != nil {
+				t.Fatalf("Enrich must succeed for vault-origin VK %q (short-circuit), got error: %v", c.vk, err)
+			}
+			if fact.CompletionSource != "personal_vault_key" {
+				t.Errorf("CompletionSource: want 'personal_vault_key' (DWD enum backwards-compat), got %q", fact.CompletionSource)
+			}
+			if fact.QualityStatus != QualityPartial {
+				t.Errorf("QualityStatus: want partial, got %s", fact.QualityStatus)
+			}
+			if fact.AnomalyType != AnomalyNone {
+				t.Errorf("AnomalyType: want none (vault-origin VKs aren't anomalies), got %s", fact.AnomalyType)
+			}
+		})
+	}
+}
+
+// panicOnLookupReader fails the test loudly if anyone calls
+// FindByVirtualKeyAtTime — used by TestEnrich_VaultOriginVKShortCircuit
+// to prove the enricher never reached the DB for vault-origin VKs.
+type panicOnLookupReader struct{ t *testing.T }
+
+func (p *panicOnLookupReader) FindByVirtualKeyAtTime(ctx context.Context, vk string, _ aikeytime.Millis) (*ControlEvent, error) {
+	p.t.Fatalf("enricher tried to look up vault-origin VK %q in managed_key_control_events — short-circuit missed", vk)
+	return nil, nil
+}

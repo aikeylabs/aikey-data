@@ -134,6 +134,17 @@ type QueryParams struct {
 	EndDate   time.Time // inclusive; interpreted in the user's local TZ
 	Limit     int       // for ranking, default 50
 
+	// AppSlug, when non-empty, narrows the result to events tagged
+	// with this Connected App. Powers the Web Apps Detail page's
+	// per-app usage cards. Empty = no filter (whole-vault rollup,
+	// existing behaviour for /user/cost page).
+	//
+	// Only `PersonalTimeline` and `PersonalByModelTotal` consume this
+	// filter today — the Apps Detail page only needs trend + by-model.
+	// Other endpoints (hourly / by-protocol / by-key / recent) ignore
+	// the field; extending them is a non-goal of Phase 4 Stage B.
+	AppSlug string
+
 	// TZ is the IANA name (e.g. "Asia/Shanghai") of the caller's
 	// local time zone. Empty = UTC. Used to bucket per-day / per-hour
 	// aggregates so a user in +08:00 sees their 12:00 request at

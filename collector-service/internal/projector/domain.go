@@ -87,6 +87,9 @@ type ODSRecord struct {
 	UpstreamRequestID          sql.NullString
 
 	DwdRetryCount              int
+
+	// Phase 4 Connected Apps (v1.0.0-rc.5): per-app scoping.
+	AppSlug                    sql.NullString
 }
 
 // ControlEvent is a read-only projection of managed_key_control_events.
@@ -170,4 +173,7 @@ type DWDFact struct {
 	ControlEventRevision       string
 
 	ProjectorVersion           string
+
+	// Phase 4 Connected Apps (v1.0.0-rc.5): projected from ODS row.
+	AppSlug                    string
 }

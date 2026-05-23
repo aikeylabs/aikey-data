@@ -35,7 +35,8 @@ SELECT ods_id, event_id, event_time, occurred_at,
        input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens, reasoning_tokens, total_tokens,
        billable_amount, currency,
        request_status, http_status_code, upstream_request_id,
-       dwd_retry_count
+       dwd_retry_count,
+       app_slug
 FROM usage_event_ods
 WHERE ((dwd_status = 'pending')
    OR (dwd_status = 'retry' AND dwd_next_retry_at <= %s))
@@ -72,6 +73,7 @@ func (r *sqlODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord
 			&rec.BillableAmount, &rec.Currency,
 			&rec.RequestStatus, &rec.HTTPStatusCode, &rec.UpstreamRequestID,
 			&rec.DwdRetryCount,
+			&rec.AppSlug,
 		); err != nil {
 			return nil, fmt.Errorf("scan ods row: %w", err)
 		}
@@ -104,13 +106,22 @@ func (r *sqlODSReader) MarkRetry(ctx context.Context, odsID int64, retryCount in
 }
 
 func (r *sqlODSReader) MarkDeadLetter(ctx context.Context, odsID int64, errCode, errMsg string) error {
+	// Bind order matches the three `?` placeholders by POSITION (SQLite/PG
+	// shared dialect): code → msg → ods_id. The original 4/8 shared.DB
+	// refactor (commit 39a8e526) translated PG named placeholders ($1=odsID,
+	// $2=errCode, $3=errMsg) into `?` but kept the old PG-order argument
+	// list (odsID, errCode, errMsg). Result: `WHERE ods_id = '<errMsg>'`
+	// matched zero rows, so retried events never transitioned to
+	// 'dead_letter' and `FetchPending` re-fetched them every scan → the
+	// projector worker stalled at the first permanent-error event and
+	// never advanced `last_scanned_ods_id`. See bugfix 20260522.
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE usage_event_ods
 		 SET dwd_status = 'dead_letter',
 		     dwd_last_error_code = ?,
 		     dwd_last_error_msg = ?
 		 WHERE ods_id = ?`,
-		odsID, errCode, errMsg)
+		errCode, errMsg, odsID)
 	return err
 }
 
@@ -181,6 +192,8 @@ func NewSQLDWDWriter(db *shared.DB) DWDWriter { return &sqlDWDWriter{db: db} }
 // DB would leave projected_at NULL on new inserts. Always binding from
 // Go makes upgraded and fresh installs behaviour-identical. See
 // bugfix 20260424 review finding #2.
+// Column order: keep `app_slug` at the tail so historic positions stay
+// fixed. v1.0.0-rc.5 added it for Phase 4 Connected Apps Stage B.
 const dwdColumns = `event_id, ods_id, occurred_at, event_time, usage_date,
     org_id, account_id, seat_id,
     virtual_key_id, virtual_key_revision, virtual_key_alias, virtual_key_hash,
@@ -194,7 +207,8 @@ const dwdColumns = `event_id, ods_id, occurred_at, event_time, usage_date,
     request_status, http_status_code, upstream_request_id,
     completion_source, quality_status, validation_code, validation_message,
     anomaly_type, anomaly_reason, billing_scope, user_usage_scope,
-    control_event_id, control_event_revision, projector_version, projected_at`
+    control_event_id, control_event_revision, projector_version, projected_at,
+    app_slug`
 
 const dwdPlaceholders = `?,?,?,?,?,
     ?,?,?,
@@ -209,7 +223,8 @@ const dwdPlaceholders = `?,?,?,?,?,
     ?,?,?,
     ?,?,?,?,
     ?,?,?,?,
-    ?,?,?,?`
+    ?,?,?,?,
+    ?`
 
 func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 	insertDWDSQL := w.db.InsertOrIgnoreOn("usage_fact_dwd", dwdColumns, dwdPlaceholders, "org_id, event_id")
@@ -234,6 +249,11 @@ func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 		f.CompletionSource, string(f.QualityStatus), f.ValidationCode, f.ValidationMessage,
 		string(f.AnomalyType), f.AnomalyReason, string(f.BillingScope), string(f.UserUsageScope),
 		f.ControlEventID, f.ControlEventRevision, f.ProjectorVersion, w.db.BindMillis(aikeytime.Now()),
+		// AppSlug stays as plain string — the partial index treats
+		// `''` and NULL identically, and other "may be empty" fields
+		// in this insert (BindingID, AccountID, etc.) follow the same
+		// pattern. Avoids needing a dialect-aware null-or-empty helper.
+		f.AppSlug,
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert dwd fact %s: %w", f.EventID, err)

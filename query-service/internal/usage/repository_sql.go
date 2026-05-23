@@ -43,6 +43,22 @@ func personalFilter(p QueryParams) (clause string, id string) {
 	return "account_id = ?", p.AccountID
 }
 
+// appSlugFilter returns an additional WHERE fragment + bind value when
+// QueryParams.AppSlug is non-empty, otherwise empty / nil so callers
+// can splice it into the WHERE clause without conditional branching:
+//
+//	clause, args = applyAppSlug(clause, args, p)
+//
+// Empty string and NULL both indicate "no app context" on the DWD row
+// (CLI / virtual key calls), so a non-empty AppSlug also filters those
+// out implicitly. Powers Phase 4 Connected Apps Detail page (Stage B).
+func appSlugFilter(p QueryParams) (frag string, arg interface{}) {
+	if p.AppSlug == "" {
+		return "", nil
+	}
+	return " AND app_slug = ?", p.AppSlug
+}
+
 // --- Personal page ---
 
 // PersonalTimeline groups usage by the caller's local calendar day
@@ -53,14 +69,19 @@ func (r *sqlRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]Timeli
 	filter, id := personalFilter(p)
 	startMs, endMs := p.LocalWindowMs() // [local start-day, local end-day+1) in UTC millis
 	dateExpr := r.db.DateOfLocal("event_time", p.TZOffsetMs, p.TZ)
+	appSlugFrag, appSlugArg := appSlugFilter(p)
+	args := []interface{}{id, r.db.BindMillis(startMs), r.db.BindMillis(endMs)}
+	if appSlugArg != nil {
+		args = append(args, appSlugArg)
+	}
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT %s AS d, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
-		  AND event_time >= ? AND event_time < ?
+		  AND event_time >= ? AND event_time < ?%s
 		GROUP BY d
-		ORDER BY d`, dateExpr, filter),
-		id, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
+		ORDER BY d`, dateExpr, filter, appSlugFrag),
+		args...)
 	if err != nil {
 		return nil, fmt.Errorf("personal timeline: %w", err)
 	}
@@ -175,9 +196,17 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 	startMs, endMs := p.LocalWindowMs()
 	startMsArg := r.db.BindMillis(startMs)
 	endMsArg := r.db.BindMillis(endMs)
+	// NULL-safety on d.virtual_key_id (2026-05-23, BR-rc.5 follow-up): a
+	// stray DWD row with virtual_key_id IS NULL crashes the whole query
+	// because rows.Scan can't bind NULL → string. Other columns already
+	// have COALESCE; this one was a leftover. Mirrors the pattern used
+	// in PersonalRequestRecent (line ~336) which already wraps the same
+	// column in COALESCE. The frontend's deriveKeyLabel() falls back to
+	// "unlabeled" for empty IDs so the row stays surfaced rather than
+	// being silently dropped — matches CLAUDE.md "失败要显眼" guidance.
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT d.virtual_key_id,
-		       COALESCE(NULLIF(MAX(d.virtual_key_alias), ''), REPLACE(d.virtual_key_id, 'personal:', '')),
+		SELECT COALESCE(d.virtual_key_id, ''),
+		       COALESCE(NULLIF(MAX(d.virtual_key_alias), ''), REPLACE(COALESCE(d.virtual_key_id, ''), 'personal:', '')),
 		       COALESCE(id.identity, ''),
 		       COALESCE(SUM(d.input_tokens),0),
 		       COALESCE(SUM(d.cached_input_tokens),0),
@@ -195,7 +224,7 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 		) AS id ON id.virtual_key_id = d.virtual_key_id
 		WHERE %s
 		  AND d.event_time >= ? AND d.event_time < ?
-		GROUP BY d.virtual_key_id, id.identity
+		GROUP BY COALESCE(d.virtual_key_id, ''), id.identity
 		ORDER BY SUM(d.total_tokens) DESC`, filter),
 		startMsArg, endMsArg, id, startMsArg, endMsArg)
 	if err != nil {
@@ -240,6 +269,11 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 func (r *sqlRepo) PersonalByModelTotal(ctx context.Context, p QueryParams) ([]ModelTotal, error) {
 	filter, id := personalFilter(p)
 	startMs, endMs := p.LocalWindowMs()
+	appSlugFrag, appSlugArg := appSlugFilter(p)
+	args := []interface{}{id, r.db.BindMillis(startMs), r.db.BindMillis(endMs)}
+	if appSlugArg != nil {
+		args = append(args, appSlugArg)
+	}
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT COALESCE(NULLIF(model, ''), 'unknown') AS model_grp,
 		       COALESCE(SUM(input_tokens),0),
@@ -250,11 +284,11 @@ func (r *sqlRepo) PersonalByModelTotal(ctx context.Context, p QueryParams) ([]Mo
 		       COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
-		  AND event_time >= ? AND event_time < ?
+		  AND event_time >= ? AND event_time < ?%s
 		GROUP BY COALESCE(NULLIF(model, ''), 'unknown')
 		ORDER BY SUM(total_tokens) DESC
-		LIMIT 20`, filter),
-		id, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
+		LIMIT 20`, filter, appSlugFrag),
+		args...)
 	if err != nil {
 		return nil, fmt.Errorf("personal by-model total: %w", err)
 	}

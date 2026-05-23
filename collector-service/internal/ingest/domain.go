@@ -63,6 +63,13 @@ type UsageEvent struct {
 	RouteSource    string `json:"route_source,omitempty"`
 	OAuthIdentity  string `json:"oauth_identity,omitempty"` // Email/display name for OAuth accounts
 
+	// app — Phase 4 Connected Apps (v1.0.0-rc.5). Proxy attaches the
+	// registered app slug (e.g. "degrade-detector") to events that
+	// flowed through `/apps/<slug>/v1/...` so query-service can scope
+	// `WHERE app_slug = ?` for the per-app dashboard. Empty for events
+	// without an app context (CLI direct calls, virtual keys, etc).
+	AppSlug string `json:"app_slug,omitempty"`
+
 	// usage — Anthropic prompt-caching tuple (input / cache_creation /
 	// cache_read / output). For non-Anthropic providers the cache fields
 	// are nil and serialise out as `omitempty`.

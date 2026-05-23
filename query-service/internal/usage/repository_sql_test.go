@@ -43,6 +43,25 @@ func setupUsageTestDB(t *testing.T) *shared.DB {
 			t.Fatalf("baseline DDL exec failed: %v\nstmt prefix=%.120s", err, stmt)
 		}
 	}
+	// Post-baseline migrations the production boot path would run.
+	// We mirror them by hand here rather than depend on
+	// `aikey-config-tool/pkg/dbmigrate` from a query-service test —
+	// the registry is owned by config-tool and pulling it in adds a
+	// new cross-repo dep just so tests can replay migrations. Keep
+	// these in lock-step with the corresponding migration entry
+	// (file path printed below) so a future column add is caught at
+	// review time by the matching diff in both places.
+	postBaseline := []string{
+		// aikey-config-tool/pkg/dbmigrate/versions/v1_0_0_rc5_app_slug.go
+		`ALTER TABLE usage_event_ods ADD COLUMN app_slug TEXT`,
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN app_slug TEXT`,
+		`CREATE INDEX IF NOT EXISTS idx_dwd_app_slug_date ON usage_fact_dwd (app_slug, usage_date) WHERE app_slug IS NOT NULL AND app_slug != ''`,
+	}
+	for _, stmt := range postBaseline {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("post-baseline migration exec failed: %v\nstmt=%s", err, stmt)
+		}
+	}
 	return shared.NewDB(raw, shared.DialectSQLite)
 }
 
@@ -79,6 +98,7 @@ type dwdRow struct {
 	CacheCreationInputTokens int64
 	OutputTokens             int64
 	BillingScope             string // defaults to "user_only" if empty
+	AppSlug                  string // empty stored as empty string (matches production ingest)
 }
 
 // odsIDSeq generates unique ods_id values per inserted DWD row so the
@@ -114,15 +134,17 @@ func insertDWD(t *testing.T, db *shared.DB, r dwdRow) {
 			request_count, total_tokens,
 			input_tokens, cached_input_tokens, cache_creation_input_tokens, output_tokens,
 			request_status, completion_source, quality_status,
-			billing_scope, user_usage_scope, projector_version
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			billing_scope, user_usage_scope, projector_version,
+			app_slug
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.EventID, odsIDSeq, r.EventTimeMs, r.EventTimeMs, r.UsageDate,
 		r.OrgID, r.AccountID, r.SeatID, r.VirtualKeyID, r.VirtualKeyAlias,
 		r.ProviderCode, r.ProtocolType, modelArg,
 		r.RequestCount, r.TotalTokens,
 		r.InputTokens, r.CachedInputTokens, r.CacheCreationInputTokens, r.OutputTokens,
 		"success", "test", "ok",
-		r.BillingScope, "normal", "test")
+		r.BillingScope, "normal", "test",
+		r.AppSlug)
 	if err != nil {
 		t.Fatalf("insertDWD %q: %v", r.EventID, err)
 	}
@@ -792,4 +814,118 @@ func TestPersonalByModelTotal_LimitsTop20(t *testing.T) {
 	if got[0].Model != "model-0" {
 		t.Errorf("top row should be model-0 (largest tokens), got %s", got[0].Model)
 	}
+}
+
+// --- AppSlug filter (Phase 4 Connected Apps, Stage B) ---
+
+// TestPersonalTimeline_FiltersByAppSlug pins the Phase 4 Stage B
+// invariant: when QueryParams.AppSlug is non-empty, PersonalTimeline
+// only sums rows tagged with that app. Other apps + un-tagged rows
+// (CLI / virtual-key calls) are excluded. The whole-vault rollup
+// behaviour is exercised via the existing AggregatesByDay test —
+// they share the same fixture seed pattern.
+func TestPersonalTimeline_FiltersByAppSlug(t *testing.T) {
+	db := setupUsageTestDB(t)
+	// Three rows on same seat+day: app-A, app-B, no-app (CLI). Same
+	// totals so a leak would compound and be obvious in the assertion.
+	mustInsertDWDWithApp(t, db, "2026-04-20", "seat1", "org1", "app-A", 100)
+	mustInsertDWDWithApp(t, db, "2026-04-20", "seat1", "org1", "app-B", 100)
+	mustInsertDWDWithApp(t, db, "2026-04-20", "seat1", "org1", "", 100) // no app — CLI / VK call
+
+	repo := NewSQLRepository(db)
+	start, _ := time.Parse("2006-01-02", "2026-04-01")
+	end, _ := time.Parse("2006-01-02", "2026-04-30")
+
+	// No filter → all three rows sum to 300.
+	all, err := repo.PersonalTimeline(context.Background(), QueryParams{
+		SeatID: "seat1", StartDate: start, EndDate: end,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].TotalTokens != 300 {
+		t.Fatalf("baseline (no filter): want 300 tokens / 1 day, got %+v", all)
+	}
+
+	// Filter app-A → only 100.
+	onlyA, err := repo.PersonalTimeline(context.Background(), QueryParams{
+		SeatID: "seat1", StartDate: start, EndDate: end, AppSlug: "app-A",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(onlyA) != 1 || onlyA[0].TotalTokens != 100 {
+		t.Fatalf("AppSlug=app-A filter leak: want 100 tokens / 1 day, got %+v", onlyA)
+	}
+
+	// Filter app-Missing → zero (not an error — just no matching rows).
+	none, err := repo.PersonalTimeline(context.Background(), QueryParams{
+		SeatID: "seat1", StartDate: start, EndDate: end, AppSlug: "app-Missing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("unknown AppSlug should return no rows, got %+v", none)
+	}
+}
+
+// TestPersonalByModelTotal_FiltersByAppSlug — same invariant for the
+// by-model aggregate. Apps Detail page needs per-app model breakdown.
+func TestPersonalByModelTotal_FiltersByAppSlug(t *testing.T) {
+	db := setupUsageTestDB(t)
+	insertDWD(t, db, dwdRow{
+		EventID: "evt-A", OrgID: "org1", SeatID: "seat1",
+		ProviderCode: "anthropic", Model: "claude-3-7",
+		EventTimeMs: mustParseDateMs(t, "2026-04-25"), UsageDate: "2026-04-25",
+		TotalTokens: 500, RequestCount: 1, AppSlug: "app-A",
+	})
+	insertDWD(t, db, dwdRow{
+		EventID: "evt-B", OrgID: "org1", SeatID: "seat1",
+		ProviderCode: "anthropic", Model: "claude-3-7",
+		EventTimeMs: mustParseDateMs(t, "2026-04-25"), UsageDate: "2026-04-25",
+		TotalTokens: 800, RequestCount: 1, AppSlug: "app-B",
+	})
+	repo := NewSQLRepository(db)
+	start, _ := time.Parse("2006-01-02", "2026-04-01")
+	end, _ := time.Parse("2006-01-02", "2026-04-30")
+
+	onlyA, err := repo.PersonalByModelTotal(context.Background(), QueryParams{
+		SeatID: "seat1", StartDate: start, EndDate: end, AppSlug: "app-A",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(onlyA) != 1 || onlyA[0].Model != "claude-3-7" || onlyA[0].TotalTokens != 500 {
+		t.Fatalf("AppSlug=app-A filter leak (by-model): %+v", onlyA)
+	}
+}
+
+// mustInsertDWDWithApp is a one-row helper for the AppSlug timeline
+// test. Wraps insertDWD with a minimal set of fields — all the tests
+// in this file insert via insertDWD, so the helper just sets the
+// AppSlug-relevant defaults.
+func mustInsertDWDWithApp(t *testing.T, db *shared.DB, date, seatID, orgID, appSlug string, tokens int64) {
+	t.Helper()
+	insertDWD(t, db, dwdRow{
+		EventID:      "evt-" + appSlug + "-" + date,
+		OrgID:        orgID,
+		SeatID:       seatID,
+		ProviderCode: "anthropic",
+		Model:        "claude-3-7",
+		EventTimeMs:  mustParseDateMs(t, date),
+		UsageDate:    date,
+		TotalTokens:  tokens,
+		RequestCount: 1,
+		AppSlug:      appSlug,
+	})
+}
+
+func mustParseDateMs(t *testing.T, ymd string) int64 {
+	t.Helper()
+	tt, err := time.Parse("2006-01-02", ymd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tt.UnixMilli()
 }

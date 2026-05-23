@@ -282,6 +282,10 @@ func parsePersonalParams(r *http.Request) (usage.QueryParams, error) {
 		AccountID: accountID,
 		OrgID:     orgID,
 		TZ:        q.Get("tz"), // IANA name; empty → UTC in Defaults()
+		// Phase 4 Connected Apps (Stage B): optional per-app scoping for
+		// `personalTimeline` + `personalByModelTotal`. Other endpoints
+		// ignore this field — see QueryParams.AppSlug doc.
+		AppSlug: q.Get("app_slug"),
 	}
 	parseDates(&p, q.Get("start_date"), q.Get("end_date"))
 	p.Defaults()
