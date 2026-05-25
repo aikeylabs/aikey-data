@@ -386,6 +386,15 @@ func TestEnrich_VaultOriginVKShortCircuit(t *testing.T) {
 		{"personal prefix", "personal:my-claude"},
 		{"oauth prefix", "oauth:session_abc123"},
 		{"app prefix", "app:degrade-detector"},
+		// probe: prefix added BR-rc.5-54 (2026-05-25). Mode C probe
+		// events were silently stalling in retry loop on Personal
+		// edition because probe: wasn't in vaultOriginVKPrefixes —
+		// the projector tried managed_key_control_events lookup,
+		// table doesn't exist on Personal, ENRICH_FAILED. This sub-
+		// case is the fence that catches the regression if anyone
+		// removes probe: from vaultOriginVKPrefixes without
+		// understanding the consequences.
+		{"probe prefix", "probe:FreySilvaqzs@qualityservice.com"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

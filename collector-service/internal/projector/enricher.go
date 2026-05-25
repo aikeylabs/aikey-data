@@ -16,6 +16,11 @@ import (
 //                                   (e.g. claude / codex login flows)
 //   - "app:<app_slug>"              aikey-cli registers an app and proxy
 //                                   issues "app:<slug>" VK (2026-05 phase 4)
+//   - "probe:<alias_name>"          aikey-proxy probe pipeline (Mode C,
+//                                   `/probe/<alias>/v1/...`), URL-explicit
+//                                   alias dereference; vault-resolved at
+//                                   request time, no managed-key control
+//                                   row (2026-05 credential mode spec §1.1.C)
 //
 // Looking these up would (a) be 100% a miss in Trial / Production where
 // the table exists but is empty for these VK families, or (b) error out
@@ -27,13 +32,20 @@ const (
 	personalVKPrefix = "personal:"
 	oauthVKPrefix    = "oauth:"
 	appVKPrefix      = "app:"
+	// probe: added BR-rc.5-54 (2026-05-25). Mode C probe events were
+	// landing in ODS with "probe:<alias>" VKs since the probe pipeline
+	// shipped, but this list still only covered the 3 pre-probe families
+	// → projector ENRICH_FAILED → 67 stale probe rows stuck in retry on
+	// Personal edition → /user/apps/<slug> dashboard never saw probe
+	// traffic in DWD. Same short-circuit rationale as oauth: / app:.
+	probeVKPrefix = "probe:"
 )
 
 // vaultOriginVKPrefixes lists all VK prefixes that originate from the
 // user's local vault (any edition). Adding a new vault-origin VK family
 // requires extending this list AND adding a corresponding enricher test
 // — otherwise the projector will enter the retry loop the new family.
-var vaultOriginVKPrefixes = []string{personalVKPrefix, oauthVKPrefix, appVKPrefix}
+var vaultOriginVKPrefixes = []string{personalVKPrefix, oauthVKPrefix, appVKPrefix, probeVKPrefix}
 
 func isVaultOriginVK(vk string) bool {
 	for _, p := range vaultOriginVKPrefixes {
