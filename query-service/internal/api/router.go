@@ -43,6 +43,10 @@ func NewRouter(h *UsageHandler, db *sql.DB, serviceToken string) http.Handler {
 	authed.HandleFunc("GET /v1/usage/personal/by-protocol/total", h.PersonalByProtocolTotal)
 	authed.HandleFunc("GET /v1/usage/personal/by-key/total", h.PersonalByKeyTotal)
 	authed.HandleFunc("GET /v1/usage/personal/by-model/total", h.PersonalByModelTotal)
+	// 2026-05-25 — "Usage By App" ranked-bar chart on /user/usage-ledger.
+	// See usage.AppTotal + repository_sql.PersonalByAppTotal for the
+	// (app_slug, provider_code) grouping rationale.
+	authed.HandleFunc("GET /v1/usage/personal/by-app/total", h.PersonalByAppTotal)
 	// Phase 3B R23 (2026-05-11): raw recent requests for Overview card.
 	authed.HandleFunc("GET /v1/usage/personal/recent", h.PersonalRecent)
 

@@ -172,6 +172,61 @@ func (r *sqlRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParams) ([
 	return scanProtocolTotal(rows)
 }
 
+// PersonalByAppTotal aggregates DWD rows by the (app_slug, provider_code)
+// pair so the /user/usage-ledger "Usage By App" chart can rank traffic
+// by which Connected App generated it. Two row shapes returned:
+//
+//   - app_slug != ''  → traffic that went through /apps/<slug>/v1/...,
+//     i.e. a registered Connected App (first- or third-party).
+//   - app_slug == ''  → "direct" traffic that hit /v1/... without an
+//     app context. The frontend maps the provider_code to a friendly
+//     tool name (claude / codex / kimi) for display, per the 2026-05-25
+//     "show CLI tool name for direct calls" requirement.
+//
+// We COALESCE both columns at SQL level so:
+//   (a) NULL groupings collapse to '' rather than splitting NULL vs.
+//       '' into separate buckets (some old rows have empty strings
+//       instead of NULL),
+//   (b) the scanner can use plain `string` without sql.NullString.
+//
+// Why GROUP BY both columns instead of just app_slug: the same app slug
+// could in theory talk to multiple upstreams over time, and we want
+// each (app, upstream) pair to render as its own row in the chart.
+// In current data app:upstream is 1:1 but the grouping is the correct
+// minimum surface for forward-compat.
+//
+// Provider fallback uses COALESCE(provider_code, protocol_type),
+// matching the existing `PersonalByProtocolTotal` query — some older
+// rows have only `protocol_type` populated (provider_code NULL).
+func (r *sqlRepo) PersonalByAppTotal(ctx context.Context, p QueryParams) ([]AppTotal, error) {
+	filter, id := personalFilter(p)
+	startMs, endMs := p.LocalWindowMs()
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT COALESCE(app_slug, ''),
+		       COALESCE(provider_code, protocol_type, ''),
+		       COALESCE(SUM(total_tokens), 0),
+		       COALESCE(SUM(request_count), 0)
+		FROM usage_fact_dwd
+		WHERE %s
+		  AND event_time >= ? AND event_time < ?
+		GROUP BY COALESCE(app_slug, ''), COALESCE(provider_code, protocol_type, '')
+		ORDER BY SUM(total_tokens) DESC`, filter),
+		id, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
+	if err != nil {
+		return nil, fmt.Errorf("personal by-app total: %w", err)
+	}
+	defer rows.Close()
+	var out []AppTotal
+	for rows.Next() {
+		var at AppTotal
+		if err := rows.Scan(&at.AppSlug, &at.ProviderCode, &at.TotalTokens, &at.RequestCount); err != nil {
+			return nil, err
+		}
+		out = append(out, at)
+	}
+	return out, rows.Err()
+}
+
 func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyTotal, error) {
 	// Identity enrichment (2026-04-22, F2 of the usage-ledger label fix):
 	//

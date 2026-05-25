@@ -72,6 +72,41 @@ type ModelTotal struct {
 	RequestCount             int64  `json:"request_count"`
 }
 
+// AppTotal is a single row in the "Usage By App" breakdown (added
+// 2026-05-25 for /user/usage-ledger's per-app ranking chart). Rows are
+// grouped by the tuple (app_slug, provider_code):
+//
+//   - When `app_slug != ""` the row represents a registered Connected
+//     App (first-party like `degrade-detector` or third-party like
+//     `claude-mem`). The frontend uses `app_slug` directly as the
+//     display label.
+//   - When `app_slug == ""` the row represents default `/v1/...` traffic
+//     that did NOT go through a registered app (typically direct
+//     `aikey use` from a CLI tool — claude / codex / kimi). The
+//     frontend maps `provider_code` to a friendly tool name (anthropic
+//     → claude, openai → codex, moonshot/kimi_code → kimi) and shows
+//     that instead, per the 2026-05-25 user requirement that "direct"
+//     CLI calls show as the tool name rather than the provider code.
+//
+// The reason we don't pre-merge "direct" rows into one bucket at SQL
+// level: keeping the (app_slug, provider) tuple intact lets the
+// frontend group by tool name AND still distinguish which provider
+// each tool family hit (e.g. kimi(moonshot) vs kimi(kimi-code) stay
+// as separate rows, matching the existing ProviderMultiSelect chip
+// convention).
+type AppTotal struct {
+	// AppSlug is the registered app's slug, or "" when the row is the
+	// "direct" fallback (no app context — direct /v1/... call). Coalesced
+	// at SQL level so the client never sees NULL.
+	AppSlug      string `json:"app_slug"`
+	// ProviderCode is the canonical short form (anthropic / openai /
+	// moonshot / kimi_code / ...). Frontend uses this for the tool-name
+	// mapping on direct rows and also to render provider chips on app rows.
+	ProviderCode string `json:"provider_code"`
+	TotalTokens  int64  `json:"total_tokens"`
+	RequestCount int64  `json:"request_count"`
+}
+
 // KeyTotal is a single entry in the per-key usage breakdown.
 //
 // Priority for display labels on the client (see web/src/pages/user/

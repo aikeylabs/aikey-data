@@ -25,6 +25,13 @@ type Repository interface {
 	// PersonalByKeyTotal returns total_tokens per virtual_key_id.
 	PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyTotal, error)
 
+	// PersonalByAppTotal returns total_tokens per (app_slug, provider_code)
+	// pair. Rows with app_slug="" represent direct /v1/... traffic without
+	// any app context (frontend remaps to friendly tool name via
+	// provider_code). Added 2026-05-25 for /user/usage-ledger "Usage By
+	// App" ranking chart.
+	PersonalByAppTotal(ctx context.Context, p QueryParams) ([]AppTotal, error)
+
 	// PersonalByModelTotal returns per-model token & request totals,
 	// sorted by total_tokens DESC and capped at 20 rows. Powers the
 	// `/user/cost` "Usage by model" chart. NULL / empty `model` values

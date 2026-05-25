@@ -124,6 +124,31 @@ func (h *UsageHandler) PersonalByProtocolTotal(w http.ResponseWriter, r *http.Re
 	shared.JSON(w, http.StatusOK, data)
 }
 
+// GET /v1/usage/personal/by-app/total?seat_id=...&start_date=...&end_date=...
+// Returns rows grouped by (app_slug, provider_code) for the 2026-05-25
+// /user/usage-ledger "Usage By App" ranking chart. Empty app_slug
+// indicates "direct /v1/..." traffic (no Connected App context) — the
+// frontend renders those as the CLI tool name derived from
+// provider_code (anthropic→claude, openai→codex, kimi_code→kimi, ...).
+// See usage.AppTotal docstring for the full shape contract.
+func (h *UsageHandler) PersonalByAppTotal(w http.ResponseWriter, r *http.Request) {
+	p, err := parsePersonalParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	data, err := h.repo.PersonalByAppTotal(r.Context(), p)
+	if err != nil {
+		slog.Error("PersonalByAppTotal query failed", "error", err)
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	if data == nil {
+		data = []usage.AppTotal{}
+	}
+	shared.JSON(w, http.StatusOK, data)
+}
+
 // GET /v1/usage/personal/recent?seat_id=...&limit=5  (or account_id / org_id=personal)
 // Returns the most recent non-canary requests as raw usage_event_ods
 // rows. Default limit 5, capped at 50 to keep the response small —
