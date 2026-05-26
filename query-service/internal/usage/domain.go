@@ -107,6 +107,37 @@ type AppTotal struct {
 	RequestCount int64  `json:"request_count"`
 }
 
+// SessionTotal is a single entry in the per-session usage breakdown
+// powering the Performance page's "Top N sessions" chart. Grouped by
+// the session_id column on usage_fact_dwd (proxy attaches via the
+// sessionid extractor — Claude Code header, Kimi prompt_cache_key,
+// OpenAI conversation_id, etc.).
+//
+// SampleLabel / SampleVKID / SampleIdentity / SampleAppSlug are
+// "representative" fields for each session bucket — picked via MAX/
+// MIN aggregates from the rows that contributed. They give the
+// frontend enough context to render a useful row label (e.g.
+// "claude-cli · Claude Code · 234K") without forcing a per-session
+// JOIN to other tables.
+//
+// "No session" bucket: rows whose session_id is NULL / empty (clients
+// that don't carry a session header — curl, generic SDKs, legacy
+// data) coalesce into SessionID="". Frontend renders this bucket as
+// "(no session)" or similar.
+type SessionTotal struct {
+	SessionID                string `json:"session_id"`
+	SampleVirtualKeyID       string `json:"sample_virtual_key_id,omitempty"`
+	SampleAlias              string `json:"sample_alias,omitempty"`    // representative virtual_key_alias
+	SampleIdentity           string `json:"sample_identity,omitempty"` // representative OAuth identity (email)
+	SampleAppSlug            string `json:"sample_app_slug,omitempty"` // representative app_slug
+	InputTokens              int64  `json:"input_tokens"`
+	CachedInputTokens        int64  `json:"cached_input_tokens"`
+	CacheCreationInputTokens int64  `json:"cache_creation_input_tokens"`
+	OutputTokens             int64  `json:"output_tokens"`
+	TotalTokens              int64  `json:"total_tokens"`
+	RequestCount             int64  `json:"request_count"`
+}
+
 // KeyTotal is a single entry in the per-key usage breakdown.
 //
 // Priority for display labels on the client (see web/src/pages/user/
@@ -188,6 +219,18 @@ type QueryParams struct {
 	// Other endpoints (hourly / by-protocol / by-key / recent) ignore
 	// the field; extending them is a non-goal of Phase 4 Stage B.
 	AppSlug string
+
+	// SessionID, when non-empty, narrows the result to events tagged
+	// with this conversation session. Powers the Performance page's
+	// drill-down — clicking a row in the Top N sessions chart filters
+	// the by-key + by-model charts to just that session. Empty = no
+	// filter (default Performance view shows all sessions for the day).
+	//
+	// Consumed by PersonalByKeyTotal + PersonalByModelTotal. The new
+	// PersonalBySessionTotal endpoint deliberately IGNORES this filter
+	// — selecting a session shouldn't shrink the session ranking to
+	// one row (see design doc §5.3 for the orthogonality rationale).
+	SessionID string
 
 	// TZ is the IANA name (e.g. "Asia/Shanghai") of the caller's
 	// local time zone. Empty = UTC. Used to bucket per-day / per-hour

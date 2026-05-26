@@ -56,6 +56,9 @@ func setupUsageTestDB(t *testing.T) *shared.DB {
 		`ALTER TABLE usage_event_ods ADD COLUMN app_slug TEXT`,
 		`ALTER TABLE usage_fact_dwd  ADD COLUMN app_slug TEXT`,
 		`CREATE INDEX IF NOT EXISTS idx_dwd_app_slug_date ON usage_fact_dwd (app_slug, usage_date) WHERE app_slug IS NOT NULL AND app_slug != ''`,
+		// aikey-config-tool/pkg/dbmigrate/versions/v1_0_0_rc6_session_id.go
+		`ALTER TABLE usage_event_ods ADD COLUMN session_id TEXT`,
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN session_id TEXT`,
 	}
 	for _, stmt := range postBaseline {
 		if _, err := raw.Exec(stmt); err != nil {
@@ -1111,5 +1114,175 @@ func TestPersonalByKeyTotal_NonOAuthRowsUnaffected(t *testing.T) {
 	}
 	if len(rows) != 2 {
 		t.Fatalf("want 2 distinct vk rows (no collapse without identity), got %d: %+v", len(rows), rows)
+	}
+}
+
+// --- PersonalBySessionTotal (v1.0.0-rc.6) ---
+
+// insertDWDWithSession seeds one DWD row with explicit session_id.
+// Helper for the by-session aggregation tests below.
+func insertDWDWithSession(t *testing.T, db *shared.DB, eventID, sessionID, vkID string, ms int64, tokens int64) {
+	t.Helper()
+	insertDWD(t, db, dwdRow{
+		EventID:      eventID,
+		OrgID:        "personal",
+		VirtualKeyID: vkID,
+		ProviderCode: "anthropic",
+		Model:        "claude-3-7",
+		EventTimeMs:  ms,
+		UsageDate:    "2026-05-20",
+		TotalTokens:  tokens,
+		RequestCount: 1,
+	})
+	// Need to write session_id via direct UPDATE — insertDWD helper
+	// doesn't take session_id as a parameter, but the column was added
+	// in postBaseline migration so the UPDATE succeeds.
+	_, err := db.DB.Exec(`UPDATE usage_fact_dwd SET session_id = ? WHERE event_id = ?`, sessionID, eventID)
+	if err != nil {
+		t.Fatalf("update session_id for %q: %v", eventID, err)
+	}
+}
+
+// TestPersonalBySessionTotal_GroupsBySessionAndSortsByTokens covers the
+// happy path: distinct sessions get distinct rows, sorted by total_tokens
+// DESC, and the LIMIT param is respected.
+func TestPersonalBySessionTotal_GroupsBySessionAndSortsByTokens(t *testing.T) {
+	db := setupUsageTestDB(t)
+	date := "2026-05-20"
+	ms := mustParseDateMs(t, date)
+	insertDWDWithSession(t, db, "e1", "session-big", "personal:k1", ms, 1000)
+	insertDWDWithSession(t, db, "e2", "session-mid", "personal:k2", ms, 500)
+	insertDWDWithSession(t, db, "e3", "session-small", "personal:k3", ms, 100)
+
+	repo := NewSQLRepository(db)
+	start, _ := time.Parse("2006-01-02", "2026-05-01")
+	end, _ := time.Parse("2006-01-02", "2026-05-31")
+	rows, err := repo.PersonalBySessionTotal(context.Background(), QueryParams{
+		OrgID: "personal", StartDate: start, EndDate: end, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("want 3 rows, got %d: %+v", len(rows), rows)
+	}
+	wantOrder := []string{"session-big", "session-mid", "session-small"}
+	for i, want := range wantOrder {
+		if rows[i].SessionID != want {
+			t.Errorf("rows[%d].SessionID = %q, want %q (sort by total_tokens DESC)", i, rows[i].SessionID, want)
+		}
+	}
+}
+
+// TestPersonalBySessionTotal_NoSessionBucket pins the "(no session)"
+// aggregation contract: rows with NULL or '' session_id collapse into
+// a single bucket the frontend renders as "(no session)". Confirms
+// users can see how much of their traffic lacks the dimension.
+func TestPersonalBySessionTotal_NoSessionBucket(t *testing.T) {
+	db := setupUsageTestDB(t)
+	date := "2026-05-20"
+	ms := mustParseDateMs(t, date)
+	// 2 rows with NULL session_id (leave session unset)
+	insertDWD(t, db, dwdRow{EventID: "n1", OrgID: "personal", VirtualKeyID: "personal:k1", ProviderCode: "anthropic", Model: "c", EventTimeMs: ms, UsageDate: date, TotalTokens: 100, RequestCount: 1})
+	insertDWD(t, db, dwdRow{EventID: "n2", OrgID: "personal", VirtualKeyID: "personal:k2", ProviderCode: "anthropic", Model: "c", EventTimeMs: ms, UsageDate: date, TotalTokens: 200, RequestCount: 1})
+	// 1 row with explicit empty session_id (NOT NULL but empty)
+	insertDWD(t, db, dwdRow{EventID: "n3", OrgID: "personal", VirtualKeyID: "personal:k3", ProviderCode: "anthropic", Model: "c", EventTimeMs: ms, UsageDate: date, TotalTokens: 50, RequestCount: 1})
+	_, _ = db.DB.Exec(`UPDATE usage_fact_dwd SET session_id = '' WHERE event_id = 'n3'`)
+
+	repo := NewSQLRepository(db)
+	start, _ := time.Parse("2006-01-02", "2026-05-01")
+	end, _ := time.Parse("2006-01-02", "2026-05-31")
+	rows, err := repo.PersonalBySessionTotal(context.Background(), QueryParams{
+		OrgID: "personal", StartDate: start, EndDate: end,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want 1 collapsed row (no session bucket), got %d: %+v", len(rows), rows)
+	}
+	if rows[0].SessionID != "" {
+		t.Errorf("collapsed bucket SessionID want empty, got %q", rows[0].SessionID)
+	}
+	if rows[0].TotalTokens != 350 {
+		t.Errorf("collapsed bucket total tokens want 350 (100+200+50), got %d", rows[0].TotalTokens)
+	}
+}
+
+// TestPersonalBySessionTotal_IgnoresSessionIDFilter pins the design
+// contract from §5.3: passing SessionID on the by-session endpoint
+// does NOT shrink the result to one row. Selecting a session in the
+// UI must keep the Top N visible so users can switch to another
+// session without resetting state.
+func TestPersonalBySessionTotal_IgnoresSessionIDFilter(t *testing.T) {
+	db := setupUsageTestDB(t)
+	date := "2026-05-20"
+	ms := mustParseDateMs(t, date)
+	insertDWDWithSession(t, db, "e1", "session-A", "personal:k", ms, 100)
+	insertDWDWithSession(t, db, "e2", "session-B", "personal:k", ms, 200)
+
+	repo := NewSQLRepository(db)
+	start, _ := time.Parse("2006-01-02", "2026-05-01")
+	end, _ := time.Parse("2006-01-02", "2026-05-31")
+	rows, err := repo.PersonalBySessionTotal(context.Background(), QueryParams{
+		OrgID: "personal", StartDate: start, EndDate: end,
+		SessionID: "session-A", // intentionally ignored
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("SessionID filter must be ignored: want 2 rows, got %d: %+v", len(rows), rows)
+	}
+}
+
+// TestPersonalByKeyTotal_FiltersBySession is the read-side companion
+// to the new SessionID filter on by-key. Confirms the SQL WHERE
+// clause narrows correctly without breaking app_slug grouping.
+func TestPersonalByKeyTotal_FiltersBySession(t *testing.T) {
+	db := setupUsageTestDB(t)
+	date := "2026-05-20"
+	ms := mustParseDateMs(t, date)
+	insertDWDWithSession(t, db, "e1", "session-target", "personal:k1", ms, 500)
+	insertDWDWithSession(t, db, "e2", "session-other", "personal:k2", ms, 999)
+
+	repo := NewSQLRepository(db)
+	start, _ := time.Parse("2006-01-02", "2026-05-01")
+	end, _ := time.Parse("2006-01-02", "2026-05-31")
+	rows, err := repo.PersonalByKeyTotal(context.Background(), QueryParams{
+		OrgID: "personal", StartDate: start, EndDate: end,
+		SessionID: "session-target",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].TotalTokens != 500 {
+		t.Fatalf("SessionID filter leak: want 1 row of 500 tokens, got %+v", rows)
+	}
+}
+
+// TestPersonalByModelTotal_FiltersBySession mirrors the above for the
+// by-model endpoint. Both endpoints share the sessionIDFilter helper
+// so the contract is identical.
+func TestPersonalByModelTotal_FiltersBySession(t *testing.T) {
+	db := setupUsageTestDB(t)
+	date := "2026-05-20"
+	ms := mustParseDateMs(t, date)
+	insertDWDWithSession(t, db, "e1", "session-target", "personal:k1", ms, 500)
+	insertDWDWithSession(t, db, "e2", "session-other", "personal:k2", ms, 999)
+
+	repo := NewSQLRepository(db)
+	start, _ := time.Parse("2006-01-02", "2026-05-01")
+	end, _ := time.Parse("2006-01-02", "2026-05-31")
+	rows, err := repo.PersonalByModelTotal(context.Background(), QueryParams{
+		OrgID: "personal", StartDate: start, EndDate: end,
+		SessionID: "session-target",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both events use Model "claude-3-7", so filter narrows to one model row of 500 tokens.
+	if len(rows) != 1 || rows[0].TotalTokens != 500 {
+		t.Fatalf("SessionID filter leak: want 1 row of 500 tokens, got %+v", rows)
 	}
 }

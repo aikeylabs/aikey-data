@@ -90,6 +90,15 @@ type ODSRecord struct {
 
 	// Phase 4 Connected Apps (v1.0.0-rc.5): per-app scoping.
 	AppSlug                    sql.NullString
+
+	// Performance dashboard session dimension (v1.0.0-rc.6).
+	// Generic per-conversation aggregation key, populated by proxy
+	// via aikey-proxy/internal/proxy/sessionid/fingerprint.yaml
+	// extraction (Claude Code header, Kimi prompt_cache_key body,
+	// OpenAI conversation_id body, or the X-Aikey-Session-Id
+	// convention header for any client). NULL when the request
+	// carried no session marker.
+	SessionID                  sql.NullString
 }
 
 // ControlEvent is a read-only projection of managed_key_control_events.
@@ -176,4 +185,9 @@ type DWDFact struct {
 
 	// Phase 4 Connected Apps (v1.0.0-rc.5): projected from ODS row.
 	AppSlug                    string
+
+	// Performance dashboard session dimension (v1.0.0-rc.6): projected
+	// verbatim from ODS row. Empty string for events without a session
+	// marker (proxy wrote SQL NULL or "" — both surface as "" here).
+	SessionID                  string
 }

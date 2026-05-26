@@ -59,6 +59,31 @@ func appSlugFilter(p QueryParams) (frag string, arg interface{}) {
 	return " AND app_slug = ?", p.AppSlug
 }
 
+// appendNonNil returns args with extra appended only if extra is non-nil.
+// Saves a callsite-side if branch when threading optional filter binds.
+func appendNonNil(args []interface{}, extra interface{}) []interface{} {
+	if extra == nil {
+		return args
+	}
+	return append(args, extra)
+}
+
+// sessionIDFilter mirrors appSlugFilter for the session_id dimension.
+// Empty SessionID is "no filter" — returning all rows including those
+// with NULL/empty session_id (the "no session" bucket). A non-empty
+// SessionID narrows to events whose session_id equals exactly that
+// string; COALESCE handles NULL → '' so an explicit SessionID="" can
+// be requested via a separate sentinel if ever needed (not used today).
+//
+// Added 2026-05-26 for Performance page drill-down. Consumers:
+// PersonalByKeyTotal and PersonalByModelTotal.
+func sessionIDFilter(p QueryParams) (frag string, arg interface{}) {
+	if p.SessionID == "" {
+		return "", nil
+	}
+	return " AND COALESCE(session_id, '') = ?", p.SessionID
+}
+
 // --- Personal page ---
 
 // PersonalTimeline groups usage by the caller's local calendar day
@@ -260,6 +285,16 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 	// for the full rationale, including why displaying ≠ aggregating
 	// was the underlying drift.
 	filter, id := personalFilter(p)
+	// Optional session_id filter (2026-05-26 Performance drill-down):
+	// when set, the outer WHERE narrows to events tagged with this
+	// session. Spliced on the DWD alias `d` since session_id is a DWD
+	// column populated by projector transfer.
+	sessFrag, sessArg := sessionIDFilter(p)
+	if sessArg != nil {
+		// Bind on `d.session_id` not the bare column to avoid ambiguity
+		// with any future ODS-side session_id reference in the JOIN.
+		sessFrag = " AND COALESCE(d.session_id, '') = ?"
+	}
 	// Both the identity-enrichment subquery (on ODS) and the outer
 	// aggregation (on DWD) are filtered by the caller's local-tz
 	// window. We express this as a single event_time millis range on
@@ -302,10 +337,10 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 		    GROUP BY virtual_key_id
 		) AS id ON id.virtual_key_id = d.virtual_key_id
 		WHERE %s
-		  AND d.event_time >= ? AND d.event_time < ?
+		  AND d.event_time >= ? AND d.event_time < ?%s
 		GROUP BY COALESCE(NULLIF(id.identity, ''), COALESCE(d.virtual_key_id, '')), COALESCE(d.app_slug, '')
-		ORDER BY SUM(d.total_tokens) DESC`, filter),
-		startMsArg, endMsArg, id, startMsArg, endMsArg)
+		ORDER BY SUM(d.total_tokens) DESC`, filter, sessFrag),
+		appendNonNil([]interface{}{startMsArg, endMsArg, id, startMsArg, endMsArg}, sessArg)...)
 	if err != nil {
 		return nil, fmt.Errorf("personal by-key total: %w", err)
 	}
@@ -349,10 +384,10 @@ func (r *sqlRepo) PersonalByModelTotal(ctx context.Context, p QueryParams) ([]Mo
 	filter, id := personalFilter(p)
 	startMs, endMs := p.LocalWindowMs()
 	appSlugFrag, appSlugArg := appSlugFilter(p)
+	sessFrag, sessArg := sessionIDFilter(p)
 	args := []interface{}{id, r.db.BindMillis(startMs), r.db.BindMillis(endMs)}
-	if appSlugArg != nil {
-		args = append(args, appSlugArg)
-	}
+	args = appendNonNil(args, appSlugArg)
+	args = appendNonNil(args, sessArg)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT COALESCE(NULLIF(model, ''), 'unknown') AS model_grp,
 		       COALESCE(SUM(input_tokens),0),
@@ -363,10 +398,10 @@ func (r *sqlRepo) PersonalByModelTotal(ctx context.Context, p QueryParams) ([]Mo
 		       COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
-		  AND event_time >= ? AND event_time < ?%s
+		  AND event_time >= ? AND event_time < ?%s%s
 		GROUP BY COALESCE(NULLIF(model, ''), 'unknown')
 		ORDER BY SUM(total_tokens) DESC
-		LIMIT 20`, filter, appSlugFrag),
+		LIMIT 20`, filter, appSlugFrag, sessFrag),
 		args...)
 	if err != nil {
 		return nil, fmt.Errorf("personal by-model total: %w", err)
@@ -380,6 +415,82 @@ func (r *sqlRepo) PersonalByModelTotal(ctx context.Context, p QueryParams) ([]Mo
 			return nil, err
 		}
 		result = append(result, mt)
+	}
+	return result, rows.Err()
+}
+
+// PersonalBySessionTotal aggregates DWD rows by session_id, returning
+// the top N (default 10) buckets sorted by total_tokens DESC. Powers
+// the /user/performance "Top N sessions" chart.
+//
+// Aggregation: COALESCE(session_id, '') so NULL and empty group into a
+// single "no session" bucket — the frontend renders this with a clear
+// label so users see how much traffic lacks the session dimension.
+//
+// Identity enrichment (mirrors PersonalByKeyTotal): LEFT JOIN to a
+// pre-aggregated ODS subquery so OAuth sessions can surface the user's
+// email as a representative label. Without this, OAuth rows would only
+// have the opaque session_id from the IDE.
+//
+// QueryParams.SessionID is INTENTIONALLY ignored: selecting a session
+// in the UI shouldn't shrink the ranking to one row — see design doc
+// §5.3 "Top N session chart self doesn't receive session filter".
+func (r *sqlRepo) PersonalBySessionTotal(ctx context.Context, p QueryParams) ([]SessionTotal, error) {
+	filter, id := personalFilter(p)
+	startMs, endMs := p.LocalWindowMs()
+	startMsArg := r.db.BindMillis(startMs)
+	endMsArg := r.db.BindMillis(endMs)
+	limit := p.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	// Group by session_id alone (not session_id+identity) so the
+	// "no session" bucket coalesces all clients without a session
+	// header into ONE row — users get one clear "(no session)" entry
+	// instead of one per OAuth identity. Identity is surfaced via
+	// MAX(id.identity) as a sample for the row label.
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT COALESCE(d.session_id, '')                                   AS session_id,
+		       MIN(COALESCE(d.virtual_key_id, ''))                          AS sample_vk_id,
+		       COALESCE(NULLIF(MAX(d.virtual_key_alias), ''), '')           AS sample_alias,
+		       COALESCE(MAX(id.identity), '')                               AS sample_identity,
+		       COALESCE(MAX(d.app_slug), '')                                AS sample_app_slug,
+		       COALESCE(SUM(d.input_tokens),0),
+		       COALESCE(SUM(d.cached_input_tokens),0),
+		       COALESCE(SUM(d.cache_creation_input_tokens),0),
+		       COALESCE(SUM(d.output_tokens),0),
+		       COALESCE(SUM(d.total_tokens),0),
+		       COALESCE(SUM(d.request_count),0)
+		FROM usage_fact_dwd AS d
+		LEFT JOIN (
+		    SELECT virtual_key_id, MAX(oauth_identity) AS identity
+		    FROM usage_event_ods
+		    WHERE oauth_identity IS NOT NULL AND oauth_identity != ''
+		      AND event_time >= ? AND event_time < ?
+		    GROUP BY virtual_key_id
+		) AS id ON id.virtual_key_id = d.virtual_key_id
+		WHERE %s
+		  AND d.event_time >= ? AND d.event_time < ?
+		GROUP BY COALESCE(d.session_id, '')
+		ORDER BY SUM(d.total_tokens) DESC
+		LIMIT ?`, filter),
+		startMsArg, endMsArg, id, startMsArg, endMsArg, limit)
+	if err != nil {
+		return nil, fmt.Errorf("personal by-session total: %w", err)
+	}
+	defer rows.Close()
+
+	var result []SessionTotal
+	for rows.Next() {
+		var st SessionTotal
+		if err := rows.Scan(
+			&st.SessionID, &st.SampleVirtualKeyID, &st.SampleAlias, &st.SampleIdentity, &st.SampleAppSlug,
+			&st.InputTokens, &st.CachedInputTokens, &st.CacheCreationInputTokens,
+			&st.OutputTokens, &st.TotalTokens, &st.RequestCount,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, st)
 	}
 	return result, rows.Err()
 }

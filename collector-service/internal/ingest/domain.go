@@ -70,6 +70,14 @@ type UsageEvent struct {
 	// without an app context (CLI direct calls, virtual keys, etc).
 	AppSlug string `json:"app_slug,omitempty"`
 
+	// session — Performance dashboard session dimension (v1.0.0-rc.6).
+	// Proxy extracts via aikey-proxy/internal/proxy/sessionid/
+	// fingerprint.yaml (Claude Code header / Kimi prompt_cache_key /
+	// OpenAI conversation_id / X-Aikey-Session-Id convention). Empty
+	// for events without a session marker. Used by the per-session
+	// usage chart and as an optional filter on by-key / by-model.
+	SessionID string `json:"session_id,omitempty"`
+
 	// usage — Anthropic prompt-caching tuple (input / cache_creation /
 	// cache_read / output). For non-Anthropic providers the cache fields
 	// are nil and serialise out as `omitempty`.

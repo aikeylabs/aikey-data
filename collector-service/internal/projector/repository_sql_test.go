@@ -133,7 +133,9 @@ func newSQLiteODSTestDB(t *testing.T) *shared.DB {
 			dwd_last_error_code TEXT,
 			dwd_last_error_msg TEXT,
 			-- Phase 4 Connected Apps (v1.0.0-rc.5)
-			app_slug TEXT
+			app_slug TEXT,
+			-- Performance session dimension (v1.0.0-rc.6)
+			session_id TEXT
 		);
 	`)
 	if err != nil {
@@ -295,6 +297,8 @@ func newSQLiteDWDTestDB(t *testing.T, includeSQLDefaults bool) *shared.DB {
 			` + projectedAtCol + `,
 			-- Phase 4 Connected Apps (v1.0.0-rc.5)
 			app_slug TEXT,
+			-- Performance session dimension (v1.0.0-rc.6)
+			session_id TEXT,
 			UNIQUE (org_id, event_id)
 		);
 	`)

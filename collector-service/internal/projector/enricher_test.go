@@ -74,6 +74,57 @@ func TestEnrich_Valid(t *testing.T) {
 	}
 }
 
+// TestEnrich_SessionIDPropagatesFromODSToDWD pins the v1.0.0-rc.6
+// projector contract: whatever session_id the proxy wrote into ODS
+// must appear verbatim in DWD, with no enrichment, no fallback,
+// no rewriting. This guards the design doc's "single source of truth
+// is the proxy extractor" invariant — drift would mean a future
+// reader of by-session aggregates couldn't trust they reflect what
+// the client actually sent.
+//
+// Two cases in one test: a present session_id flows through, and an
+// absent (NULL) session_id surfaces as empty string on DWD (the
+// downstream by-session SQL coalesces both to '').
+func TestEnrich_SessionIDPropagatesFromODSToDWD(t *testing.T) {
+	enricher := NewEnricher(&mockControlReader{})
+
+	withSession := &ODSRecord{
+		OdsID:         101,
+		EventID:       "evt-with-session",
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
+		OrgID:         "org1",
+		RequestCount:  1,
+		RequestStatus: "success",
+		SessionID:     sql.NullString{String: "claude-session-abc123", Valid: true},
+	}
+	fact, err := enricher.Enrich(context.Background(), withSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fact.SessionID != "claude-session-abc123" {
+		t.Errorf("session_id not propagated: want %q, got %q", "claude-session-abc123", fact.SessionID)
+	}
+
+	withoutSession := &ODSRecord{
+		OdsID:         102,
+		EventID:       "evt-no-session",
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
+		OrgID:         "org1",
+		RequestCount:  1,
+		RequestStatus: "success",
+		// SessionID intentionally zero-value (NullString.Valid = false)
+	}
+	fact2, err := enricher.Enrich(context.Background(), withoutSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fact2.SessionID != "" {
+		t.Errorf("missing session_id should propagate as empty string, got %q", fact2.SessionID)
+	}
+}
+
 func TestEnrich_NoVirtualKey(t *testing.T) {
 	enricher := NewEnricher(&mockControlReader{})
 	rec := &ODSRecord{

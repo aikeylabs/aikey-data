@@ -184,6 +184,12 @@ func (e *Enricher) buildBaseFact(rec *ODSRecord) *DWDFact {
 
 		// Phase 4 Connected Apps (v1.0.0-rc.5): copy from ODS verbatim.
 		AppSlug:                    rec.AppSlug.String,
+
+		// Performance session dimension (v1.0.0-rc.6): copy verbatim
+		// from ODS — no enrichment or fallback logic. The single
+		// source of truth for what "session" means is what the proxy
+		// extracted via sessionid/fingerprint.yaml at request time.
+		SessionID:                  rec.SessionID.String,
 	}
 }
 

@@ -149,6 +149,42 @@ func (h *UsageHandler) PersonalByAppTotal(w http.ResponseWriter, r *http.Request
 	shared.JSON(w, http.StatusOK, data)
 }
 
+// GET /v1/usage/personal/by-session/total?seat_id=...&start_date=...&end_date=...&limit=10
+// (or account_id / org_id=personal)
+//
+// Returns top N (default 10) sessions ranked by total_tokens for the
+// 2026-05-26 /user/performance "Top N sessions" chart. session_id ""
+// (no session header) is grouped into a single bucket — frontend
+// renders it as "(no session)" so users see how much of their traffic
+// lacks the session dimension.
+//
+// Unlike other personal endpoints, ?session_id= filter is ignored
+// here (see usage.QueryParams.SessionID doc). ?limit= controls N
+// (default 10, no hard cap — the underlying query already coalesces
+// per-session so payload size is bounded by distinct sessions).
+func (h *UsageHandler) PersonalBySessionTotal(w http.ResponseWriter, r *http.Request) {
+	p, err := parsePersonalParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	if lim := r.URL.Query().Get("limit"); lim != "" {
+		if n, perr := strconv.Atoi(lim); perr == nil && n > 0 {
+			p.Limit = n
+		}
+	}
+	data, err := h.repo.PersonalBySessionTotal(r.Context(), p)
+	if err != nil {
+		slog.Error("PersonalBySessionTotal query failed", "error", err)
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	if data == nil {
+		data = []usage.SessionTotal{}
+	}
+	shared.JSON(w, http.StatusOK, data)
+}
+
 // GET /v1/usage/personal/recent?seat_id=...&limit=5  (or account_id / org_id=personal)
 // Returns the most recent non-canary requests as raw usage_event_ods
 // rows. Default limit 5, capped at 50 to keep the response small —
@@ -311,6 +347,12 @@ func parsePersonalParams(r *http.Request) (usage.QueryParams, error) {
 		// `personalTimeline` + `personalByModelTotal`. Other endpoints
 		// ignore this field — see QueryParams.AppSlug doc.
 		AppSlug: q.Get("app_slug"),
+		// Performance drill-down (2026-05-26): optional per-session
+		// scoping. Honored by personalByKeyTotal + personalByModelTotal
+		// when set; personalBySessionTotal deliberately ignores it (the
+		// Top N ranking shouldn't collapse to one row when a session
+		// is selected). See QueryParams.SessionID doc.
+		SessionID: q.Get("session_id"),
 	}
 	parseDates(&p, q.Get("start_date"), q.Get("end_date"))
 	p.Defaults()

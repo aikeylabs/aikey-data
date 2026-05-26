@@ -36,7 +36,8 @@ SELECT ods_id, event_id, event_time, occurred_at,
        billable_amount, currency,
        request_status, http_status_code, upstream_request_id,
        dwd_retry_count,
-       app_slug
+       app_slug,
+       session_id
 FROM usage_event_ods
 WHERE ((dwd_status = 'pending')
    OR (dwd_status = 'retry' AND dwd_next_retry_at <= %s))
@@ -74,6 +75,7 @@ func (r *sqlODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord
 			&rec.RequestStatus, &rec.HTTPStatusCode, &rec.UpstreamRequestID,
 			&rec.DwdRetryCount,
 			&rec.AppSlug,
+			&rec.SessionID,
 		); err != nil {
 			return nil, fmt.Errorf("scan ods row: %w", err)
 		}
@@ -192,8 +194,10 @@ func NewSQLDWDWriter(db *shared.DB) DWDWriter { return &sqlDWDWriter{db: db} }
 // DB would leave projected_at NULL on new inserts. Always binding from
 // Go makes upgraded and fresh installs behaviour-identical. See
 // bugfix 20260424 review finding #2.
-// Column order: keep `app_slug` at the tail so historic positions stay
-// fixed. v1.0.0-rc.5 added it for Phase 4 Connected Apps Stage B.
+// Column order: keep new columns at the tail (after app_slug) so
+// historic positions stay fixed. v1.0.0-rc.5 added app_slug for Phase
+// 4 Connected Apps; v1.0.0-rc.6 adds session_id for the Performance
+// Top N sessions chart.
 const dwdColumns = `event_id, ods_id, occurred_at, event_time, usage_date,
     org_id, account_id, seat_id,
     virtual_key_id, virtual_key_revision, virtual_key_alias, virtual_key_hash,
@@ -208,7 +212,7 @@ const dwdColumns = `event_id, ods_id, occurred_at, event_time, usage_date,
     completion_source, quality_status, validation_code, validation_message,
     anomaly_type, anomaly_reason, billing_scope, user_usage_scope,
     control_event_id, control_event_revision, projector_version, projected_at,
-    app_slug`
+    app_slug, session_id`
 
 const dwdPlaceholders = `?,?,?,?,?,
     ?,?,?,
@@ -224,7 +228,7 @@ const dwdPlaceholders = `?,?,?,?,?,
     ?,?,?,?,
     ?,?,?,?,
     ?,?,?,?,
-    ?`
+    ?,?`
 
 func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 	insertDWDSQL := w.db.InsertOrIgnoreOn("usage_fact_dwd", dwdColumns, dwdPlaceholders, "org_id, event_id")
@@ -254,6 +258,11 @@ func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 		// in this insert (BindingID, AccountID, etc.) follow the same
 		// pattern. Avoids needing a dialect-aware null-or-empty helper.
 		f.AppSlug,
+		// SessionID (v1.0.0-rc.6): same empty-vs-NULL ambivalence as
+		// AppSlug — by-session SQL coalesces NULL to '' so both
+		// surface identically downstream. Empty string is the common
+		// case (most requests carry no session marker).
+		f.SessionID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert dwd fact %s: %w", f.EventID, err)

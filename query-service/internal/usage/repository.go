@@ -32,6 +32,18 @@ type Repository interface {
 	// App" ranking chart.
 	PersonalByAppTotal(ctx context.Context, p QueryParams) ([]AppTotal, error)
 
+	// PersonalBySessionTotal returns total_tokens per session_id, sorted
+	// by total_tokens DESC and capped at QueryParams.Limit (default 10
+	// for the Performance Top N chart). Empty session_id is coalesced to
+	// "" and represented as one bucket — clients without a session header
+	// (curl / generic SDKs / legacy events) aggregate together so users
+	// can see how much of their traffic carries no session dimension.
+	//
+	// SessionID query param on QueryParams is IGNORED here (selecting a
+	// session shouldn't shrink the session ranking to one row). Added
+	// 2026-05-26 for /user/performance "Top N sessions" chart.
+	PersonalBySessionTotal(ctx context.Context, p QueryParams) ([]SessionTotal, error)
+
 	// PersonalByModelTotal returns per-model token & request totals,
 	// sorted by total_tokens DESC and capped at 20 rows. Powers the
 	// `/user/cost` "Usage by model" chart. NULL / empty `model` values

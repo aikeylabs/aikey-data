@@ -47,6 +47,10 @@ func NewRouter(h *UsageHandler, db *sql.DB, serviceToken string) http.Handler {
 	// See usage.AppTotal + repository_sql.PersonalByAppTotal for the
 	// (app_slug, provider_code) grouping rationale.
 	authed.HandleFunc("GET /v1/usage/personal/by-app/total", h.PersonalByAppTotal)
+	// 2026-05-26 — "Top N sessions" ranked chart on /user/performance.
+	// See usage.SessionTotal + repository_sql.PersonalBySessionTotal for
+	// per-session grouping. Default N=10, override with ?limit=N.
+	authed.HandleFunc("GET /v1/usage/personal/by-session/total", h.PersonalBySessionTotal)
 	// Phase 3B R23 (2026-05-11): raw recent requests for Overview card.
 	authed.HandleFunc("GET /v1/usage/personal/recent", h.PersonalRecent)
 

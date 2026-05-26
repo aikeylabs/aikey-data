@@ -87,6 +87,33 @@ func (m *mockRepo) PersonalByAppTotal(_ context.Context, p usage.QueryParams) ([
 	}, nil
 }
 
+// PersonalBySessionTotal — added 2026-05-26 for the Performance Top N
+// sessions chart endpoint. Returns a small fixture (one identified
+// session + one "no session" bucket) so future handler tests get a
+// non-empty payload. Interface signature lives in
+// query-service/internal/usage/repository.go.
+func (m *mockRepo) PersonalBySessionTotal(_ context.Context, p usage.QueryParams) ([]usage.SessionTotal, error) {
+	return []usage.SessionTotal{
+		{
+			SessionID:          "session-abc-123",
+			SampleVirtualKeyID: "oauth:session_xyz",
+			SampleIdentity:     "user@example.com",
+			SampleAppSlug:      "claude-code",
+			TotalTokens:        12345,
+			InputTokens:        9000,
+			OutputTokens:       3345,
+			RequestCount:       17,
+		},
+		{
+			SessionID:    "", // "no session" bucket
+			TotalTokens:  500,
+			InputTokens:  400,
+			OutputTokens: 100,
+			RequestCount: 3,
+		},
+	}, nil
+}
+
 // PersonalRecent — Phase 3B R23 (2026-05-11). Returns a small fixture
 // row so the handler test (if added later) sees a non-empty payload.
 // Existing tests don't exercise the Recent path; this just satisfies
