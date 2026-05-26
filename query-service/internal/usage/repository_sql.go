@@ -242,6 +242,23 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 	// negligible in practice. Proper long-term fix: propagate
 	// oauth_identity through the projector into DWD — tracked as a
 	// follow-up (avoid here because it needs a migration).
+	//
+	// Aggregation by (identity-or-vk, app_slug) (2026-05-26): the FE
+	// labels OAuth rows with the email identity, so grouping by raw
+	// virtual_key_id leaked one row per OAuth session and made the
+	// same email appear N times. The corrected grouping is:
+	//
+	//   COALESCE(NULLIF(identity,''), virtual_key_id), COALESCE(app_slug,'')
+	//
+	// OAuth rows (identity non-empty) collapse per (email, app_slug);
+	// non-OAuth rows fall back to (vk_id, app_slug) and behave as
+	// before. app_slug is the second dim so the FE can show "same email,
+	// different clients" as distinct rows — see
+	//   workflow/CI/requirements/2026-05-26-usage-by-key-app-attribution.md
+	// and
+	//   workflow/CI/bugfix/20260526-usage-by-key-duplicate-rows-by-app-attribution.md
+	// for the full rationale, including why displaying ≠ aggregating
+	// was the underlying drift.
 	filter, id := personalFilter(p)
 	// Both the identity-enrichment subquery (on ODS) and the outer
 	// aggregation (on DWD) are filtered by the caller's local-tz
@@ -259,10 +276,17 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 	// column in COALESCE. The frontend's deriveKeyLabel() falls back to
 	// "unlabeled" for empty IDs so the row stays surfaced rather than
 	// being silently dropped — matches CLAUDE.md "失败要显眼" guidance.
+	//
+	// MIN(virtual_key_id) is the "representative session" returned to
+	// the FE for OAuth rows (where N sessions collapse into one); for
+	// non-OAuth rows it equals the only vk_id in the group so behavior
+	// is unchanged. The FE no longer uses it as the primary row key —
+	// the new react `key` is `${identity_or_vk}|${app_slug}`.
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT COALESCE(d.virtual_key_id, ''),
-		       COALESCE(NULLIF(MAX(d.virtual_key_alias), ''), REPLACE(COALESCE(d.virtual_key_id, ''), 'personal:', '')),
+		SELECT MIN(COALESCE(d.virtual_key_id, '')),
+		       COALESCE(NULLIF(MAX(d.virtual_key_alias), ''), REPLACE(MIN(COALESCE(d.virtual_key_id, '')), 'personal:', '')),
 		       COALESCE(id.identity, ''),
+		       COALESCE(d.app_slug, ''),
 		       COALESCE(SUM(d.input_tokens),0),
 		       COALESCE(SUM(d.cached_input_tokens),0),
 		       COALESCE(SUM(d.cache_creation_input_tokens),0),
@@ -279,7 +303,7 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 		) AS id ON id.virtual_key_id = d.virtual_key_id
 		WHERE %s
 		  AND d.event_time >= ? AND d.event_time < ?
-		GROUP BY COALESCE(d.virtual_key_id, ''), id.identity
+		GROUP BY COALESCE(NULLIF(id.identity, ''), COALESCE(d.virtual_key_id, '')), COALESCE(d.app_slug, '')
 		ORDER BY SUM(d.total_tokens) DESC`, filter),
 		startMsArg, endMsArg, id, startMsArg, endMsArg)
 	if err != nil {
@@ -290,7 +314,7 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 	var result []KeyTotal
 	for rows.Next() {
 		var kt KeyTotal
-		if err := rows.Scan(&kt.VirtualKeyID, &kt.Alias, &kt.Identity, &kt.InputTokens, &kt.CachedInputTokens, &kt.CacheCreationInputTokens, &kt.OutputTokens, &kt.TotalTokens, &kt.RequestCount); err != nil {
+		if err := rows.Scan(&kt.VirtualKeyID, &kt.Alias, &kt.Identity, &kt.AppSlug, &kt.InputTokens, &kt.CachedInputTokens, &kt.CacheCreationInputTokens, &kt.OutputTokens, &kt.TotalTokens, &kt.RequestCount); err != nil {
 			return nil, err
 		}
 		result = append(result, kt)

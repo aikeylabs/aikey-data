@@ -929,3 +929,187 @@ func mustParseDateMs(t *testing.T, ymd string) int64 {
 	}
 	return tt.UnixMilli()
 }
+
+// insertODSWithIdentity seeds a minimal usage_event_ods row that links a
+// virtual_key_id to an oauth_identity for the LEFT JOIN inside
+// PersonalByKeyTotal. Only the fields the subquery reads are populated;
+// the NOT NULL columns without DEFAULTs (request_status, raw_event_json)
+// get sentinel placeholders since the query never reads them.
+func insertODSWithIdentity(t *testing.T, db *shared.DB, eventID, virtualKeyID, identity string, eventTimeMs int64) {
+	t.Helper()
+	_, err := db.DB.Exec(`
+		INSERT INTO usage_event_ods (
+			event_id, event_time, occurred_at, org_id,
+			virtual_key_id, oauth_identity,
+			request_status, raw_event_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		eventID, eventTimeMs, eventTimeMs, "personal",
+		virtualKeyID, identity,
+		"success", "{}")
+	if err != nil {
+		t.Fatalf("insertODSWithIdentity %q: %v", eventID, err)
+	}
+}
+
+// TestPersonalByKeyTotal_CollapsesOAuthSessionsBySameApp covers the
+// usage-by-key duplicate-rows bugfix (2026-05-26).
+//
+// Setup: one email (alice@example.com) with three distinct OAuth
+// virtual_key_ids — modeling the same user who logged in from three
+// devices / refreshed sessions. All three sessions carry the same
+// app_slug ("claude-code") because they all came from the same client.
+//
+// Expectation: the new GROUP BY collapses them into ONE row whose
+// total_tokens is the sum (100+200+50=350). Pre-fix this returned
+// three rows that looked identical in the UI but split the totals.
+//
+// See:
+//   workflow/CI/bugfix/20260526-usage-by-key-duplicate-rows-by-app-attribution.md
+func TestPersonalByKeyTotal_CollapsesOAuthSessionsBySameApp(t *testing.T) {
+	db := setupUsageTestDB(t)
+	date := "2026-05-20"
+	ms := mustParseDateMs(t, date)
+	identity := "alice@example.com"
+
+	sessions := []struct {
+		vk     string
+		tokens int64
+	}{
+		{"oauth:session_aaa111", 100},
+		{"oauth:session_bbb222", 200},
+		{"oauth:session_ccc333", 50},
+	}
+	for _, s := range sessions {
+		insertDWD(t, db, dwdRow{
+			EventID: "dwd-" + s.vk, OrgID: "personal",
+			VirtualKeyID: s.vk,
+			ProviderCode: "anthropic", Model: "claude-3-7",
+			EventTimeMs: ms, UsageDate: date,
+			TotalTokens: s.tokens, RequestCount: 1,
+			AppSlug: "claude-code",
+		})
+		insertODSWithIdentity(t, db, "ods-"+s.vk, s.vk, identity, ms)
+	}
+
+	repo := NewSQLRepository(db)
+	start, _ := time.Parse("2006-01-02", "2026-05-01")
+	end, _ := time.Parse("2006-01-02", "2026-05-31")
+	rows, err := repo.PersonalByKeyTotal(context.Background(), QueryParams{
+		OrgID: "personal", StartDate: start, EndDate: end,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want 1 collapsed row, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].Identity != identity {
+		t.Errorf("identity want %q, got %q", identity, rows[0].Identity)
+	}
+	if rows[0].AppSlug != "claude-code" {
+		t.Errorf("app_slug want claude-code, got %q", rows[0].AppSlug)
+	}
+	if rows[0].TotalTokens != 350 {
+		t.Errorf("total_tokens want 350 (sum), got %d", rows[0].TotalTokens)
+	}
+}
+
+// TestPersonalByKeyTotal_SplitsOAuthSessionsByDifferentApps verifies
+// the second axis of the new aggregation: same email, different
+// clients (UA-derived app_slug) → distinct rows.
+//
+// This is the "FreySilvaqzs@... three rows but three different
+// clients" scenario from the bugfix discussion. Each client gets its
+// own bar in the dashboard so users can tell where the spend came from.
+func TestPersonalByKeyTotal_SplitsOAuthSessionsByDifferentApps(t *testing.T) {
+	db := setupUsageTestDB(t)
+	date := "2026-05-20"
+	ms := mustParseDateMs(t, date)
+	identity := "alice@example.com"
+
+	sessions := []struct {
+		vk      string
+		tokens  int64
+		appSlug string
+	}{
+		{"oauth:session_cc1", 500, "claude-code"},
+		{"oauth:session_cur1", 300, "cursor"},
+		{"oauth:session_unk1", 100, "unknown-app"},
+	}
+	for _, s := range sessions {
+		insertDWD(t, db, dwdRow{
+			EventID: "dwd-" + s.vk, OrgID: "personal",
+			VirtualKeyID: s.vk,
+			ProviderCode: "anthropic", Model: "claude-3-7",
+			EventTimeMs: ms, UsageDate: date,
+			TotalTokens: s.tokens, RequestCount: 1,
+			AppSlug: s.appSlug,
+		})
+		insertODSWithIdentity(t, db, "ods-"+s.vk, s.vk, identity, ms)
+	}
+
+	repo := NewSQLRepository(db)
+	start, _ := time.Parse("2006-01-02", "2026-05-01")
+	end, _ := time.Parse("2006-01-02", "2026-05-31")
+	rows, err := repo.PersonalByKeyTotal(context.Background(), QueryParams{
+		OrgID: "personal", StartDate: start, EndDate: end,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("want 3 rows (one per app), got %d: %+v", len(rows), rows)
+	}
+	seen := map[string]int64{}
+	for _, r := range rows {
+		if r.Identity != identity {
+			t.Errorf("row %+v: identity want %q", r, identity)
+		}
+		seen[r.AppSlug] = r.TotalTokens
+	}
+	if seen["claude-code"] != 500 || seen["cursor"] != 300 || seen["unknown-app"] != 100 {
+		t.Errorf("per-app totals wrong: %+v", seen)
+	}
+}
+
+// TestPersonalByKeyTotal_NonOAuthRowsUnaffected pins the non-OAuth
+// branch: rows with empty oauth_identity (personal CLI keys, team
+// keys, no-app legacy events) still group by virtual_key_id as before
+// — the new COALESCE(NULLIF(identity,''), vk_id) reduces to vk_id when
+// identity is empty.
+func TestPersonalByKeyTotal_NonOAuthRowsUnaffected(t *testing.T) {
+	db := setupUsageTestDB(t)
+	date := "2026-05-20"
+	ms := mustParseDateMs(t, date)
+
+	// Two distinct personal vk_ids — no oauth_identity in ODS so the
+	// LEFT JOIN yields NULL identity for both → group falls back to
+	// vk_id. Both have empty app_slug (legacy events).
+	insertDWD(t, db, dwdRow{
+		EventID: "dwd-pers-1", OrgID: "personal",
+		VirtualKeyID: "personal:alice-key",
+		ProviderCode: "anthropic", Model: "claude-3-7",
+		EventTimeMs: ms, UsageDate: date,
+		TotalTokens: 100, RequestCount: 1,
+	})
+	insertDWD(t, db, dwdRow{
+		EventID: "dwd-pers-2", OrgID: "personal",
+		VirtualKeyID: "personal:bob-key",
+		ProviderCode: "anthropic", Model: "claude-3-7",
+		EventTimeMs: ms, UsageDate: date,
+		TotalTokens: 200, RequestCount: 1,
+	})
+
+	repo := NewSQLRepository(db)
+	start, _ := time.Parse("2006-01-02", "2026-05-01")
+	end, _ := time.Parse("2006-01-02", "2026-05-31")
+	rows, err := repo.PersonalByKeyTotal(context.Background(), QueryParams{
+		OrgID: "personal", StartDate: start, EndDate: end,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want 2 distinct vk rows (no collapse without identity), got %d: %+v", len(rows), rows)
+	}
+}

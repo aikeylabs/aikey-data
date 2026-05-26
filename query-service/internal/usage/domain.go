@@ -114,10 +114,19 @@ type AppTotal struct {
 // → stripped `VirtualKeyID`. Identity was added 2026-04-22 so OAuth
 // sessions stop surfacing as raw `session_<hex>` in the "Usage by Key"
 // chart.
+//
+// AppSlug subtitle (2026-05-26): the OAuth direct path now carries a
+// UA-derived `app_slug` (e.g. "claude-code", "cursor", "unknown-app").
+// Combined with the SQL aggregating by `(identity, app_slug)`, the FE
+// renders the slug as a small subtitle under the email — this is what
+// disambiguates multiple session rows that previously all collapsed to
+// the same email label. See:
+//   workflow/CI/requirements/2026-05-26-usage-by-key-app-attribution.md
 type KeyTotal struct {
 	VirtualKeyID             string `json:"virtual_key_id"`
 	Alias                    string `json:"alias,omitempty"`    // human-readable key alias (personal/team BYOK)
 	Identity                 string `json:"identity,omitempty"` // email / display_identity (OAuth sessions)
+	AppSlug                  string `json:"app_slug,omitempty"` // UA-derived (OAuth) or registered (Connected App) client app slug
 	InputTokens              int64  `json:"input_tokens"`                // Anthropic: total prompt input (incl. cache_read + cache_creation)
 	CachedInputTokens        int64  `json:"cached_input_tokens"`         // = Anthropic cache_read_input_tokens (legacy column name)
 	CacheCreationInputTokens int64  `json:"cache_creation_input_tokens"` // Anthropic cache_creation_input_tokens
