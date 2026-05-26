@@ -73,6 +73,20 @@ func (m *mockRepo) PersonalByModelTotal(_ context.Context, p usage.QueryParams) 
 	}, nil
 }
 
+// PersonalByAppTotal — added 2026-05-26 to restore Repository interface
+// satisfaction after commit 18ad084 (`feat(query): add /v1/usage/personal/
+// by-app/total endpoint`) added the method to the interface but did not
+// update this mock. The interface signature is in
+// query-service/internal/usage/repository.go. Two fixture rows mirror the
+// pattern used by PersonalByModelTotal above so any future handler test
+// that exercises PersonalByAppTotal gets a non-empty payload.
+func (m *mockRepo) PersonalByAppTotal(_ context.Context, p usage.QueryParams) ([]usage.AppTotal, error) {
+	return []usage.AppTotal{
+		{AppSlug: "claude-code", ProviderCode: "anthropic", TotalTokens: 3500, RequestCount: 18},
+		{AppSlug: "", ProviderCode: "openai", TotalTokens: 800, RequestCount: 4},
+	}, nil
+}
+
 // PersonalRecent — Phase 3B R23 (2026-05-11). Returns a small fixture
 // row so the handler test (if added later) sees a non-empty payload.
 // Existing tests don't exercise the Recent path; this just satisfies
