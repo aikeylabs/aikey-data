@@ -33,6 +33,17 @@ func (m *mockRepo) PersonalByProtocolTimeline(_ context.Context, p usage.QueryPa
 	}, nil
 }
 
+// PersonalByProtocolHourly — added 2026-05-28 alongside the new
+// /v1/usage/personal/by-protocol/hourly endpoint that backs the "1D"
+// range option on /user/usage-ledger. Returns a small fixture so any
+// future handler test gets a non-empty payload.
+func (m *mockRepo) PersonalByProtocolHourly(_ context.Context, p usage.QueryParams) ([]usage.ProtocolHourlyPoint, error) {
+	return []usage.ProtocolHourlyPoint{
+		{Hour: 9, ProtocolType: "anthropic", TotalTokens: 1200, RequestCount: 6},
+		{Hour: 14, ProtocolType: "openai", TotalTokens: 800, RequestCount: 4},
+	}, nil
+}
+
 func (m *mockRepo) PersonalByProtocolTotal(_ context.Context, p usage.QueryParams) ([]usage.ProtocolTotal, error) {
 	return []usage.ProtocolTotal{
 		{ProtocolType: "openai", TotalTokens: 5000, RequestCount: 25},

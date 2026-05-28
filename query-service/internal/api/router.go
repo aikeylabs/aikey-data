@@ -40,6 +40,9 @@ func NewRouter(h *UsageHandler, db *sql.DB, serviceToken string) http.Handler {
 	authed.HandleFunc("GET /v1/usage/personal/timeline", h.PersonalTimeline)
 	authed.HandleFunc("GET /v1/usage/personal/hourly", h.PersonalHourlyTimeline)
 	authed.HandleFunc("GET /v1/usage/personal/by-protocol/timeline", h.PersonalByProtocolTimeline)
+	// 2026-05-28 — "1D" range option uses hourly per-protocol stack
+	// instead of daily. Single-day window via ?date= parameter.
+	authed.HandleFunc("GET /v1/usage/personal/by-protocol/hourly", h.PersonalByProtocolHourly)
 	authed.HandleFunc("GET /v1/usage/personal/by-protocol/total", h.PersonalByProtocolTotal)
 	authed.HandleFunc("GET /v1/usage/personal/by-key/total", h.PersonalByKeyTotal)
 	authed.HandleFunc("GET /v1/usage/personal/by-model/total", h.PersonalByModelTotal)

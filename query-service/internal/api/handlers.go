@@ -105,6 +105,47 @@ func (h *UsageHandler) PersonalByProtocolTimeline(w http.ResponseWriter, r *http
 	shared.JSON(w, http.StatusOK, data)
 }
 
+// GET /v1/usage/personal/by-protocol/hourly?seat_id=...&date=YYYY-MM-DD&tz=<IANA>
+// (or account_id / org_id=personal)
+//
+// Intra-day per-provider stacked-bar source for the "1D" range option
+// on /user/usage-ledger. Like /personal/hourly above, parses ?date as
+// p.StartDate in the caller's local tz (parsePersonalParams handles
+// only ?start_date/?end_date — ?date semantics are hourly-handler
+// specific). SQL impl consumes StartDate + TZOffsetMs.
+func (h *UsageHandler) PersonalByProtocolHourly(w http.ResponseWriter, r *http.Request) {
+	p, err := parsePersonalParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	// Date param: same shape as PersonalHourlyTimeline above. Default
+	// to "today in tz" when omitted so the chart never returns stale
+	// data from a default 30-day-ago window.
+	q := r.URL.Query()
+	if ds := q.Get("date"); ds != "" {
+		if t, err := time.Parse("2006-01-02", ds); err == nil {
+			y, m, d := t.Date()
+			p.StartDate = time.Date(y, m, d, 0, 0, 0, 0, p.TZLocation)
+		}
+	}
+	if p.StartDate.IsZero() {
+		now := time.Now().In(p.TZLocation)
+		p.StartDate = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, p.TZLocation)
+	}
+	p.EndDate = p.StartDate
+	data, err := h.repo.PersonalByProtocolHourly(r.Context(), p)
+	if err != nil {
+		slog.Error("PersonalByProtocolHourly query failed", "error", err)
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	if data == nil {
+		data = []usage.ProtocolHourlyPoint{}
+	}
+	shared.JSON(w, http.StatusOK, data)
+}
+
 // GET /v1/usage/personal/by-protocol/total?seat_id=...&start_date=...&end_date=...
 func (h *UsageHandler) PersonalByProtocolTotal(w http.ResponseWriter, r *http.Request) {
 	p, err := parsePersonalParams(r)

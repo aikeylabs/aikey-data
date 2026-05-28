@@ -118,6 +118,10 @@ func (r *sqlRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]Timeli
 // for the calendar day at p.StartDate, interpreted in the caller's
 // local timezone (p.TZ). Dialect differences are hidden behind
 // shared.DB.HourBucketLocal — see dbkit.go.
+//
+// AppSlug filter (2026-05-28): honored when non-empty so Apps Detail
+// page's hourly view can scope to a single Connected App's traffic.
+// Empty AppSlug keeps the existing "whole vault" behavior intact.
 func (r *sqlRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]HourlyPoint, error) {
 	filter, id := personalFilter(p)
 	// Local day window: [localMidnight, localMidnight+24h) converted
@@ -128,14 +132,17 @@ func (r *sqlRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]
 	dayEnd := aikeytime.FromTime(p.StartDate.AddDate(0, 0, 1))
 
 	hourExpr := r.db.HourBucketLocal("event_time", p.TZOffsetMs, p.TZ)
+	appSlugFrag, appSlugArg := appSlugFilter(p)
+	args := []interface{}{id, r.db.BindMillis(dayStart), r.db.BindMillis(dayEnd)}
+	args = appendNonNil(args, appSlugArg)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT %s AS hour, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
 		FROM usage_fact_dwd
 		WHERE %s
-		  AND event_time >= ? AND event_time < ?
+		  AND event_time >= ? AND event_time < ?%s
 		GROUP BY hour
-		ORDER BY hour`, hourExpr, filter),
-		id, r.db.BindMillis(dayStart), r.db.BindMillis(dayEnd))
+		ORDER BY hour`, hourExpr, filter, appSlugFrag),
+		args...)
 	if err != nil {
 		return nil, fmt.Errorf("personal hourly timeline: %w", err)
 	}
@@ -172,6 +179,39 @@ func (r *sqlRepo) PersonalByProtocolTimeline(ctx context.Context, p QueryParams)
 	for rows.Next() {
 		var pt ProtocolTimelinePoint
 		if err := rows.Scan(&pt.Date, &pt.ProtocolType, &pt.TotalTokens, &pt.RequestCount); err != nil {
+			return nil, err
+		}
+		result = append(result, pt)
+	}
+	return result, rows.Err()
+}
+
+// PersonalByProtocolHourly — intra-day per-protocol stack for the "1D"
+// range option on /user/usage-ledger. Mirrors PersonalByProtocolTimeline
+// shape but groups by hour-bucket instead of date. The single day comes
+// from p.StartDate (interpreted in local tz); date range parameters are
+// ignored beyond extracting the day.
+func (r *sqlRepo) PersonalByProtocolHourly(ctx context.Context, p QueryParams) ([]ProtocolHourlyPoint, error) {
+	filter, id := personalFilter(p)
+	dayStart := aikeytime.FromTime(p.StartDate)
+	dayEnd := aikeytime.FromTime(p.StartDate.AddDate(0, 0, 1))
+	hourExpr := r.db.HourBucketLocal("event_time", p.TZOffsetMs, p.TZ)
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT %s AS hour, COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		FROM usage_fact_dwd
+		WHERE %s
+		  AND event_time >= ? AND event_time < ?
+		GROUP BY hour, COALESCE(provider_code, protocol_type)
+		ORDER BY hour, COALESCE(provider_code, protocol_type)`, hourExpr, filter),
+		id, r.db.BindMillis(dayStart), r.db.BindMillis(dayEnd))
+	if err != nil {
+		return nil, fmt.Errorf("personal by-protocol hourly: %w", err)
+	}
+	defer rows.Close()
+	var result []ProtocolHourlyPoint
+	for rows.Next() {
+		var pt ProtocolHourlyPoint
+		if err := rows.Scan(&pt.Hour, &pt.ProtocolType, &pt.TotalTokens, &pt.RequestCount); err != nil {
 			return nil, err
 		}
 		result = append(result, pt)

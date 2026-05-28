@@ -42,6 +42,22 @@ type ProtocolTimelinePoint struct {
 	RequestCount int64  `json:"request_count"`
 }
 
+// ProtocolHourlyPoint is the intra-day counterpart of
+// ProtocolTimelinePoint — one bucket per (hour, provider) within a
+// single local-tz calendar day. Added 2026-05-28 to support the "1D"
+// range option on /user/usage-ledger: when range=1D the FE stacks
+// hourly per-provider bars instead of daily ones.
+//
+// Hour is 0..23 in the caller's local timezone (matches HourlyPoint).
+// ProtocolType field stays for wire compat with the daily variant —
+// value is the canonical provider_code, same as ProtocolTimelinePoint.
+type ProtocolHourlyPoint struct {
+	Hour         int    `json:"hour"`
+	ProtocolType string `json:"protocol_type"`
+	TotalTokens  int64  `json:"total_tokens"`
+	RequestCount int64  `json:"request_count"`
+}
+
 // ProtocolTotal is a single slice of a provider pie chart.
 type ProtocolTotal struct {
 	ProtocolType string `json:"protocol_type"` // actually provider_code

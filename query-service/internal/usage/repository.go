@@ -15,6 +15,13 @@ type Repository interface {
 	// activity); callers pad sparse hours client-side.
 	PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]HourlyPoint, error)
 
+	// PersonalByProtocolHourly is the intra-day counterpart of
+	// PersonalByProtocolTimeline — returns hourly total_tokens grouped
+	// by (hour, provider_code) for the single day at QueryParams.StartDate.
+	// Powers the "1D" range option on /user/usage-ledger's stacked
+	// protocol chart. Added 2026-05-28.
+	PersonalByProtocolHourly(ctx context.Context, p QueryParams) ([]ProtocolHourlyPoint, error)
+
 	// PersonalByProtocolTimeline returns daily total_tokens grouped by protocol.
 	// Filters: user_usage_scope = 'normal'
 	PersonalByProtocolTimeline(ctx context.Context, p QueryParams) ([]ProtocolTimelinePoint, error)
