@@ -16,6 +16,7 @@ import (
 	"github.com/AiKeyLabs/aikey-data/collector-service/config"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/api"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/ingest"
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/integrity"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/projector"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
 	"github.com/AiKeyLabs/pkg/aikeycompat"
@@ -78,8 +79,15 @@ func main() {
 	controlReader := projector.NewSQLControlEventReader(ddb)
 	enricher := projector.NewEnricher(controlReader)
 	projWorker := projector.NewWorker(odsReader, dwdWriter, checkpoint, enricher)
+	// Delivery-integrity: one scanner instance drives BOTH the projector's
+	// periodic WARN surface and the /v1/diagnostics/completeness endpoint.
+	gapScanner := integrity.NewScanner(ddb, integrity.DefaultCriteria())
+	projWorker.SetGapScanner(gapScanner)
+	// Stage D1: the ingest repo doubles as the known-loss LossPromoter so the
+	// detection tick promotes stale gaps to the ledger + advances contiguous.
+	projWorker.SetLossPromoter(odsRepo)
 
-	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, cfg.JWTSecret, cfg.ServiceToken)
+	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, gapScanner, odsRepo, cfg.JWTSecret, cfg.ServiceToken)
 	if cfg.ServiceToken != "" {
 		slog.Warn(
 			"ingest auth: service_token fallback ENABLED — clients holding this token can forge events for any account. Prefer per-user JWT (set JWT_SECRET + clear SERVICE_TOKEN).",

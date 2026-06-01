@@ -18,16 +18,23 @@ import (
 // capturingODS records every event the handler hands down so tests can
 // assert what account_id actually landed (post-middleware override).
 type capturingODS struct {
-	mu      sync.Mutex
-	events  []ingest.UsageEvent
+	mu             sync.Mutex
+	events         []ingest.UsageEvent
+	quarantinedIDs map[string]bool // event_id -> inserted as quarantined (stage C)
 }
 
-func (c *capturingODS) InsertEvent(_ context.Context, e *ingest.UsageEvent, _ []byte) (bool, error) {
+func (c *capturingODS) InsertEvent(_ context.Context, e *ingest.UsageEvent, _ []byte, quarantined bool) (bool, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cp := *e
 	c.events = append(c.events, cp)
-	return true, nil
+	if quarantined {
+		if c.quarantinedIDs == nil {
+			c.quarantinedIDs = map[string]bool{}
+		}
+		c.quarantinedIDs[e.EventID] = true
+	}
+	return true, false, nil
 }
 
 func (c *capturingODS) snapshot() []ingest.UsageEvent {
@@ -36,6 +43,42 @@ func (c *capturingODS) snapshot() []ingest.UsageEvent {
 	out := make([]ingest.UsageEvent, len(c.events))
 	copy(out, c.events)
 	return out
+}
+
+// AdvanceWatermark computes the connected-no-gap high-water mark from captured
+// events' source_seq — an in-memory mirror of the SQL zipper, so API-layer
+// tests sending v2 events get a coherent contiguous_seq back.
+func (c *capturingODS) AdvanceWatermark(_ context.Context, orgID, sourceID string, _ int64) (int64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	seen := make(map[int64]bool)
+	for i := range c.events {
+		e := &c.events[i]
+		if e.OrgID == orgID && e.SourceID == sourceID && e.SourceSeq != nil {
+			seen[*e.SourceSeq] = true
+		}
+	}
+	var contiguous int64
+	for seen[contiguous+1] {
+		contiguous++
+	}
+	return contiguous, nil
+}
+
+func (c *capturingODS) EnumerateMissingSeqs(_ context.Context, _, _ string, _, _ int64) ([]int64, error) {
+	return nil, nil
+}
+
+func (c *capturingODS) RecordKnownLoss(_ context.Context, _, _ string, _ []int64, _ string) (int64, error) {
+	return 0, nil
+}
+
+func (c *capturingODS) GapSeqs(_ context.Context, _, _ string, _ int64) ([]int64, bool, error) {
+	return nil, false, nil
+}
+
+func (c *capturingODS) ConfirmLost(_ context.Context, _, _ string, _ []int64, _ string) (int, int64, error) {
+	return 0, 0, nil
 }
 
 // newHandlerWithSubject constructs an IngestHandler wrapped in a tiny

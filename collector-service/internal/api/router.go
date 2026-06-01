@@ -6,6 +6,7 @@ import (
 
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/diagnostics"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/ingest"
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/integrity"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/projector"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
 	"github.com/AiKeyLabs/pkg/buildinfo"
@@ -34,7 +35,11 @@ type MetricsResponse struct {
 //   - service_token path (escape hatch): legacy S2S token; client may
 //     claim any account_id in event payloads.
 // Either may be empty. Both empty = open ingest (dev / CI default).
-func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, projWorker *projector.Worker, db *sql.DB, jwtSecret []byte, serviceToken string) http.Handler {
+// gapScanner (optional) enables GET /v1/diagnostics/completeness — the
+// delivery-integrity per-source completeness view. nil → endpoint not mounted
+// (e.g. a build without watermark schema). Same dialect-aware scanner instance
+// the projector's detection loop uses (single source of truth for "what is a gap").
+func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, projWorker *projector.Worker, db *sql.DB, gapScanner *integrity.Scanner, deliveryRepo gapsRepo, jwtSecret []byte, serviceToken string) http.Handler {
 	mux := http.NewServeMux()
 
 	// Health check — unauthenticated
@@ -70,6 +75,22 @@ func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, projWorker *pr
 	if db != nil {
 		mux.HandleFunc("GET /v1/diagnostics/pipeline", diagnostics.HandlePipeline(db))
 		mux.HandleFunc("GET /internal/canary-check", diagnostics.HandleCanaryCheck(db))
+	}
+	// Delivery-integrity completeness — read-only, unauthenticated like the
+	// sibling diagnostics endpoints. The more-specific GET pattern takes
+	// precedence over the "/v1/" auth mount below (Go 1.22+ ServeMux), matching
+	// how /v1/diagnostics/pipeline coexists with the authed /v1/ tree.
+	if gapScanner != nil {
+		mux.HandleFunc("GET /v1/diagnostics/completeness", handleCompleteness(gapScanner))
+		// reconcile (D2): force a scan + known-loss promotion, return the settled
+		// view. POST (state-changing: may promote stale gaps to the ledger).
+		mux.HandleFunc("POST /v1/diagnostics/reconcile", handleReconcile(projWorker))
+	}
+	// D3 client-confirmed reconciliation: enumerate a source's gaps (so a client
+	// can check its WAL) + accept client "confirm lost" for genuinely-absent seqs.
+	if deliveryRepo != nil {
+		mux.HandleFunc("GET /v1/diagnostics/gaps", handleGaps(deliveryRepo))
+		mux.HandleFunc("POST /v1/diagnostics/confirm-lost", handleConfirmLost(deliveryRepo))
 	}
 
 	// Ingest API — authenticated

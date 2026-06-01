@@ -98,6 +98,42 @@ func (d *DB) DateOf(col string) string {
 	return fmt.Sprintf("DATE(%s AT TIME ZONE 'UTC')", col)
 }
 
+// AgeMillis returns a SQL expression evaluating to "how many milliseconds ago
+// the instant in `col` was", as an INTEGER, on either dialect. Use it to
+// age-gate timestamp columns (e.g. usage_source_watermark.updated_at /
+// last_event_at) so Go can compare the returned age against a duration
+// threshold without parsing dialect-specific timestamp text.
+//
+//   - SQLite (INTEGER millis): now_millis - col
+//   - Postgres (TIMESTAMPTZ) : EXTRACT(EPOCH FROM (NOW() - col)) * 1000, cast to bigint
+//
+// Why a helper (mirrors NowMillis / DateOf): "now - col" is millis-subtraction
+// on SQLite but an INTERVAL on Postgres — a single literal would be wrong on
+// one dialect. A NULL col yields NULL (a never-seen column ages to "unknown",
+// which callers treat as not-stale, not as an infinite gap).
+func (d *DB) AgeMillis(col string) string {
+	if d.Dialect == DialectSQLite {
+		return fmt.Sprintf("(CAST(strftime('%%s','now') AS INTEGER) * 1000 - %s)", col)
+	}
+	return fmt.Sprintf("(EXTRACT(EPOCH FROM (NOW() - %s)) * 1000)::bigint", col)
+}
+
+// Greatest returns a SQL expression for the two-argument maximum, dialect-safe.
+// SQLite's MAX(a, b) is a SCALAR function; on Postgres MAX is an AGGREGATE only —
+// its two-argument scalar max is GREATEST(a, b). Use this for monotonic UPSERT
+// guards (never-regress columns) so they run on BOTH backends.
+//
+// Why a helper: a literal `MAX(a, b)` compiles + works on SQLite but throws
+// `function max(bigint, bigint) does not exist` on Postgres — a dialect bug that
+// only surfaces on a 2nd-batch watermark UPSERT (ON CONFLICT DO UPDATE), which
+// SQLite-only tests never catch.
+func (d *DB) Greatest(a, b string) string {
+	if d.Dialect == DialectSQLite {
+		return fmt.Sprintf("MAX(%s, %s)", a, b)
+	}
+	return fmt.Sprintf("GREATEST(%s, %s)", a, b)
+}
+
 func (d *DB) IsSQLite() bool { return d.Dialect == DialectSQLite }
 
 // BindMillis returns the correct driver argument for an aikeytime.Millis

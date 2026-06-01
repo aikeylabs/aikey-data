@@ -10,20 +10,52 @@ import (
 
 // mockODS implements ODSRepository for unit testing.
 type mockODS struct {
-	inserted map[string]bool // event_id -> inserted
+	inserted    map[string]bool // org/event_id -> inserted
+	quarantined map[string]bool // org/event_id -> inserted as quarantined (stage C)
 }
 
 func newMockODS() *mockODS {
 	return &mockODS{inserted: make(map[string]bool)}
 }
 
-func (m *mockODS) InsertEvent(_ context.Context, e *UsageEvent, _ []byte) (bool, error) {
+func (m *mockODS) InsertEvent(_ context.Context, e *UsageEvent, _ []byte, quarantined bool) (bool, bool, error) {
 	key := e.OrgID + "/" + e.EventID
 	if m.inserted[key] {
-		return false, nil // duplicate
+		return false, false, nil // duplicate (mock doesn't track stored hashes → no conflict)
 	}
 	m.inserted[key] = true
-	return true, nil
+	if quarantined {
+		if m.quarantined == nil {
+			m.quarantined = map[string]bool{}
+		}
+		m.quarantined[key] = true
+	}
+	return true, false, nil
+}
+
+// AdvanceWatermark — mock returns 0 (the service layer only calls this for
+// events carrying a v2 source_id/source_seq; the existing service tests use
+// v1-shaped events so it's never reached, but the method is needed to satisfy
+// the ODSRepository interface). Watermark-advance correctness is covered by the
+// SQL repository tests on a real schema, not here.
+func (m *mockODS) AdvanceWatermark(_ context.Context, _, _ string, _ int64) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockODS) EnumerateMissingSeqs(_ context.Context, _, _ string, _, _ int64) ([]int64, error) {
+	return nil, nil
+}
+
+func (m *mockODS) RecordKnownLoss(_ context.Context, _, _ string, _ []int64, _ string) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockODS) GapSeqs(_ context.Context, _, _ string, _ int64) ([]int64, bool, error) {
+	return nil, false, nil
+}
+
+func (m *mockODS) ConfirmLost(_ context.Context, _, _ string, _ []int64, _ string) (int, int64, error) {
+	return 0, 0, nil
 }
 
 func TestIngestBatch_HappyPath(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/api"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/ingest"
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/integrity"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/projector"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
 )
@@ -72,8 +73,15 @@ func New(db *sql.DB, cfg Config) Result {
 	ctrlReader := projector.NewSQLControlEventReader(ddb)
 	enricher := projector.NewEnricher(ctrlReader)
 	projWorker := projector.NewWorker(odsReader, dwdWriter, checkpoint, enricher)
+	// Delivery-integrity: one scanner instance drives BOTH the projector's
+	// periodic WARN surface and the /v1/diagnostics/completeness endpoint.
+	gapScanner := integrity.NewScanner(ddb, integrity.DefaultCriteria())
+	projWorker.SetGapScanner(gapScanner)
+	// Stage D1: the ingest repo doubles as the known-loss LossPromoter so the
+	// detection tick promotes stale gaps to the ledger + advances contiguous.
+	projWorker.SetLossPromoter(odsRepo)
 
-	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, cfg.JWTSecret, cfg.ServiceToken)
+	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, gapScanner, odsRepo, cfg.JWTSecret, cfg.ServiceToken)
 
 	return Result{
 		Handler:      router,

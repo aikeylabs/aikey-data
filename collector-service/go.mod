@@ -7,6 +7,7 @@ require (
 	github.com/AiKeyLabs/pkg/aikeycompat v0.0.0
 	github.com/AiKeyLabs/pkg/aikeytime v0.0.0
 	github.com/AiKeyLabs/pkg/buildinfo v0.0.0
+	github.com/AiKeyLabs/pkg/usagehash v0.0.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/lib/pq v1.12.3
 	modernc.org/sqlite v1.48.2
@@ -32,5 +33,7 @@ replace github.com/AiKeyLabs/pkg/buildinfo => ../../pkg/buildinfo
 replace github.com/AiKeyLabs/pkg/aikeytime => ../../pkg/aikeytime
 
 replace github.com/AiKeyLabs/pkg/aikeycompat => ../../pkg/aikeycompat
+
+replace github.com/AiKeyLabs/pkg/usagehash => ../../pkg/usagehash
 
 replace github.com/AiKeyLabs/aikey-data/baseline => ../baseline

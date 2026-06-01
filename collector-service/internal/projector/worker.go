@@ -2,8 +2,11 @@ package projector
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/integrity"
 )
 
 const (
@@ -11,6 +14,15 @@ const (
 	defaultBatchSize    = 100
 	defaultScanInterval = 5 * time.Second
 	deadLetterThreshold = 20
+
+	// defaultGapScanInterval is how often the delivery-integrity gap scan runs.
+	// Far slower than the 5s projection tick: the criteria are age-gated (10m /
+	// 24h), so a per-minute scan is plenty to surface a gap shortly after it
+	// crosses threshold, while keeping the WARN cadence and DB load low. The
+	// real-time view is the /v1/diagnostics/completeness endpoint; this loop is
+	// the active log surface (health-signal-surface: a gap must be visible
+	// without anyone polling).
+	defaultGapScanInterval = 5 * time.Minute
 
 	// canaryVirtualKeyID is the sentinel virtual_key_id the proxy uses for
 	// liveness probes. Canary events traverse collector→ODS→projector as a
@@ -29,6 +41,28 @@ type Worker struct {
 
 	batchSize    int
 	scanInterval time.Duration
+
+	// gapScanner is the delivery-integrity completeness scanner (optional).
+	// When non-nil, Run starts a second, slower ticker that classifies sources
+	// and WARN-logs any with a detected gap. nil → the projector behaves exactly
+	// as before (no detection), keeping existing call sites / tests unaffected.
+	// Wired via SetGapScanner at both edition entrypoints (cmd/main.go +
+	// appkit/appkit.go) so detection rides the projector loop in all 3 editions.
+	gapScanner  *integrity.Scanner
+	gapInterval time.Duration
+
+	// lossPromoter (optional, stage D1) records stale gaps into the known-loss
+	// ledger. When set, detectGaps promotes any Promotable source's unaccounted
+	// seqs and re-advances its watermark so contiguous converges. nil → no
+	// promotion (detection still WARN-logs). Satisfied by the ingest repository.
+	lossPromoter LossPromoter
+}
+
+// LossPromoter is the write-side the projector needs to record known losses —
+// the consumer-defined minimal interface (the ingest ODSRepository satisfies it).
+type LossPromoter interface {
+	EnumerateMissingSeqs(ctx context.Context, orgID, sourceID string, lo, hi int64) ([]int64, error)
+	RecordKnownLoss(ctx context.Context, orgID, sourceID string, seqs []int64, reason string) (contiguous int64, err error)
 }
 
 // MetricsSnapshot returns current projector counters.
@@ -53,12 +87,44 @@ func NewWorker(
 	}
 }
 
-// Run starts the projection loop. Blocks until ctx is cancelled.
+// SetGapScanner enables delivery-integrity gap detection on this worker's loop.
+// Call once after NewWorker, before Run. A nil scanner (or never calling this)
+// leaves detection off. The interval defaults to defaultGapScanInterval.
+func (w *Worker) SetGapScanner(s *integrity.Scanner) {
+	w.gapScanner = s
+	if w.gapInterval <= 0 {
+		w.gapInterval = defaultGapScanInterval
+	}
+}
+
+// SetLossPromoter enables stage-D1 known-loss promotion on the gap-detection
+// tick. Requires a gap scanner too (promotion rides detectGaps). nil → detection
+// only WARN-logs, never promotes (keeps existing tests/editions unaffected).
+func (w *Worker) SetLossPromoter(p LossPromoter) {
+	w.lossPromoter = p
+}
+
+// Run starts the projection loop. Blocks until ctx is cancelled. When a gap
+// scanner is wired, a second, slower ticker runs completeness detection on the
+// same goroutine-pair without any extra wiring at the edition entrypoints.
 func (w *Worker) Run(ctx context.Context) {
 	slog.Info("projector worker started", "batch_size", w.batchSize, "interval", w.scanInterval)
 
 	ticker := time.NewTicker(w.scanInterval)
 	defer ticker.Stop()
+
+	// Gap detection ticker is optional. A stopped ticker (gapScanner == nil)
+	// has a nil channel that select never fires on — so the projection path is
+	// untouched when detection is disabled.
+	var gapC <-chan time.Time
+	if w.gapScanner != nil {
+		gapTicker := time.NewTicker(w.gapInterval)
+		defer gapTicker.Stop()
+		gapC = gapTicker.C
+		// Run an immediate first detection so a gap that exists at startup
+		// surfaces without waiting a full interval.
+		w.detectGaps(ctx)
+	}
 
 	// Run once immediately on start
 	w.scanOnce(ctx)
@@ -70,8 +136,109 @@ func (w *Worker) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			w.scanOnce(ctx)
+		case <-gapC:
+			w.detectGaps(ctx)
 		}
 	}
+}
+
+// detectGaps is the periodic ACTIVE surface: scan, WARN-log gaps, promote stale
+// ones. The readable pull surface is /v1/diagnostics/completeness; the on-demand
+// equivalent is ScanNow (D2 reconcile). Errors are logged, not fatal — detection
+// is a bypass concern and must never disrupt projection (fault isolation).
+func (w *Worker) detectGaps(ctx context.Context) {
+	if _, err := w.scanAndPromote(ctx, true); err != nil {
+		slog.Error("delivery integrity scan failed",
+			"event.name", "integrity.gap_scan.failed", "error", err)
+	}
+}
+
+// ScanNow runs one scan + known-loss promotion on demand and returns the
+// SETTLED per-source completeness (a second scan after promotion) — the `aikey
+// audit reconcile` trigger (D2). It forces what the periodic tick would do, so
+// the caller sees the converged state immediately (a just-promoted gap shows up
+// as known_loss with contiguous advanced, not as an open gap) instead of waiting
+// ≤ gapInterval. Returns an error if no scanner is wired.
+func (w *Worker) ScanNow(ctx context.Context) ([]integrity.SourceCompleteness, error) {
+	if w.gapScanner == nil {
+		return nil, fmt.Errorf("delivery integrity scanner not configured")
+	}
+	if _, err := w.scanAndPromote(ctx, false); err != nil {
+		return nil, err
+	}
+	// Re-scan so the response reflects the post-promotion settled state.
+	return w.gapScanner.Scan(ctx)
+}
+
+// scanAndPromote is the shared core of detectGaps (periodic) and ScanNow
+// (on-demand): scan, optionally WARN-log gaps, and promote any Promotable
+// source's stale gap to the known-loss ledger.
+func (w *Worker) scanAndPromote(ctx context.Context, warn bool) ([]integrity.SourceCompleteness, error) {
+	findings, err := w.gapScanner.Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range findings {
+		f := &findings[i]
+		if warn && !f.Healthy() {
+			slog.Warn("delivery integrity gap detected",
+				"event.name", "integrity.gap.detected",
+				"status", string(f.Status),
+				"org_id", f.OrgID,
+				"source_id", f.SourceID,
+				"contiguous_seq", f.Contiguous,
+				"max_seen_seq", f.MaxSeen,
+				"client_allocated_seq", f.ClientAllocated,
+				"gap_count", f.GapCount,
+				"tail_pending", f.TailPending,
+			)
+		}
+		// Stage D1: promote a gap that has aged past KnownLossTimeout to the
+		// known-loss ledger. By now the outbox would have re-delivered any seq the
+		// client still had in its WAL, so a survivor is genuinely lost.
+		if f.Promotable && w.lossPromoter != nil {
+			w.promoteKnownLoss(ctx, f)
+		}
+	}
+	return findings, nil
+}
+
+// promoteKnownLoss enumerates a Promotable source's unaccounted seqs and records
+// them in the known-loss ledger, then re-advances contiguous past them. Bounded
+// by the repo's per-call scan limit (a huge gap promotes across several ticks).
+func (w *Worker) promoteKnownLoss(ctx context.Context, f *integrity.SourceCompleteness) {
+	hi := f.MaxSeen
+	if f.ClientAllocated > hi {
+		hi = f.ClientAllocated
+	}
+	missing, err := w.lossPromoter.EnumerateMissingSeqs(ctx, f.OrgID, f.SourceID, f.Contiguous, hi)
+	if err != nil {
+		slog.Error("known-loss enumerate failed",
+			"event.name", "integrity.known_loss.enumerate_failed",
+			"org_id", f.OrgID, "source_id", f.SourceID, "error", err)
+		return
+	}
+	if len(missing) == 0 {
+		return
+	}
+	reason := "stale_" + string(f.Status) // stale_middle_gap | stale_tail_gap
+	contiguous, err := w.lossPromoter.RecordKnownLoss(ctx, f.OrgID, f.SourceID, missing, reason)
+	if err != nil {
+		slog.Error("known-loss record failed",
+			"event.name", "integrity.known_loss.record_failed",
+			"org_id", f.OrgID, "source_id", f.SourceID, "error", err)
+		return
+	}
+	slog.Warn("delivery integrity: seqs promoted to known-loss ledger",
+		"event.name", "integrity.known_loss.promoted",
+		"reason", reason,
+		"org_id", f.OrgID,
+		"source_id", f.SourceID,
+		"promoted_count", len(missing),
+		"first_seq", missing[0],
+		"last_seq", missing[len(missing)-1],
+		"contiguous_seq", contiguous,
+	)
 }
 
 func (w *Worker) scanOnce(ctx context.Context) {

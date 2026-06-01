@@ -9,10 +9,17 @@ import (
 // Exposed via GET /version so proxy can check compatibility.
 // When the event schema evolves (new fields, changed semantics), bump MaxSchemaVersion
 // and add backward-compatible handling in ingestOne().
-var SupportedSchemaVersions = []int{1}
+//
+// v2 (delivery integrity, 2026-05-30): adds source_id + source_seq — a
+// per-source (= one vault) monotonic, never-reused sequence enabling the
+// server to prove completeness and pinpoint missing events. v1 events (no
+// source_seq) are still accepted and stored; they simply don't participate
+// in gap detection (their source_seq is NULL). See design doc
+// roadmap20260320/技术实现/阶段6-企业定制/20260530-财务对账级用量审计-完整技术方案.md.
+var SupportedSchemaVersions = []int{1, 2}
 
 // MaxSchemaVersion is the highest schema version this collector understands.
-const MaxSchemaVersion = 1
+const MaxSchemaVersion = 2
 
 // UsageEvent represents a single usage event reported by Local Proxy.
 type UsageEvent struct {
@@ -22,6 +29,26 @@ type UsageEvent struct {
 	TraceID         string `json:"trace_id,omitempty"`
 	ProxyInstanceID string `json:"proxy_instance_id,omitempty"`
 	DeviceID        string `json:"device_id,omitempty"`
+
+	// delivery integrity (schema v2, 2026-05-30). SourceID identifies the
+	// client source = one vault (the proxy carries it in the device_id wire
+	// field, sourced from vault config runtime.source_identity — note it is a
+	// vault-scoped install identity, NOT a hardware fingerprint). SourceSeq is
+	// that source's monotonic, never-reused sequence number. Together they let
+	// the server detect gaps (missing seq) and prove completeness. Nil/empty on
+	// v1 events from older proxies — such events skip gap tracking but are
+	// still stored. SourceSeq is a pointer so "absent" (v1) is distinguishable
+	// from a legitimate 0.
+	SourceID  string `json:"source_id,omitempty"`
+	SourceSeq *int64 `json:"source_seq,omitempty"`
+
+	// ContentHash (schema v2, stage C) is the client-stamped tamper/corruption
+	// fingerprint "sha256:<scheme>:<hex>" over the metering tuple (pkg/usagehash).
+	// The ingest service RECOMPUTES it from this event's fields and compares: a
+	// mismatch quarantines the event (ingest_status='quarantined') instead of
+	// billing a silently-corrupted value. Empty (older proxy / pre-C) → validation
+	// skipped, event accepted normally. See validateContentHash in service.go.
+	ContentHash string `json:"content_hash,omitempty"`
 
 	// schema + source metadata
 	SchemaVersion        int    `json:"schema_version"`
@@ -121,13 +148,40 @@ type BatchRequest struct {
 	SourceVersion   string       `json:"source_version"`
 	ProxyInstanceID string       `json:"proxy_instance_id"`
 	Events          []UsageEvent `json:"events"`
+
+	// AllocatedSeq is the client's per-source allocator high-water mark — the
+	// highest source_seq the proxy has ever handed out (reserve-ahead), which
+	// may sit ABOVE the highest seq actually delivered when events are still
+	// in-flight or were lost before WAL append. Recorded server-side as
+	// client_allocated_seq so tail-gap detection can fire: client_allocated >
+	// contiguous past a timeout ⇒ the (contiguous, client_allocated] span is a
+	// suspected tail loss. nil/omitted on v1 / older proxies → server leaves
+	// client_allocated_seq untouched (no tail detection, but no false positive).
+	// One proxy = one source identity, so this single scalar applies to every
+	// (org,source) pair the batch touches. Added v1.0.0-rc.7 (B').
+	AllocatedSeq *int64 `json:"allocated_seq,omitempty"`
 }
 
 // BatchResponse is the ingest API response body.
+//
+// ContiguousSeq (delivery integrity, 2026-05-30): per-source map of
+// source_id → the server's connected-no-gap high-water mark after this batch.
+// The client advances its WAL-cleanup cursor to this value and prunes rotated
+// WAL files whose max seq ≤ contiguous. It is a POINTER MAP entry semantic on
+// the wire (omitempty): an older collector omits the field entirely, so a new
+// client MUST treat "field absent" as "don't advance / don't prune" (conserve
+// — never lose), distinct from "present with value 0". One map (not a scalar)
+// because a batch may legitimately mix multiple sources (rare, but a proxy
+// generation swap or shared collector can interleave). Keyed by source_id;
+// only sources present in THIS batch appear.
 type BatchResponse struct {
 	Accepted   int `json:"accepted"`
 	Duplicated int `json:"duplicated"`
 	Rejected   int `json:"rejected"`
+	// Quarantined (stage C): events stored but flagged content_hash-mismatch —
+	// NOT billed, held for review. omitempty so pre-C batches don't carry it.
+	Quarantined   int              `json:"quarantined,omitempty"`
+	ContiguousSeq map[string]int64 `json:"contiguous_seq,omitempty"`
 }
 
 // EventResult tracks per-event ingest outcome.

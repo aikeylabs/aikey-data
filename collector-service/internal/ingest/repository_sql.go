@@ -33,7 +33,8 @@ func NewSQLODSRepository(db *shared.DB) ODSRepository {
 // Column order: keep new columns at the tail (after app_slug) so
 // insertion order matches the bind list in InsertEvent without
 // shifting historic positions. v1.0.0-rc.5 added app_slug; v1.0.0-rc.6
-// adds session_id for the Performance Top N sessions chart.
+// adds session_id for the Performance Top N sessions chart; v1.0.0-rc.7
+// adds source_id + source_seq for delivery integrity (per-source sequence).
 const odsColumns = `event_id, request_id, trace_id, proxy_instance_id, device_id,
     schema_version, source_type, source_version, client_version,
     proxy_config_version, proxy_loaded_control_seq,
@@ -49,7 +50,9 @@ const odsColumns = `event_id, request_id, trace_id, proxy_instance_id, device_id
     billable_amount, currency,
     request_status, http_status_code, error_code, error_message, upstream_request_id,
     raw_usage_json, raw_headers_json, ext_json, raw_event_json,
-    app_slug, session_id`
+    app_slug, session_id,
+    source_id, source_seq,
+    content_hash, ingest_status, dwd_status`
 
 const odsPlaceholders = `?,?,?,?,?,
     ?,?,?,?,
@@ -66,9 +69,24 @@ const odsPlaceholders = `?,?,?,?,?,
     ?,?,
     ?,?,?,?,?,
     ?,?,?,?,
-    ?,?`
+    ?,?,
+    ?,?,
+    ?,?,?`
 
-func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte) (bool, error) {
+// InsertEvent persists one event. quarantined drives the disposition columns:
+// false → ingest_status='accepted', dwd_status='pending' (normal flow, projector
+// will bill it); true → ingest_status='quarantined', dwd_status='quarantined' so
+// the projector's pending/retry filter SKIPS it (never projected → never billed),
+// while the row + its suspect values are preserved for review. We bind these two
+// columns explicitly (not relying on the schema DEFAULTs) so the quarantine
+// disposition is set atomically with the insert — no insert-then-update race
+// where the 5s projector could grab the row in between. content_hash is stored
+// for forensics + duplicate-conflict detection (§6.2).
+func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte, quarantined bool) (inserted, conflict bool, err error) {
+	ingestStatus, dwdStatus := "accepted", "pending"
+	if quarantined {
+		ingestStatus, dwdStatus = "quarantined", "quarantined"
+	}
 	insertODS := r.db.InsertOrIgnoreOn("usage_event_ods", odsColumns, odsPlaceholders, "org_id, event_id")
 	res, err := r.db.ExecContext(ctx, insertODS,
 		e.EventID, nullStr(e.RequestID), nullStr(e.TraceID), nullStr(e.ProxyInstanceID), nullStr(e.DeviceID),
@@ -88,13 +106,15 @@ func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte)
 		jsonbOrNull(e.RawUsageJSON), jsonbOrNull(e.RawHeadersJSON), jsonbOrNull(e.ExtJSON), rawJSON,
 		nullStr(e.AppSlug),
 		nullStr(e.SessionID),
+		nullStr(e.SourceID), e.SourceSeq, // delivery integrity (v2); SourceSeq nil → NULL for v1 events
+		nullStr(e.ContentHash), ingestStatus, dwdStatus, // stage C: content fingerprint + disposition
 	)
 	if err != nil {
-		return false, fmt.Errorf("insert ods event %s: %w", e.EventID, err)
+		return false, false, fmt.Errorf("insert ods event %s: %w", e.EventID, err)
 	}
 	n, _ := res.RowsAffected()
 	if n > 0 {
-		return true, nil
+		return true, false, nil
 	}
 	// rowsAffected==0 from `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` is
 	// historically misread as "duplicate". It also fires for *any* other
@@ -107,18 +127,276 @@ func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte)
 	// E2E: post-upgrade ODS NOT NULL on legacy_text columns swallowed
 	// every fresh INSERT and reported them as duplicates. See
 	// workflow/CI/bugfix/ for the regression record.
-	var found int
+	//
+	// Stage C piggyback: select the STORED content_hash on this same verify
+	// query (zero extra round-trips) so the caller can detect a §6.2 conflict —
+	// same event_id re-delivered with a DIFFERENT hash = corruption/tamper. We
+	// keep the first-stored row (do NOT overwrite — never silently pick one);
+	// the caller logs + counts the conflict.
+	var storedHash sql.NullString
 	verr := r.db.QueryRowContext(ctx,
-		"SELECT 1 FROM usage_event_ods WHERE org_id = ? AND event_id = ? LIMIT 1",
+		"SELECT content_hash FROM usage_event_ods WHERE org_id = ? AND event_id = ? LIMIT 1",
 		e.OrgID, e.EventID,
-	).Scan(&found)
-	if verr == nil && found == 1 {
-		return false, nil // genuine duplicate
+	).Scan(&storedHash)
+	if verr == nil {
+		conflict := e.ContentHash != "" && storedHash.Valid && storedHash.String != "" && storedHash.String != e.ContentHash
+		return false, conflict, nil // genuine duplicate (conflict flagged when hashes differ)
 	}
 	if verr == sql.ErrNoRows {
-		return false, fmt.Errorf("ods INSERT silently ignored (no UNIQUE conflict on org_id=%s event_id=%s) — likely NOT NULL/CHECK/FK violation. F2 root cause: NOT NULL on _legacy_text columns left over from v1.0.3 hook is hit when v1.0.4 collector binds only INTEGER columns. Run dbmigrate v1.0.4 hook upgrade to drop legacy NOT NULL", e.OrgID, e.EventID)
+		return false, false, fmt.Errorf("ods INSERT silently ignored (no UNIQUE conflict on org_id=%s event_id=%s) — likely NOT NULL/CHECK/FK violation. F2 root cause: NOT NULL on _legacy_text columns left over from v1.0.3 hook is hit when v1.0.4 collector binds only INTEGER columns. Run dbmigrate v1.0.4 hook upgrade to drop legacy NOT NULL", e.OrgID, e.EventID)
 	}
-	return false, fmt.Errorf("verify dedup for event_id=%s: %w", e.EventID, verr)
+	return false, false, fmt.Errorf("verify dedup for event_id=%s: %w", e.EventID, verr)
+}
+
+// advanceWatermarkScanLimit bounds how many source_seq rows AdvanceWatermark
+// pulls per call. After a long gap is finally backfilled the connected run can
+// be huge; we walk at most this many in one pass and let the next batch
+// continue, keeping a single ingest call's latency bounded.
+const advanceWatermarkScanLimit = 10000
+
+// AdvanceWatermark — see ODSRepository.AdvanceWatermark. Zipper-advances the
+// connected-no-gap high-water mark for one source and persists it.
+func (r *sqlODS) AdvanceWatermark(ctx context.Context, orgID, sourceID string, clientAllocated int64) (int64, error) {
+	// Current contiguous high-water for this source (0 if first time).
+	var contiguous int64
+	err := r.db.QueryRowContext(ctx,
+		"SELECT contiguous_seq FROM usage_source_watermark WHERE org_id = ? AND source_id = ?",
+		orgID, sourceID,
+	).Scan(&contiguous)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, fmt.Errorf("read watermark org=%s source=%s: %w", orgID, sourceID, err)
+	}
+
+	// Zipper advance: build the set of "present" seqs in (contiguous,
+	// contiguous+limit] from BOTH the ODS (genuinely received) AND the known-loss
+	// ledger (stage D1: a seq promoted to known-lost is "accounted for", so
+	// contiguous advances PAST it — §6.3 "every seq is either in ODS or
+	// known-lost, no third state"). Then walk from contiguous+1 while present.
+	// Bounding to a window (not unbounded) keeps a single ingest call's latency
+	// bounded after a long backfill; the next call continues. With an empty
+	// ledger this behaves identically to the pre-D1 ODS-only zipper.
+	hi := contiguous + advanceWatermarkScanLimit
+	present, err := r.presentSeqSet(ctx, orgID, sourceID, contiguous, hi)
+	if err != nil {
+		return 0, err
+	}
+	for present[contiguous+1] {
+		contiguous++
+	}
+
+	// max_seen_seq is the highest seq stored for this source (may sit ABOVE
+	// contiguous when there is a gap — that span is the "suspected gap" region
+	// B' gap detection inspects). Query it directly so a freshly-arrived
+	// out-of-order seq raises max_seen even though it didn't advance contiguous.
+	var maxSeen int64
+	if err := r.db.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(source_seq), 0) FROM usage_event_ods WHERE org_id = ? AND source_id = ?",
+		orgID, sourceID,
+	).Scan(&maxSeen); err != nil {
+		return 0, fmt.Errorf("max_seen org=%s source=%s: %w", orgID, sourceID, err)
+	}
+
+	// Persist contiguous + max_seen + last_event_at together (one row, one
+	// statement). ON CONFLICT DO UPDATE syntax is identical on PG + SQLite.
+	// NowMillis() is dialect-aware (PG NOW() / SQLite epoch-millis) so the
+	// timestamp columns match their β-hybrid type; B' gap detection compares
+	// updated_at against NowMillis() for staleness.
+	//
+	// Why MAX(excluded, existing) on max_seen + client_allocated: watermark
+	// advance can run from any batch in any order; these columns must be
+	// monotonic (never regress) so a late small-seq / stale-allocated batch can't
+	// lower a high-water mark. clientAllocated is the batch's allocator
+	// high-water (0 when the batch carried no allocated_seq); since seqs start at
+	// 1, MAX(existing, 0) leaves it unchanged — 0 is a safe "no info" no-op.
+	// last_event_at is set to "now" unconditionally — it tracks "last time ANY
+	// event for this source landed", the source-silence signal.
+	// Greatest() is dialect-safe: MAX(a,b) on SQLite, GREATEST(a,b) on Postgres
+	// (PG's MAX is aggregate-only — a literal MAX(a,b) throws there, a dialect bug
+	// SQLite-only tests miss; caught by PG live E2E on confirm-lost).
+	now := r.db.NowMillis()
+	maxSeenG := r.db.Greatest("usage_source_watermark.max_seen_seq", "excluded.max_seen_seq")
+	clientAllocG := r.db.Greatest("usage_source_watermark.client_allocated_seq", "excluded.client_allocated_seq")
+	upsert := fmt.Sprintf(
+		`INSERT INTO usage_source_watermark (org_id, source_id, contiguous_seq, max_seen_seq, client_allocated_seq, last_event_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, %s, %s)
+		 ON CONFLICT (org_id, source_id) DO UPDATE SET
+		   contiguous_seq       = ?,
+		   max_seen_seq         = %s,
+		   client_allocated_seq = %s,
+		   last_event_at        = %s,
+		   updated_at           = %s`,
+		now, now, maxSeenG, clientAllocG, now, now,
+	)
+	if _, err := r.db.ExecContext(ctx, upsert, orgID, sourceID, contiguous, maxSeen, clientAllocated, contiguous); err != nil {
+		return 0, fmt.Errorf("upsert watermark org=%s source=%s: %w", orgID, sourceID, err)
+	}
+	return contiguous, nil
+}
+
+// presentSeqSet returns the set of seqs in (lo, hi] that count as "present" for
+// contiguity: received in ODS OR recorded in the known-loss ledger (stage D1).
+// Two bounded queries merged in memory. NULL source_seq rows (v1 events) are
+// excluded by the `> ?` comparison.
+func (r *sqlODS) presentSeqSet(ctx context.Context, orgID, sourceID string, lo, hi int64) (map[int64]bool, error) {
+	present := make(map[int64]bool)
+	odsRows, err := r.db.QueryContext(ctx,
+		"SELECT source_seq FROM usage_event_ods WHERE org_id = ? AND source_id = ? AND source_seq > ? AND source_seq <= ?",
+		orgID, sourceID, lo, hi)
+	if err != nil {
+		return nil, fmt.Errorf("scan ods seqs org=%s source=%s: %w", orgID, sourceID, err)
+	}
+	for odsRows.Next() {
+		var seq int64
+		if err := odsRows.Scan(&seq); err != nil {
+			odsRows.Close()
+			return nil, err
+		}
+		present[seq] = true
+	}
+	odsRows.Close()
+	if err := odsRows.Err(); err != nil {
+		return nil, err
+	}
+	ledRows, err := r.db.QueryContext(ctx,
+		"SELECT seq FROM usage_known_loss_ledger WHERE org_id = ? AND source_id = ? AND seq > ? AND seq <= ?",
+		orgID, sourceID, lo, hi)
+	if err != nil {
+		return nil, fmt.Errorf("scan ledger seqs org=%s source=%s: %w", orgID, sourceID, err)
+	}
+	for ledRows.Next() {
+		var seq int64
+		if err := ledRows.Scan(&seq); err != nil {
+			ledRows.Close()
+			return nil, err
+		}
+		present[seq] = true
+	}
+	ledRows.Close()
+	return present, ledRows.Err()
+}
+
+// EnumerateMissingSeqs — see ODSRepository. Returns seqs in (lo, hi] absent from
+// BOTH ODS and the ledger (genuinely-unaccounted seqs eligible for known-loss
+// promotion), bounded to advanceWatermarkScanLimit per call.
+func (r *sqlODS) EnumerateMissingSeqs(ctx context.Context, orgID, sourceID string, lo, hi int64) ([]int64, error) {
+	if hi <= lo {
+		return nil, nil
+	}
+	if hi-lo > advanceWatermarkScanLimit {
+		hi = lo + advanceWatermarkScanLimit
+	}
+	present, err := r.presentSeqSet(ctx, orgID, sourceID, lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	var missing []int64
+	for seq := lo + 1; seq <= hi; seq++ {
+		if !present[seq] {
+			missing = append(missing, seq)
+		}
+	}
+	return missing, nil
+}
+
+// RecordKnownLoss — see ODSRepository. Appends seqs to the known-loss ledger
+// (idempotent per (org, source, seq)) then re-advances the watermark so
+// contiguous_seq zips past the now-accounted-for seqs (the ledger-aware zipper).
+// Returns the new contiguous_seq. Per-seq INSERT loop is fine: known-loss is rare
+// and the projector hands bounded enumerated sets.
+func (r *sqlODS) RecordKnownLoss(ctx context.Context, orgID, sourceID string, seqs []int64, reason string) (int64, error) {
+	insert := r.db.InsertOrIgnoreOn("usage_known_loss_ledger",
+		"org_id, source_id, seq, reason", "?,?,?,?", "org_id, source_id, seq")
+	for _, seq := range seqs {
+		if _, err := r.db.ExecContext(ctx, insert, orgID, sourceID, seq, reason); err != nil {
+			return 0, fmt.Errorf("record known loss org=%s source=%s seq=%d: %w", orgID, sourceID, seq, err)
+		}
+	}
+	// Re-advance so contiguous moves past the ledgered seqs. clientAllocated=0 is
+	// a no-op on that column (MAX guard); we're only here to zip contiguity.
+	return r.AdvanceWatermark(ctx, orgID, sourceID, 0)
+}
+
+// GapSeqs — see ODSRepository. Returns the source's unaccounted seqs (absent from
+// ODS and the ledger) in (contiguous, max(max_seen, client_allocated)], bounded
+// to `limit`. truncated is true when the gap span exceeds the limit (client
+// re-runs reconcile for the rest). Stage D3 (client-confirmed reconciliation).
+func (r *sqlODS) GapSeqs(ctx context.Context, orgID, sourceID string, limit int64) (seqs []int64, truncated bool, err error) {
+	var contiguous, maxSeen, clientAllocated int64
+	werr := r.db.QueryRowContext(ctx,
+		"SELECT contiguous_seq, max_seen_seq, client_allocated_seq FROM usage_source_watermark WHERE org_id = ? AND source_id = ?",
+		orgID, sourceID,
+	).Scan(&contiguous, &maxSeen, &clientAllocated)
+	if werr == sql.ErrNoRows {
+		return nil, false, nil // unknown source → no gaps
+	}
+	if werr != nil {
+		return nil, false, fmt.Errorf("read watermark org=%s source=%s: %w", orgID, sourceID, werr)
+	}
+	hi := maxSeen
+	if clientAllocated > hi {
+		hi = clientAllocated
+	}
+	if limit <= 0 || limit > advanceWatermarkScanLimit {
+		limit = advanceWatermarkScanLimit
+	}
+	if hi-contiguous > limit {
+		hi = contiguous + limit
+		truncated = true
+	}
+	missing, err := r.EnumerateMissingSeqs(ctx, orgID, sourceID, contiguous, hi)
+	return missing, truncated, err
+}
+
+// ConfirmLost — see ODSRepository. The client has declared `seqs` unrecoverable
+// (not in its WAL). We GUARD against marking received seqs lost: only seqs
+// genuinely absent from BOTH ODS and the ledger are ledgered (reason). Returns
+// the count actually promoted + the new contiguous. Stage D3.
+func (r *sqlODS) ConfirmLost(ctx context.Context, orgID, sourceID string, seqs []int64, reason string) (promoted int, contiguous int64, err error) {
+	if len(seqs) == 0 {
+		c, e := r.AdvanceWatermark(ctx, orgID, sourceID, 0)
+		return 0, c, e
+	}
+	lo, hi := seqs[0], seqs[0]
+	for _, s := range seqs {
+		if s < lo {
+			lo = s
+		}
+		if s > hi {
+			hi = s
+		}
+	}
+	// Upper bound: a seq the client never allocated and the server never saw is
+	// NOT a real loss — reject it so a buggy/malicious client can't inflate
+	// known_loss (and advance contiguous) with fabricated above-allocated seqs.
+	// max(max_seen, client_allocated) is the same ceiling GapSeqs enumerates to.
+	var maxSeen, clientAllocated int64
+	if werr := r.db.QueryRowContext(ctx,
+		"SELECT max_seen_seq, client_allocated_seq FROM usage_source_watermark WHERE org_id = ? AND source_id = ?",
+		orgID, sourceID,
+	).Scan(&maxSeen, &clientAllocated); werr != nil && werr != sql.ErrNoRows {
+		return 0, 0, fmt.Errorf("read watermark org=%s source=%s: %w", orgID, sourceID, werr)
+	}
+	ceiling := maxSeen
+	if clientAllocated > ceiling {
+		ceiling = clientAllocated
+	}
+	// present in [lo, hi] = (lo-1, hi]; a seq already received or ledgered is NOT lost.
+	present, err := r.presentSeqSet(ctx, orgID, sourceID, lo-1, hi)
+	if err != nil {
+		return 0, 0, err
+	}
+	absent := make([]int64, 0, len(seqs))
+	for _, s := range seqs {
+		if s > 0 && s <= ceiling && !present[s] {
+			absent = append(absent, s)
+		}
+	}
+	if len(absent) == 0 {
+		c, e := r.AdvanceWatermark(ctx, orgID, sourceID, 0)
+		return 0, c, e
+	}
+	c, err := r.RecordKnownLoss(ctx, orgID, sourceID, absent, reason)
+	return len(absent), c, err
 }
 
 func nullStr(s string) sql.NullString {
