@@ -17,6 +17,7 @@ import (
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/api"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/ingest"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/integrity"
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/pricing"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/projector"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
 	"github.com/AiKeyLabs/pkg/aikeycompat"
@@ -77,7 +78,31 @@ func main() {
 	dwdWriter := projector.NewSQLDWDWriter(ddb)
 	checkpoint := projector.NewSQLCheckpointStore(ddb)
 	controlReader := projector.NewSQLControlEventReader(ddb)
-	enricher := projector.NewEnricher(controlReader)
+	// Cost-pricing resolver (v1.0.0-rc.8): load the embedded
+	// LiteLLM/history/overrides snapshot once at startup. Fail-fast — an empty
+	// price table would silently mark every event unpriced, hiding a
+	// misconfiguration (design §2.3).
+	pricingResolver, perr := pricing.Load()
+	if perr != nil {
+		slog.Error("load pricing resolver", "error", perr)
+		os.Exit(1)
+	}
+	slog.Info("pricing resolver loaded",
+		"event.name", "pricing.resolver.loaded",
+		"snapshot_id", pricingResolver.Snapshot().SnapshotID)
+	enricher := projector.NewEnricher(controlReader, pricingResolver)
+	// Stage 2.4: wire the async unpriced-models queue + record the active
+	// pricing snapshot (audit anchor). Snapshot ensure is non-fatal — cost still
+	// computes; a missing snapshot row only degrades the audit trail and must
+	// not block the collector (stability > audit completeness).
+	unpricedQueue := projector.NewUnpricedQueue(projector.NewSQLUnpricedRepository(ddb))
+	enricher.SetUnpricedSink(unpricedQueue)
+	if serr := projector.NewSQLSnapshotRepository(ddb).EnsureSnapshot(
+		context.Background(), pricingResolver.Snapshot(), buildinfo.Get().Version, time.Now().UnixMilli(),
+	); serr != nil {
+		slog.Warn("ensure pricing snapshot",
+			"event.name", "pricing.snapshot.ensure_failed", "error", serr)
+	}
 	projWorker := projector.NewWorker(odsReader, dwdWriter, checkpoint, enricher)
 	// Delivery-integrity: one scanner instance drives BOTH the projector's
 	// periodic WARN surface and the /v1/diagnostics/completeness endpoint.
@@ -111,6 +136,7 @@ func main() {
 	projCtx, projCancel := context.WithCancel(context.Background())
 	defer projCancel()
 	go projWorker.Run(projCtx)
+	go unpricedQueue.Run(projCtx)
 
 	go func() {
 		slog.Info("collector-service started", "addr", cfg.ListenAddr, "version", buildinfo.Get().String())

@@ -1,0 +1,5 @@
+{
+  "_note": "Enterprise/org price overrides (highest priority). For contract discounts, batch-API discounts, etc. not in LiteLLM list price. Keyed by org_id + provider + model. Phase 1: maintained by AiKey team / deploy admin. Design uses JSON (not yaml) to avoid a yaml dependency. See 计价报表 design §3.1.",
+  "schema_version": 1,
+  "entries": []
+}

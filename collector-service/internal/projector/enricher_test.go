@@ -34,7 +34,7 @@ func TestEnrich_Valid(t *testing.T) {
 			EffectiveFrom: aikeytime.FromTime(time.Now().Add(-1 * time.Hour)),
 		},
 	}}
-	enricher := NewEnricher(cr)
+	enricher := NewEnricher(cr, nil)
 
 	rec := &ODSRecord{
 		OdsID:         1,
@@ -86,7 +86,7 @@ func TestEnrich_Valid(t *testing.T) {
 // absent (NULL) session_id surfaces as empty string on DWD (the
 // downstream by-session SQL coalesces both to '').
 func TestEnrich_SessionIDPropagatesFromODSToDWD(t *testing.T) {
-	enricher := NewEnricher(&mockControlReader{})
+	enricher := NewEnricher(&mockControlReader{}, nil)
 
 	withSession := &ODSRecord{
 		OdsID:         101,
@@ -126,7 +126,7 @@ func TestEnrich_SessionIDPropagatesFromODSToDWD(t *testing.T) {
 }
 
 func TestEnrich_NoVirtualKey(t *testing.T) {
-	enricher := NewEnricher(&mockControlReader{})
+	enricher := NewEnricher(&mockControlReader{}, nil)
 	rec := &ODSRecord{
 		OdsID:         2,
 		EventID:       "e2",
@@ -151,7 +151,7 @@ func TestEnrich_NoVirtualKey(t *testing.T) {
 
 func TestEnrich_NoControlEvent(t *testing.T) {
 	cr := &mockControlReader{events: map[string]*ControlEvent{}}
-	enricher := NewEnricher(cr)
+	enricher := NewEnricher(cr, nil)
 
 	rec := &ODSRecord{
 		OdsID:         3,
@@ -186,7 +186,7 @@ func TestEnrich_OrgMismatch(t *testing.T) {
 			EffectiveFrom: aikeytime.FromTime(time.Now().Add(-1 * time.Hour)),
 		},
 	}}
-	enricher := NewEnricher(cr)
+	enricher := NewEnricher(cr, nil)
 
 	rec := &ODSRecord{
 		OdsID:         4,
@@ -222,7 +222,7 @@ func TestEnrich_AccountMismatch_LateReport(t *testing.T) {
 			EffectiveFrom: aikeytime.FromTime(time.Now().Add(-1 * time.Hour)),
 		},
 	}}
-	enricher := NewEnricher(cr)
+	enricher := NewEnricher(cr, nil)
 
 	rec := &ODSRecord{
 		OdsID:         5,
@@ -266,7 +266,7 @@ func TestEnrich_BindingMismatch(t *testing.T) {
 			EffectiveFrom: aikeytime.FromTime(time.Now().Add(-1 * time.Hour)),
 		},
 	}}
-	enricher := NewEnricher(cr)
+	enricher := NewEnricher(cr, nil)
 
 	rec := &ODSRecord{
 		OdsID:         10,
@@ -306,7 +306,7 @@ func TestEnrich_CredentialMismatch(t *testing.T) {
 			EffectiveFrom: aikeytime.FromTime(time.Now().Add(-1 * time.Hour)),
 		},
 	}}
-	enricher := NewEnricher(cr)
+	enricher := NewEnricher(cr, nil)
 
 	rec := &ODSRecord{
 		OdsID:         11,
@@ -343,7 +343,7 @@ func TestEnrich_KeyRevisionMismatch(t *testing.T) {
 			EffectiveFrom:      aikeytime.FromTime(time.Now().Add(-1 * time.Hour)),
 		},
 	}}
-	enricher := NewEnricher(cr)
+	enricher := NewEnricher(cr, nil)
 
 	rec := &ODSRecord{
 		OdsID:              12,
@@ -386,7 +386,7 @@ func TestEnrich_SeatEnrichedFromControlEvent(t *testing.T) {
 			EffectiveFrom: aikeytime.FromTime(time.Now().Add(-1 * time.Hour)),
 		},
 	}}
-	enricher := NewEnricher(cr)
+	enricher := NewEnricher(cr, nil)
 
 	rec := &ODSRecord{
 		OdsID:         6,
@@ -428,7 +428,7 @@ func TestEnrich_SeatEnrichedFromControlEvent(t *testing.T) {
 // rather than letting it silently re-introduce the projector stall.
 func TestEnrich_VaultOriginVKShortCircuit(t *testing.T) {
 	sentinel := &panicOnLookupReader{t: t}
-	enricher := NewEnricher(sentinel)
+	enricher := NewEnricher(sentinel, nil)
 
 	cases := []struct {
 		name string

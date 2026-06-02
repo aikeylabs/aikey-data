@@ -37,7 +37,8 @@ SELECT ods_id, event_id, event_time, occurred_at,
        request_status, http_status_code, upstream_request_id,
        dwd_retry_count,
        app_slug,
-       session_id
+       session_id,
+       region, endpoint_url
 FROM usage_event_ods
 WHERE ((dwd_status = 'pending')
    OR (dwd_status = 'retry' AND dwd_next_retry_at <= %s))
@@ -76,6 +77,7 @@ func (r *sqlODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord
 			&rec.DwdRetryCount,
 			&rec.AppSlug,
 			&rec.SessionID,
+			&rec.Region, &rec.EndpointURL,
 		); err != nil {
 			return nil, fmt.Errorf("scan ods row: %w", err)
 		}
@@ -212,7 +214,8 @@ const dwdColumns = `event_id, ods_id, occurred_at, event_time, usage_date,
     completion_source, quality_status, validation_code, validation_message,
     anomaly_type, anomaly_reason, billing_scope, user_usage_scope,
     control_event_id, control_event_revision, projector_version, projected_at,
-    app_slug, session_id`
+    app_slug, session_id,
+    region, endpoint_url, billing_period, unit_prices_snapshot, pricing_snapshot_id`
 
 const dwdPlaceholders = `?,?,?,?,?,
     ?,?,?,
@@ -228,7 +231,8 @@ const dwdPlaceholders = `?,?,?,?,?,
     ?,?,?,?,
     ?,?,?,?,
     ?,?,?,?,
-    ?,?`
+    ?,?,
+    ?,?,?,?,?`
 
 func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 	insertDWDSQL := w.db.InsertOrIgnoreOn("usage_fact_dwd", dwdColumns, dwdPlaceholders, "org_id, event_id")
@@ -263,6 +267,10 @@ func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 		// surface identically downstream. Empty string is the common
 		// case (most requests carry no session marker).
 		f.SessionID,
+		// Cost-pricing audit (v1.0.0-rc.8): region/endpoint passthrough +
+		// projector-computed cost trail (billable_amount/currency bound above
+		// are now enricher-computed, not passthrough).
+		f.Region, f.EndpointURL, f.BillingPeriod, f.UnitPricesSnapshot, f.PricingSnapshotID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert dwd fact %s: %w", f.EventID, err)

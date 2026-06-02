@@ -1,0 +1,44 @@
+{
+  "_meta": {
+    "note": "Representative DEV/TEST subset of LiteLLM model_prices_and_context_window.json. The release.sh pre-build hook replaces this with the full upstream file at build time. Loader skips entries without litellm_provider (so _meta is ignored).",
+    "litellm_provider": ""
+  },
+  "claude-opus-4-20250514": {
+    "input_cost_per_token": 0.000015,
+    "output_cost_per_token": 0.000075,
+    "cache_creation_input_token_cost": 0.00001875,
+    "cache_read_input_token_cost": 0.0000015,
+    "litellm_provider": "anthropic"
+  },
+  "claude-3-5-sonnet-20241022": {
+    "input_cost_per_token": 0.000003,
+    "output_cost_per_token": 0.000015,
+    "cache_creation_input_token_cost": 0.00000375,
+    "cache_read_input_token_cost": 0.0000003,
+    "litellm_provider": "anthropic"
+  },
+  "gpt-4o": {
+    "input_cost_per_token": 0.0000025,
+    "output_cost_per_token": 0.00001,
+    "cache_read_input_token_cost": 0.00000125,
+    "litellm_provider": "openai"
+  },
+  "o3": {
+    "input_cost_per_token": 0.000002,
+    "output_cost_per_token": 0.000008,
+    "cache_read_input_token_cost": 0.0000005,
+    "litellm_provider": "openai"
+  },
+  "gemini-1.5-pro": {
+    "input_cost_per_token": 0.00000125,
+    "input_cost_per_token_above_128k_tokens": 0.0000025,
+    "output_cost_per_token": 0.000005,
+    "output_cost_per_token_above_128k_tokens": 0.00001,
+    "litellm_provider": "vertex_ai"
+  },
+  "moonshot-v1-8k": {
+    "input_cost_per_token": 0.0000012,
+    "output_cost_per_token": 0.0000012,
+    "litellm_provider": "moonshot"
+  }
+}

@@ -56,7 +56,7 @@ func TestScanNow_PromotesAndReturnsSettled(t *testing.T) {
 	}
 
 	// Worker with real scanner + promoter (projection deps unused by ScanNow).
-	w := NewWorker(&mockODSReader{}, &mockDWDWriter{}, &mockCheckpointStore{}, NewEnricher(&mockControlReader{}))
+	w := NewWorker(&mockODSReader{}, &mockDWDWriter{}, &mockCheckpointStore{}, NewEnricher(&mockControlReader{}, nil))
 	w.SetGapScanner(integrity.NewScanner(db, integrity.DefaultCriteria()))
 	w.SetLossPromoter(repo)
 
@@ -85,7 +85,7 @@ func TestScanNow_PromotesAndReturnsSettled(t *testing.T) {
 	}
 
 	// ScanNow with no scanner wired must error, not panic.
-	bare := NewWorker(&mockODSReader{}, &mockDWDWriter{}, &mockCheckpointStore{}, NewEnricher(&mockControlReader{}))
+	bare := NewWorker(&mockODSReader{}, &mockDWDWriter{}, &mockCheckpointStore{}, NewEnricher(&mockControlReader{}, nil))
 	if _, err := bare.ScanNow(ctx); err == nil {
 		t.Fatal("ScanNow with no scanner should error")
 	}

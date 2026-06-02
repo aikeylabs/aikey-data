@@ -32,7 +32,7 @@ LDFLAGS_PROD := -ldflags "-s -w \
 # Cross-compile targets
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64
 
-.PHONY: build build-prod cross-compile run test lint tidy clean
+.PHONY: build build-prod cross-compile run test test-pricing lint tidy clean
 
 ## build: local dev build (debug symbols kept)
 build:
@@ -63,6 +63,10 @@ run: build
 ## test: run unit tests with race detector
 test:
 	$(GO) test -race -v ./internal/...
+
+## test-pricing: run only the pricing package tests (Stage 1 价目基础设施)
+test-pricing:
+	$(GO) test -race -v ./internal/pricing/
 
 ## lint: run golangci-lint
 lint:

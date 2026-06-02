@@ -8,12 +8,15 @@ import (
 	"database/sql"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/api"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/ingest"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/integrity"
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/pricing"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/projector"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
+	"github.com/AiKeyLabs/pkg/buildinfo"
 )
 
 // Config holds configuration for the collector-service handler assembly.
@@ -71,7 +74,31 @@ func New(db *sql.DB, cfg Config) Result {
 	dwdWriter := projector.NewSQLDWDWriter(ddb)
 	checkpoint := projector.NewSQLCheckpointStore(ddb)
 	ctrlReader := projector.NewSQLControlEventReader(ddb)
-	enricher := projector.NewEnricher(ctrlReader)
+	// Cost-pricing resolver (v1.0.0-rc.8): embedded price table loaded once.
+	// Trial/Personal assemble in-process and this func returns no error, so a
+	// load failure (corrupt embedded file — unrecoverable) panics = fail-fast,
+	// matching the production collector's os.Exit(1) (design §2.3: never run
+	// with an empty price table).
+	pricingResolver, perr := pricing.Load()
+	if perr != nil {
+		logger.Error("load pricing resolver", "error", perr)
+		panic("pricing resolver load failed: " + perr.Error())
+	}
+	logger.Info("pricing resolver loaded",
+		"event.name", "pricing.resolver.loaded",
+		"snapshot_id", pricingResolver.Snapshot().SnapshotID)
+	enricher := projector.NewEnricher(ctrlReader, pricingResolver)
+	// Stage 2.4: async unpriced-models queue + active-snapshot record (audit
+	// anchor). Snapshot ensure is non-fatal — cost still computes; a missing
+	// snapshot row only degrades audit and must not block assembly.
+	unpricedQueue := projector.NewUnpricedQueue(projector.NewSQLUnpricedRepository(ddb))
+	enricher.SetUnpricedSink(unpricedQueue)
+	if serr := projector.NewSQLSnapshotRepository(ddb).EnsureSnapshot(
+		context.Background(), pricingResolver.Snapshot(), buildinfo.Get().Version, time.Now().UnixMilli(),
+	); serr != nil {
+		logger.Warn("ensure pricing snapshot",
+			"event.name", "pricing.snapshot.ensure_failed", "error", serr)
+	}
 	projWorker := projector.NewWorker(odsReader, dwdWriter, checkpoint, enricher)
 	// Delivery-integrity: one scanner instance drives BOTH the projector's
 	// periodic WARN surface and the /v1/diagnostics/completeness endpoint.
@@ -84,7 +111,13 @@ func New(db *sql.DB, cfg Config) Result {
 	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, gapScanner, odsRepo, cfg.JWTSecret, cfg.ServiceToken)
 
 	return Result{
-		Handler:      router,
-		RunProjector: projWorker.Run,
+		Handler: router,
+		// RunProjector also drives the unpriced-models worker on the same ctx, so
+		// the embedding caller (trial/personal) starts both with one call and
+		// they stop together on shutdown.
+		RunProjector: func(ctx context.Context) {
+			go unpricedQueue.Run(ctx)
+			projWorker.Run(ctx)
+		},
 	}
 }

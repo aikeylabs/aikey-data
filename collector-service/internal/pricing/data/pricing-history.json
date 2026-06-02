@@ -1,0 +1,5 @@
+{
+  "_note": "Historical price overlay. Records ONLY price-change points; normal lookups fall through to litellm-prices.json. Maintained by the AiKey team when an upstream provider changes a price. Each entry's price applies to requests with request_ts >= effective_from (unix ms), until a newer entry supersedes it. Design uses JSON (not yaml) to avoid adding a yaml dependency to collector-service. See 计价报表 design §3.1.",
+  "schema_version": 1,
+  "entries": []
+}

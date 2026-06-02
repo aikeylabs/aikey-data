@@ -76,7 +76,7 @@ func TestProjectOne_CanaryShortCircuit(t *testing.T) {
 	ods := &mockODSReader{}
 	dwd := &mockDWDWriter{}
 	cr := &mockControlReader{events: map[string]*ControlEvent{}}
-	w := NewWorker(ods, dwd, &mockCheckpointStore{}, NewEnricher(cr))
+	w := NewWorker(ods, dwd, &mockCheckpointStore{}, NewEnricher(cr, nil))
 
 	canaryRec := &ODSRecord{
 		OdsID:         42,
@@ -118,7 +118,7 @@ func TestProjectOne_BusinessEventWritesDWD(t *testing.T) {
 			EffectiveFrom: aikeytime.FromTime(time.Now().Add(-time.Hour)),
 		},
 	}}
-	w := NewWorker(ods, dwd, &mockCheckpointStore{}, NewEnricher(cr))
+	w := NewWorker(ods, dwd, &mockCheckpointStore{}, NewEnricher(cr, nil))
 
 	rec := &ODSRecord{
 		OdsID:         7,
@@ -147,7 +147,7 @@ func TestProjectOne_BusinessEventWritesDWD(t *testing.T) {
 func TestProjectOne_CanaryAckFailureReturnsError(t *testing.T) {
 	ods := &failingMarkReader{err: errors.New("db locked")}
 	dwd := &mockDWDWriter{}
-	w := NewWorker(ods, dwd, &mockCheckpointStore{}, NewEnricher(&mockControlReader{}))
+	w := NewWorker(ods, dwd, &mockCheckpointStore{}, NewEnricher(&mockControlReader{}, nil))
 
 	canaryRec := &ODSRecord{
 		OdsID:         9,

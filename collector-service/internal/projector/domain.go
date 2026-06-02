@@ -99,6 +99,12 @@ type ODSRecord struct {
 	// convention header for any client). NULL when the request
 	// carried no session marker.
 	SessionID                  sql.NullString
+
+	// Cost-pricing audit (v1.0.0-rc.8): upstream region + endpoint reported by
+	// the proxy. Copied verbatim to the DWD for cost auditing (Bedrock/Vertex
+	// price by region; endpoint for forensics).
+	Region                     sql.NullString
+	EndpointURL                sql.NullString
 }
 
 // ControlEvent is a read-only projection of managed_key_control_events.
@@ -190,4 +196,13 @@ type DWDFact struct {
 	// verbatim from ODS row. Empty string for events without a session
 	// marker (proxy wrote SQL NULL or "" — both surface as "" here).
 	SessionID                  string
+
+	// Cost-pricing audit (v1.0.0-rc.8). BillableAmount/Currency above are now
+	// projector-COMPUTED (was passthrough). These five add the audit trail so a
+	// cost stays reconstructable after price files change (design §3.6):
+	Region             string  // upstream region (passthrough from ODS)
+	EndpointURL        string  // upstream base URL (passthrough from ODS)
+	BillingPeriod      string  // 'YYYY-MM' monthly bucket derived from occurred_at
+	UnitPricesSnapshot *string // JSON of the unit prices used; NULL when unpriced
+	PricingSnapshotID  string  // which global pricing_snapshots state was active
 }

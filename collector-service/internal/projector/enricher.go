@@ -3,8 +3,11 @@ package projector
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"strings"
+
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/pricing"
 )
 
 // Virtual-key prefixes that originate from the user's local vault and
@@ -58,19 +61,35 @@ func isVaultOriginVK(vk string) bool {
 
 const projectorVersion = "0.1.0"
 
-// Enricher transforms an ODS record into a DWD fact by looking up control events.
+// Enricher transforms an ODS record into a DWD fact by looking up control events
+// and computing cost from the pricing resolver.
 type Enricher struct {
 	controlReader ControlEventReader
+	resolver      *pricing.Resolver // cost-pricing audit (v1.0.0-rc.8); may be nil
+	unpriced      UnpricedSink      // optional; set via SetUnpricedSink (Stage 2.4)
 }
 
-// NewEnricher creates an enricher that reads control events for enrichment (D5).
-func NewEnricher(cr ControlEventReader) *Enricher {
-	return &Enricher{controlReader: cr}
+// NewEnricher creates an enricher that reads control events for enrichment (D5)
+// and computes cost via the pricing resolver (rc.8). resolver may be nil — cost
+// is then left NULL — so callers/tests without pricing still work.
+func NewEnricher(cr ControlEventReader, resolver *pricing.Resolver) *Enricher {
+	return &Enricher{controlReader: cr, resolver: resolver}
 }
+
+// SetUnpricedSink wires the async queue that records pricing misses. Optional —
+// when unset (tests), a miss only WARN-logs. Kept a setter rather than a
+// NewEnricher param so that signature (and its many test callers) stays stable.
+func (e *Enricher) SetUnpricedSink(s UnpricedSink) { e.unpriced = s }
 
 // Enrich takes an ODS record, looks up the matching control event, and produces a DWD fact.
 func (e *Enricher) Enrich(ctx context.Context, rec *ODSRecord) (*DWDFact, error) {
 	fact := e.buildBaseFact(rec)
+
+	// Cost is independent of ownership/anomaly classification: any event with a
+	// model + tokens has a cost regardless of how the control-event lookup turns
+	// out. Compute it once here so every return path below carries the cost +
+	// audit trail.
+	e.applyCost(fact)
 
 	// If no virtual_key_id, we cannot look up control events — mark as partial
 	if !rec.VirtualKeyID.Valid || rec.VirtualKeyID.String == "" {
@@ -190,6 +209,75 @@ func (e *Enricher) buildBaseFact(rec *ODSRecord) *DWDFact {
 		// source of truth for what "session" means is what the proxy
 		// extracted via sessionid/fingerprint.yaml at request time.
 		SessionID:                  rec.SessionID.String,
+
+		// Cost-pricing audit (v1.0.0-rc.8): region/endpoint passthrough from ODS.
+		Region:                     rec.Region.String,
+		EndpointURL:                rec.EndpointURL.String,
+	}
+}
+
+// applyCost computes the event's cost and stamps the audit trail. It runs for
+// EVERY event (independent of the ownership/anomaly checks below). On an unknown
+// model it leaves BillableAmount NULL and WARN-logs — never a zero cost
+// (CLAUDE.md no-lazy-defaults). The unpriced_models enqueue + pricing_snapshots
+// UPSERT land in Stage 2.4; here we record the active snapshot id and the
+// per-event unit prices.
+func (e *Enricher) applyCost(fact *DWDFact) {
+	// Monthly billing bucket from the event's occurred time, derived once and
+	// stored so account/forecast queries match a string index instead of
+	// re-deriving from a timestamp per row (cross-dialect-safe).
+	fact.BillingPeriod = fact.EventTime.Time().Format("2006-01")
+
+	if e.resolver == nil {
+		return // no pricing configured (e.g. unit tests) → leave cost NULL
+	}
+	// Record which global pricing state was active even on a miss, so an
+	// unpriced row still pins "this is the price-file set that had no entry".
+	fact.PricingSnapshotID = e.resolver.Snapshot().SnapshotID
+
+	if fact.Model == "" {
+		return // no model → cannot price
+	}
+	up, err := e.resolver.Lookup(fact.ProviderCode, fact.Model,
+		fact.EventTime.Time().UnixMilli(), fact.InputTokens, fact.OrgID)
+	if err != nil {
+		// Unknown (provider, model): cost stays NULL (never zero); surface
+		// loudly AND enqueue for the "pending pricing" dashboard. The enqueue is
+		// async + non-blocking — it must never stall the projector main path.
+		if e.unpriced != nil {
+			e.unpriced.Enqueue(fact.ProviderCode, fact.Model)
+		}
+		slog.Warn("pricing miss",
+			"event.name", "projector.pricing.miss",
+			"provider", fact.ProviderCode, "model", fact.Model)
+		return
+	}
+	cost := pricing.ComputeCost(*up, pricing.TokenCounts{
+		Input:         fact.InputTokens,
+		Output:        fact.OutputTokens,
+		CacheRead:     fact.CachedInputTokens,
+		CacheCreation: fact.CacheCreationInputTokens,
+		Reasoning:     fact.ReasoningTokens,
+	}, inputIncludesCache(fact.ProviderCode))
+
+	costStr := pricing.FormatCostUSD(cost)
+	fact.BillableAmount = &costStr
+	fact.Currency = "USD"
+	if b, mErr := json.Marshal(up); mErr == nil {
+		s := string(b)
+		fact.UnitPricesSnapshot = &s
+	}
+}
+
+// inputIncludesCache reports whether a provider's reported input/prompt token
+// count INCLUDES cached tokens (OpenAI-style, must subtract to get uncached) vs
+// already being the uncached portion (Anthropic-style). See pricing.ComputeCost.
+func inputIncludesCache(provider string) bool {
+	switch provider {
+	case "openai", "azure", "azure_ai":
+		return true
+	default:
+		return false
 	}
 }
 
