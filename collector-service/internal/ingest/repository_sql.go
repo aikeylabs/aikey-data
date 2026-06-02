@@ -52,6 +52,7 @@ const odsColumns = `event_id, request_id, trace_id, proxy_instance_id, device_id
     raw_usage_json, raw_headers_json, ext_json, raw_event_json,
     app_slug, session_id,
     source_id, source_seq,
+    region, endpoint_url,
     content_hash, ingest_status, dwd_status`
 
 const odsPlaceholders = `?,?,?,?,?,
@@ -69,6 +70,7 @@ const odsPlaceholders = `?,?,?,?,?,
     ?,?,
     ?,?,?,?,?,
     ?,?,?,?,
+    ?,?,
     ?,?,
     ?,?,
     ?,?,?`
@@ -107,6 +109,7 @@ func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte,
 		nullStr(e.AppSlug),
 		nullStr(e.SessionID),
 		nullStr(e.SourceID), e.SourceSeq, // delivery integrity (v2); SourceSeq nil → NULL for v1 events
+		nullStr(e.Region), nullStr(e.EndpointURL), // cost-pricing audit (v1.0.0-rc.8)
 		nullStr(e.ContentHash), ingestStatus, dwdStatus, // stage C: content fingerprint + disposition
 	)
 	if err != nil {

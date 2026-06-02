@@ -90,6 +90,12 @@ type UsageEvent struct {
 	RouteSource    string `json:"route_source,omitempty"`
 	OAuthIdentity  string `json:"oauth_identity,omitempty"` // Email/display name for OAuth accounts
 
+	// Cost-pricing audit (v1.0.0-rc.8): upstream region + endpoint reported by
+	// proxy, persisted to ODS then projected to DWD for cost auditing
+	// (Bedrock/Vertex price by region; endpoint for forensics).
+	Region      string `json:"region,omitempty"`
+	EndpointURL string `json:"endpoint_url,omitempty"`
+
 	// app — Phase 4 Connected Apps (v1.0.0-rc.5). Proxy attaches the
 	// registered app slug (e.g. "degrade-detector") to events that
 	// flowed through `/apps/<slug>/v1/...` so query-service can scope
