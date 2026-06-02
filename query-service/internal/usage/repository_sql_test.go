@@ -59,6 +59,38 @@ func setupUsageTestDB(t *testing.T) *shared.DB {
 		// aikey-config-tool/pkg/dbmigrate/versions/v1_0_0_rc6_session_id.go
 		`ALTER TABLE usage_event_ods ADD COLUMN session_id TEXT`,
 		`ALTER TABLE usage_fact_dwd  ADD COLUMN session_id TEXT`,
+		// aikey-config-tool/pkg/dbmigrate/versions/v1_0_0_rc8_pricing.go
+		// (cost-pricing audit columns + pending-pricing / snapshot tables).
+		`ALTER TABLE usage_event_ods ADD COLUMN region TEXT`,
+		`ALTER TABLE usage_event_ods ADD COLUMN endpoint_url TEXT`,
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN billing_period TEXT`,
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN unit_prices_snapshot TEXT`,
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN pricing_snapshot_id TEXT`,
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN region TEXT`,
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN endpoint_url TEXT`,
+		`CREATE TABLE IF NOT EXISTS unpriced_models (
+			model         TEXT NOT NULL,
+			provider      TEXT NOT NULL,
+			first_seen_at INTEGER NOT NULL,
+			last_seen_at  INTEGER NOT NULL,
+			event_count   INTEGER NOT NULL DEFAULT 0,
+			status        TEXT NOT NULL DEFAULT 'pending',
+			notes         TEXT,
+			PRIMARY KEY (model, provider)
+		)`,
+		`CREATE TABLE IF NOT EXISTS pricing_snapshots (
+			snapshot_id      TEXT NOT NULL,
+			litellm_sha256   TEXT NOT NULL,
+			history_sha256   TEXT NOT NULL,
+			overrides_sha256 TEXT NOT NULL,
+			aikey_version    TEXT,
+			created_at       INTEGER NOT NULL,
+			effective_from   INTEGER NOT NULL,
+			effective_until  INTEGER,
+			notes            TEXT,
+			PRIMARY KEY (snapshot_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pricing_snapshots_active ON pricing_snapshots (effective_until) WHERE effective_until IS NULL`,
 	}
 	for _, stmt := range postBaseline {
 		if _, err := raw.Exec(stmt); err != nil {
@@ -102,6 +134,12 @@ type dwdRow struct {
 	OutputTokens             int64
 	BillingScope             string // defaults to "user_only" if empty
 	AppSlug                  string // empty stored as empty string (matches production ingest)
+	// BillableAmount nil → billable_amount + currency stored as NULL (an
+	// "unpriced" row, what the projector writes on a price-table miss);
+	// non-nil → stored with Currency (default "USD"). Lets cost-aggregation
+	// tests seed mixed priced / unpriced rows without *float64 everywhere.
+	BillableAmount *float64
+	Currency       string // defaults to "USD" when BillableAmount != nil
 }
 
 // odsIDSeq generates unique ods_id values per inserted DWD row so the
@@ -129,6 +167,17 @@ func insertDWD(t *testing.T, db *shared.DB, r dwdRow) {
 	if r.Model == "<NULL>" {
 		modelArg = nil
 	}
+	// Priced row → store billable_amount + currency; unpriced row (nil)
+	// → NULL both, matching what the projector writes on a price miss.
+	var billableArg, currencyArg any
+	if r.BillableAmount != nil {
+		billableArg = *r.BillableAmount
+		cur := r.Currency
+		if cur == "" {
+			cur = "USD"
+		}
+		currencyArg = cur
+	}
 	_, err := db.DB.Exec(`
 		INSERT INTO usage_fact_dwd (
 			event_id, ods_id, occurred_at, event_time, usage_date,
@@ -138,8 +187,8 @@ func insertDWD(t *testing.T, db *shared.DB, r dwdRow) {
 			input_tokens, cached_input_tokens, cache_creation_input_tokens, output_tokens,
 			request_status, completion_source, quality_status,
 			billing_scope, user_usage_scope, projector_version,
-			app_slug
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			app_slug, billable_amount, currency
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.EventID, odsIDSeq, r.EventTimeMs, r.EventTimeMs, r.UsageDate,
 		r.OrgID, r.AccountID, r.SeatID, r.VirtualKeyID, r.VirtualKeyAlias,
 		r.ProviderCode, r.ProtocolType, modelArg,
@@ -147,7 +196,7 @@ func insertDWD(t *testing.T, db *shared.DB, r dwdRow) {
 		r.InputTokens, r.CachedInputTokens, r.CacheCreationInputTokens, r.OutputTokens,
 		"success", "test", "ok",
 		r.BillingScope, "normal", "test",
-		r.AppSlug)
+		r.AppSlug, billableArg, currencyArg)
 	if err != nil {
 		t.Fatalf("insertDWD %q: %v", r.EventID, err)
 	}
@@ -200,6 +249,7 @@ func itoa(n int) string {
 	}
 	return string(buf[i:])
 }
+
 // eventForHour generates a stable, per-seat-scoped event_id. Seat is
 // included to keep cross-seat seeds from colliding on the
 // UNIQUE (org_id, event_id) baseline constraint (the previous version
@@ -220,7 +270,7 @@ func TestPersonalHourlyTimeline_AggregatesByHour(t *testing.T) {
 		reqs   int64
 	}{
 		{hour: 9, tokens: 100, reqs: 1},
-		{hour: 9, tokens: 50, reqs: 1},   // same hour — should aggregate
+		{hour: 9, tokens: 50, reqs: 1}, // same hour — should aggregate
 		{hour: 14, tokens: 200, reqs: 2},
 		{hour: 23, tokens: 300, reqs: 3},
 	})
@@ -967,7 +1017,8 @@ func insertODSWithIdentity(t *testing.T, db *shared.DB, eventID, virtualKeyID, i
 // three rows that looked identical in the UI but split the totals.
 //
 // See:
-//   workflow/CI/bugfix/20260526-usage-by-key-duplicate-rows-by-app-attribution.md
+//
+//	workflow/CI/bugfix/20260526-usage-by-key-duplicate-rows-by-app-attribution.md
 func TestPersonalByKeyTotal_CollapsesOAuthSessionsBySameApp(t *testing.T) {
 	db := setupUsageTestDB(t)
 	date := "2026-05-20"
@@ -1078,7 +1129,7 @@ func TestPersonalByKeyTotal_SplitsOAuthSessionsByDifferentApps(t *testing.T) {
 // TestPersonalByKeyTotal_NonOAuthRowsUnaffected pins the non-OAuth
 // branch: rows with empty oauth_identity (personal CLI keys, team
 // keys, no-app legacy events) still group by virtual_key_id as before
-// — the new COALESCE(NULLIF(identity,''), vk_id) reduces to vk_id when
+// — the new COALESCE(NULLIF(identity,”), vk_id) reduces to vk_id when
 // identity is empty.
 func TestPersonalByKeyTotal_NonOAuthRowsUnaffected(t *testing.T) {
 	db := setupUsageTestDB(t)
@@ -1175,7 +1226,7 @@ func TestPersonalBySessionTotal_GroupsBySessionAndSortsByTokens(t *testing.T) {
 }
 
 // TestPersonalBySessionTotal_NoSessionBucket pins the "(no session)"
-// aggregation contract: rows with NULL or '' session_id collapse into
+// aggregation contract: rows with NULL or ” session_id collapse into
 // a single bucket the frontend renders as "(no session)". Confirms
 // users can see how much of their traffic lacks the dimension.
 func TestPersonalBySessionTotal_NoSessionBucket(t *testing.T) {

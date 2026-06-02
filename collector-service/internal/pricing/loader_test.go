@@ -60,7 +60,7 @@ func TestLoad_MetaSkipped(t *testing.T) {
 
 // malformed litellm JSON must fail (fail-fast), not silently yield empty table.
 func TestLoad_FailFastOnBadJSON(t *testing.T) {
-	_, err := load([]byte("{ not json"), historyJSON, overridesJSON)
+	_, err := LoadFrom([]byte("{ not json"), historyJSON, overridesJSON)
 	if err == nil {
 		t.Fatal("expected parse error on malformed litellm JSON, got nil")
 	}
@@ -68,7 +68,7 @@ func TestLoad_FailFastOnBadJSON(t *testing.T) {
 
 // empty overlays (the shipped skeletons) parse fine and contribute nothing.
 func TestLoad_EmptyOverlaysOK(t *testing.T) {
-	r, err := load(litellmJSON, []byte(`{"schema_version":1,"entries":[]}`), []byte(`{"schema_version":1,"entries":[]}`))
+	r, err := LoadFrom(litellmJSON, []byte(`{"schema_version":1,"entries":[]}`), []byte(`{"schema_version":1,"entries":[]}`))
 	if err != nil {
 		t.Fatalf("empty overlays should load: %v", err)
 	}

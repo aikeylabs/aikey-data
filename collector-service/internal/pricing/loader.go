@@ -12,11 +12,16 @@ import (
 // table — an empty table would silently mark every event unpriced, hiding a
 // real misconfiguration (design §2.3 fail-fast).
 func Load() (*Resolver, error) {
-	return load(litellmJSON, historyJSON, overridesJSON)
+	return LoadFrom(litellmJSON, historyJSON, overridesJSON)
 }
 
-// load is the testable core of Load: identical logic over explicit bytes.
-func load(litellmBytes, historyBytes, overridesBytes []byte) (*Resolver, error) {
+// LoadFrom is the testable core of Load: identical logic over explicit bytes.
+// Exported so consumers outside this package (e.g. the projector enricher
+// tests) can build a Resolver from a FIXED in-memory price table instead of the
+// volatile embedded LiteLLM file, which changes on every upstream price sync.
+// Production always calls Load(); LoadFrom is the seam for deterministic tests
+// and any future alternate price source (Stage 2.6 decision 2A).
+func LoadFrom(litellmBytes, historyBytes, overridesBytes []byte) (*Resolver, error) {
 	litellm, err := parseLiteLLM(litellmBytes)
 	if err != nil {
 		return nil, fmt.Errorf("pricing: parse litellm: %w", err)
@@ -80,7 +85,7 @@ type overlayFile struct {
 }
 
 type overlayEntry struct {
-	OrgID         string  `json:"org_id"`         // overrides only
+	OrgID         string  `json:"org_id"` // overrides only
 	Provider      string  `json:"provider"`
 	Model         string  `json:"model"`
 	EffectiveFrom int64   `json:"effective_from"` // history only, unix ms

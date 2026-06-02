@@ -144,6 +144,24 @@ func (m *mockRepo) PersonalRecent(_ context.Context, p usage.QueryParams) ([]usa
 	}, nil
 }
 
+// --- Admin (cost-pricing Stage 3) mock stubs ---
+// Satisfy the Repository interface; AdminHandler tests use a dedicated
+// adminMockRepo (admin_handlers_test.go) with controllable behaviour.
+
+func (m *mockRepo) ListUnpricedModels(_ context.Context, status string) ([]usage.UnpricedModel, error) {
+	return []usage.UnpricedModel{
+		{Model: "gpt-4o-2024-08-06", Provider: "openai", EventCount: 3, Status: "pending"},
+	}, nil
+}
+
+func (m *mockRepo) UpdateUnpricedModelStatus(_ context.Context, provider, model, status string) error {
+	return nil
+}
+
+func (m *mockRepo) GetEventAudit(_ context.Context, eventID string) (*usage.EventAudit, error) {
+	return &usage.EventAudit{EventID: eventID, Model: "claude-test", ProviderCode: "anthropic"}, nil
+}
+
 func TestPersonalTimeline(t *testing.T) {
 	h := NewUsageHandler(&mockRepo{})
 	req := httptest.NewRequest("GET", "/v1/usage/personal/timeline?seat_id=seat1", nil)

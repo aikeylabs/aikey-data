@@ -9,10 +9,17 @@ import (
 )
 
 // TimelinePoint is a single data point on a usage curve.
+//
+// CostUSD (2026-06, cost-pricing Stage 3) is the estimated USD cost for
+// the bucket — Σ billable_amount over USD-priced DWD rows. Unpriced rows
+// (billable_amount NULL) contribute 0, so the curve never over-counts.
+// Always present (no omitempty) — same convention as the token fields, so
+// the FE reads it as a plain number without undefined handling.
 type TimelinePoint struct {
-	Date        string `json:"date"` // YYYY-MM-DD
-	TotalTokens int64  `json:"total_tokens"`
-	RequestCount int64 `json:"request_count"`
+	Date         string  `json:"date"` // YYYY-MM-DD
+	TotalTokens  int64   `json:"total_tokens"`
+	RequestCount int64   `json:"request_count"`
+	CostUSD      float64 `json:"cost_usd"`
 }
 
 // HourlyPoint is an intra-day usage bucket — one slot per hour for a
@@ -27,7 +34,7 @@ type TimelinePoint struct {
 // chart that mapped UTC hour 4 onto the user's local hour slot,
 // producing a 4 AM peak for a local-noon request).
 type HourlyPoint struct {
-	Hour         int   `json:"hour"`          // 0..23 in the caller's local tz
+	Hour         int   `json:"hour"` // 0..23 in the caller's local tz
 	TotalTokens  int64 `json:"total_tokens"`
 	RequestCount int64 `json:"request_count"`
 }
@@ -59,10 +66,21 @@ type ProtocolHourlyPoint struct {
 }
 
 // ProtocolTotal is a single slice of a provider pie chart.
+//
+// Cost fields (2026-06, cost-pricing Stage 3) — same trio added to every
+// "total" breakdown:
+//   - CostUSD: Σ billable_amount over USD-priced rows (estimated).
+//   - PricedRequestCount / UnpricedRequestCount: request_count split by
+//     whether the row carried a price. They sum to RequestCount exactly
+//     (split by SUM(request_count), not row count), so the FE can render
+//     "N of M unpriced ⚠" without the totals drifting.
 type ProtocolTotal struct {
-	ProtocolType string `json:"protocol_type"` // actually provider_code
-	TotalTokens  int64  `json:"total_tokens"`
-	RequestCount int64  `json:"request_count"`
+	ProtocolType         string  `json:"protocol_type"` // actually provider_code
+	TotalTokens          int64   `json:"total_tokens"`
+	RequestCount         int64   `json:"request_count"`
+	CostUSD              float64 `json:"cost_usd"`
+	PricedRequestCount   int64   `json:"priced_request_count"`
+	UnpricedRequestCount int64   `json:"unpriced_request_count"`
 }
 
 // ModelTotal is a single entry in the per-model usage breakdown for the
@@ -86,6 +104,10 @@ type ModelTotal struct {
 	OutputTokens             int64  `json:"output_tokens"`
 	TotalTokens              int64  `json:"total_tokens"`
 	RequestCount             int64  `json:"request_count"`
+	// Cost trio — see ProtocolTotal for semantics.
+	CostUSD              float64 `json:"cost_usd"`
+	PricedRequestCount   int64   `json:"priced_request_count"`
+	UnpricedRequestCount int64   `json:"unpriced_request_count"`
 }
 
 // AppTotal is a single row in the "Usage By App" breakdown (added
@@ -114,13 +136,17 @@ type AppTotal struct {
 	// AppSlug is the registered app's slug, or "" when the row is the
 	// "direct" fallback (no app context — direct /v1/... call). Coalesced
 	// at SQL level so the client never sees NULL.
-	AppSlug      string `json:"app_slug"`
+	AppSlug string `json:"app_slug"`
 	// ProviderCode is the canonical short form (anthropic / openai /
 	// moonshot / kimi_code / ...). Frontend uses this for the tool-name
 	// mapping on direct rows and also to render provider chips on app rows.
 	ProviderCode string `json:"provider_code"`
 	TotalTokens  int64  `json:"total_tokens"`
 	RequestCount int64  `json:"request_count"`
+	// Cost trio — see ProtocolTotal for semantics.
+	CostUSD              float64 `json:"cost_usd"`
+	PricedRequestCount   int64   `json:"priced_request_count"`
+	UnpricedRequestCount int64   `json:"unpriced_request_count"`
 }
 
 // SessionTotal is a single entry in the per-session usage breakdown
@@ -168,18 +194,23 @@ type SessionTotal struct {
 // renders the slug as a small subtitle under the email — this is what
 // disambiguates multiple session rows that previously all collapsed to
 // the same email label. See:
-//   workflow/CI/requirements/2026-05-26-usage-by-key-app-attribution.md
+//
+//	workflow/CI/requirements/2026-05-26-usage-by-key-app-attribution.md
 type KeyTotal struct {
 	VirtualKeyID             string `json:"virtual_key_id"`
-	Alias                    string `json:"alias,omitempty"`    // human-readable key alias (personal/team BYOK)
-	Identity                 string `json:"identity,omitempty"` // email / display_identity (OAuth sessions)
-	AppSlug                  string `json:"app_slug,omitempty"` // UA-derived (OAuth) or registered (Connected App) client app slug
+	Alias                    string `json:"alias,omitempty"`             // human-readable key alias (personal/team BYOK)
+	Identity                 string `json:"identity,omitempty"`          // email / display_identity (OAuth sessions)
+	AppSlug                  string `json:"app_slug,omitempty"`          // UA-derived (OAuth) or registered (Connected App) client app slug
 	InputTokens              int64  `json:"input_tokens"`                // Anthropic: total prompt input (incl. cache_read + cache_creation)
 	CachedInputTokens        int64  `json:"cached_input_tokens"`         // = Anthropic cache_read_input_tokens (legacy column name)
 	CacheCreationInputTokens int64  `json:"cache_creation_input_tokens"` // Anthropic cache_creation_input_tokens
 	OutputTokens             int64  `json:"output_tokens"`
 	TotalTokens              int64  `json:"total_tokens"`
 	RequestCount             int64  `json:"request_count"`
+	// Cost trio — see ProtocolTotal for semantics.
+	CostUSD              float64 `json:"cost_usd"`
+	PricedRequestCount   int64   `json:"priced_request_count"`
+	UnpricedRequestCount int64   `json:"unpriced_request_count"`
 }
 
 // RecentRequest is a single raw usage event surfaced to the Overview
@@ -209,10 +240,10 @@ type RecentRequest struct {
 
 // UserRanking is a single entry in the per-user ranking.
 type UserRanking struct {
-	AccountID   string `json:"account_id"`
-	SeatID      string `json:"seat_id"`
-	TotalTokens int64  `json:"total_tokens"`
-	RequestCount int64 `json:"request_count"`
+	AccountID    string `json:"account_id"`
+	SeatID       string `json:"seat_id"`
+	TotalTokens  int64  `json:"total_tokens"`
+	RequestCount int64  `json:"request_count"`
 }
 
 // QueryParams holds common query filters.

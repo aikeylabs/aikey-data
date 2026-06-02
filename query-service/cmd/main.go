@@ -45,7 +45,8 @@ func main() {
 
 	repo := usage.NewSQLRepository(shared.NewDB(db, shared.DialectPostgres))
 	handler := api.NewUsageHandler(repo)
-	router := api.NewRouter(handler, db, cfg.ServiceToken)
+	admin := api.NewAdminHandler(repo)
+	router := api.NewRouter(handler, admin, db, cfg.ServiceToken)
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,

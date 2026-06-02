@@ -72,7 +72,7 @@ func appendNonNil(args []interface{}, extra interface{}) []interface{} {
 // Empty SessionID is "no filter" — returning all rows including those
 // with NULL/empty session_id (the "no session" bucket). A non-empty
 // SessionID narrows to events whose session_id equals exactly that
-// string; COALESCE handles NULL → '' so an explicit SessionID="" can
+// string; COALESCE handles NULL → ” so an explicit SessionID="" can
 // be requested via a separate sentinel if ever needed (not used today).
 //
 // Added 2026-05-26 for Performance page drill-down. Consumers:
@@ -100,7 +100,8 @@ func (r *sqlRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]Timeli
 		args = append(args, appSlugArg)
 	}
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT %s AS d, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT %s AS d, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0),
+		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0)
 		FROM usage_fact_dwd
 		WHERE %s
 		  AND event_time >= ? AND event_time < ?%s
@@ -223,7 +224,10 @@ func (r *sqlRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParams) ([
 	filter, id := personalFilter(p)
 	startMs, endMs := p.LocalWindowMs()
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0),
+		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN billable_amount IS NOT NULL THEN request_count ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN request_count ELSE 0 END),0)
 		FROM usage_fact_dwd
 		WHERE %s
 		  AND event_time >= ? AND event_time < ?
@@ -241,18 +245,19 @@ func (r *sqlRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParams) ([
 // pair so the /user/usage-ledger "Usage By App" chart can rank traffic
 // by which Connected App generated it. Two row shapes returned:
 //
-//   - app_slug != ''  → traffic that went through /apps/<slug>/v1/...,
+//   - app_slug != ”  → traffic that went through /apps/<slug>/v1/...,
 //     i.e. a registered Connected App (first- or third-party).
-//   - app_slug == ''  → "direct" traffic that hit /v1/... without an
+//   - app_slug == ”  → "direct" traffic that hit /v1/... without an
 //     app context. The frontend maps the provider_code to a friendly
 //     tool name (claude / codex / kimi) for display, per the 2026-05-25
 //     "show CLI tool name for direct calls" requirement.
 //
 // We COALESCE both columns at SQL level so:
-//   (a) NULL groupings collapse to '' rather than splitting NULL vs.
-//       '' into separate buckets (some old rows have empty strings
-//       instead of NULL),
-//   (b) the scanner can use plain `string` without sql.NullString.
+//
+//	(a) NULL groupings collapse to '' rather than splitting NULL vs.
+//	    '' into separate buckets (some old rows have empty strings
+//	    instead of NULL),
+//	(b) the scanner can use plain `string` without sql.NullString.
 //
 // Why GROUP BY both columns instead of just app_slug: the same app slug
 // could in theory talk to multiple upstreams over time, and we want
@@ -270,7 +275,10 @@ func (r *sqlRepo) PersonalByAppTotal(ctx context.Context, p QueryParams) ([]AppT
 		SELECT COALESCE(app_slug, ''),
 		       COALESCE(provider_code, protocol_type, ''),
 		       COALESCE(SUM(total_tokens), 0),
-		       COALESCE(SUM(request_count), 0)
+		       COALESCE(SUM(request_count), 0),
+		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN billable_amount IS NOT NULL THEN request_count ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN request_count ELSE 0 END),0)
 		FROM usage_fact_dwd
 		WHERE %s
 		  AND event_time >= ? AND event_time < ?
@@ -284,7 +292,8 @@ func (r *sqlRepo) PersonalByAppTotal(ctx context.Context, p QueryParams) ([]AppT
 	var out []AppTotal
 	for rows.Next() {
 		var at AppTotal
-		if err := rows.Scan(&at.AppSlug, &at.ProviderCode, &at.TotalTokens, &at.RequestCount); err != nil {
+		if err := rows.Scan(&at.AppSlug, &at.ProviderCode, &at.TotalTokens, &at.RequestCount,
+			&at.CostUSD, &at.PricedRequestCount, &at.UnpricedRequestCount); err != nil {
 			return nil, err
 		}
 		out = append(out, at)
@@ -367,7 +376,10 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 		       COALESCE(SUM(d.cache_creation_input_tokens),0),
 		       COALESCE(SUM(d.output_tokens),0),
 		       COALESCE(SUM(d.total_tokens),0),
-		       COALESCE(SUM(d.request_count),0)
+		       COALESCE(SUM(d.request_count),0),
+		       COALESCE(SUM(CASE WHEN d.currency='USD' THEN d.billable_amount ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN d.billable_amount IS NOT NULL THEN d.request_count ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN d.billable_amount IS NULL THEN d.request_count ELSE 0 END),0)
 		FROM usage_fact_dwd AS d
 		LEFT JOIN (
 		    SELECT virtual_key_id, MAX(oauth_identity) AS identity
@@ -389,7 +401,8 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 	var result []KeyTotal
 	for rows.Next() {
 		var kt KeyTotal
-		if err := rows.Scan(&kt.VirtualKeyID, &kt.Alias, &kt.Identity, &kt.AppSlug, &kt.InputTokens, &kt.CachedInputTokens, &kt.CacheCreationInputTokens, &kt.OutputTokens, &kt.TotalTokens, &kt.RequestCount); err != nil {
+		if err := rows.Scan(&kt.VirtualKeyID, &kt.Alias, &kt.Identity, &kt.AppSlug, &kt.InputTokens, &kt.CachedInputTokens, &kt.CacheCreationInputTokens, &kt.OutputTokens, &kt.TotalTokens, &kt.RequestCount,
+			&kt.CostUSD, &kt.PricedRequestCount, &kt.UnpricedRequestCount); err != nil {
 			return nil, err
 		}
 		result = append(result, kt)
@@ -414,7 +427,7 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 // preserves a long tail for power users while keeping the chart
 // readable and the FE row count predictable.
 //
-// Why COALESCE(NULLIF(model,''), 'unknown'): the `model` column can
+// Why COALESCE(NULLIF(model,”), 'unknown'): the `model` column can
 // be NULL or empty for rows captured before the upstream response was
 // parsed (proxy fast-path). Bucketing them into an explicit
 // "unknown" group preserves SUM accuracy — silent NULL drops would
@@ -435,7 +448,10 @@ func (r *sqlRepo) PersonalByModelTotal(ctx context.Context, p QueryParams) ([]Mo
 		       COALESCE(SUM(cache_creation_input_tokens),0),
 		       COALESCE(SUM(output_tokens),0),
 		       COALESCE(SUM(total_tokens),0),
-		       COALESCE(SUM(request_count),0)
+		       COALESCE(SUM(request_count),0),
+		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN billable_amount IS NOT NULL THEN request_count ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN request_count ELSE 0 END),0)
 		FROM usage_fact_dwd
 		WHERE %s
 		  AND event_time >= ? AND event_time < ?%s%s
@@ -451,7 +467,8 @@ func (r *sqlRepo) PersonalByModelTotal(ctx context.Context, p QueryParams) ([]Mo
 	var result []ModelTotal
 	for rows.Next() {
 		var mt ModelTotal
-		if err := rows.Scan(&mt.Model, &mt.InputTokens, &mt.CachedInputTokens, &mt.CacheCreationInputTokens, &mt.OutputTokens, &mt.TotalTokens, &mt.RequestCount); err != nil {
+		if err := rows.Scan(&mt.Model, &mt.InputTokens, &mt.CachedInputTokens, &mt.CacheCreationInputTokens, &mt.OutputTokens, &mt.TotalTokens, &mt.RequestCount,
+			&mt.CostUSD, &mt.PricedRequestCount, &mt.UnpricedRequestCount); err != nil {
 			return nil, err
 		}
 		result = append(result, mt)
@@ -463,7 +480,7 @@ func (r *sqlRepo) PersonalByModelTotal(ctx context.Context, p QueryParams) ([]Mo
 // the top N (default 10) buckets sorted by total_tokens DESC. Powers
 // the /user/performance "Top N sessions" chart.
 //
-// Aggregation: COALESCE(session_id, '') so NULL and empty group into a
+// Aggregation: COALESCE(session_id, ”) so NULL and empty group into a
 // single "no session" bucket — the frontend renders this with a clear
 // label so users see how much traffic lacks the session dimension.
 //
@@ -635,7 +652,10 @@ func (r *sqlRepo) MasterUserRanking(ctx context.Context, p QueryParams) ([]UserR
 func (r *sqlRepo) MasterByProtocolTotal(ctx context.Context, p QueryParams) ([]ProtocolTotal, error) {
 	startMs, endMs := p.LocalWindowMs()
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0),
+		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN billable_amount IS NOT NULL THEN request_count ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN request_count ELSE 0 END),0)
 		FROM usage_fact_dwd
 		WHERE org_id = ?
 		  AND event_time >= ? AND event_time < ?
@@ -654,7 +674,8 @@ func (r *sqlRepo) MasterTimeline(ctx context.Context, p QueryParams) ([]Timeline
 	startMs, endMs := p.LocalWindowMs()
 	dateExpr := r.db.DateOfLocal("event_time", p.TZOffsetMs, p.TZ)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT %s AS d, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT %s AS d, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0),
+		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0)
 		FROM usage_fact_dwd
 		WHERE org_id = ?
 		  AND event_time >= ? AND event_time < ?
@@ -675,7 +696,7 @@ func scanTimeline(rows *sql.Rows) ([]TimelinePoint, error) {
 	var result []TimelinePoint
 	for rows.Next() {
 		var tp TimelinePoint
-		if err := rows.Scan(&tp.Date, &tp.TotalTokens, &tp.RequestCount); err != nil {
+		if err := rows.Scan(&tp.Date, &tp.TotalTokens, &tp.RequestCount, &tp.CostUSD); err != nil {
 			return nil, err
 		}
 		result = append(result, tp)
@@ -687,7 +708,8 @@ func scanProtocolTotal(rows *sql.Rows) ([]ProtocolTotal, error) {
 	var result []ProtocolTotal
 	for rows.Next() {
 		var pt ProtocolTotal
-		if err := rows.Scan(&pt.ProtocolType, &pt.TotalTokens, &pt.RequestCount); err != nil {
+		if err := rows.Scan(&pt.ProtocolType, &pt.TotalTokens, &pt.RequestCount,
+			&pt.CostUSD, &pt.PricedRequestCount, &pt.UnpricedRequestCount); err != nil {
 			return nil, err
 		}
 		result = append(result, pt)

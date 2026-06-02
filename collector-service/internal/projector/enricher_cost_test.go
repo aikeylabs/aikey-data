@@ -29,15 +29,32 @@ func odsForCost(model, provider string, in, out, cacheRead, cacheCreation int64)
 	}
 }
 
-// The enricher computes cost from the real embedded resolver and stamps the full
+// fixedTestResolver builds a Resolver from a FIXED in-memory price table so the
+// enricher cost tests assert against known rates, independent of the embedded
+// LiteLLM file (which evolves on every upstream price sync — Stage 2.6 decision
+// 2A). The single fixture model carries the canonical claude-3-5-sonnet rates
+// the cost assertions below are computed from.
+func fixedTestResolver(t *testing.T) *pricing.Resolver {
+	t.Helper()
+	litellm := []byte(`{"claude-3-5-sonnet-20241022":{` +
+		`"input_cost_per_token":0.000003,` +
+		`"output_cost_per_token":0.000015,` +
+		`"cache_creation_input_token_cost":0.00000375,` +
+		`"cache_read_input_token_cost":0.0000003,` +
+		`"litellm_provider":"anthropic"}}`)
+	empty := []byte(`{"schema_version":1,"entries":[]}`)
+	r, err := pricing.LoadFrom(litellm, empty, empty)
+	if err != nil {
+		t.Fatalf("LoadFrom fixture: %v", err)
+	}
+	return r
+}
+
+// The enricher computes cost from the fixed test resolver and stamps the full
 // audit trail. claude-3-5-sonnet (anthropic, input already uncached):
 // 100*3e-6 + 20*3.75e-6 + 50*3e-7 + 200*1.5e-5 = 0.00339000.
 func TestEnrich_ComputesCostAndAuditTrail(t *testing.T) {
-	resolver, err := pricing.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	e := NewEnricher(&mockControlReader{}, resolver)
+	e := NewEnricher(&mockControlReader{}, fixedTestResolver(t))
 
 	fact, err := e.Enrich(context.Background(),
 		odsForCost("claude-3-5-sonnet-20241022", "anthropic", 100, 200, 50, 20))
@@ -68,11 +85,7 @@ func TestEnrich_ComputesCostAndAuditTrail(t *testing.T) {
 // Unknown model: cost stays NULL (never zero), but pricing_snapshot_id is still
 // recorded so the row pins which global price state had no entry.
 func TestEnrich_UnknownModelLeavesNullCost(t *testing.T) {
-	resolver, err := pricing.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	e := NewEnricher(&mockControlReader{}, resolver)
+	e := NewEnricher(&mockControlReader{}, fixedTestResolver(t))
 
 	fact, err := e.Enrich(context.Background(),
 		odsForCost("totally-unknown-model-x", "anthropic", 100, 50, 0, 0))
@@ -98,11 +111,7 @@ func (m *mockUnpricedSink) Enqueue(provider, model string) {
 
 // Unknown model enqueues the (provider, model) for the pending-pricing queue.
 func TestEnrich_UnknownModelEnqueuesUnpriced(t *testing.T) {
-	resolver, err := pricing.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	e := NewEnricher(&mockControlReader{}, resolver)
+	e := NewEnricher(&mockControlReader{}, fixedTestResolver(t))
 	sink := &mockUnpricedSink{}
 	e.SetUnpricedSink(sink)
 
@@ -117,11 +126,7 @@ func TestEnrich_UnknownModelEnqueuesUnpriced(t *testing.T) {
 
 // A priced (known) model must NOT enqueue anything.
 func TestEnrich_KnownModelNoEnqueue(t *testing.T) {
-	resolver, err := pricing.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	e := NewEnricher(&mockControlReader{}, resolver)
+	e := NewEnricher(&mockControlReader{}, fixedTestResolver(t))
 	sink := &mockUnpricedSink{}
 	e.SetUnpricedSink(sink)
 

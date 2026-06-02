@@ -77,4 +77,22 @@ type Repository interface {
 	// MasterTimeline returns daily total_tokens for the entire org.
 	// Filters: billing_scope IN ('org_only','org_and_user')
 	MasterTimeline(ctx context.Context, p QueryParams) ([]TimelinePoint, error)
+
+	// --- Admin (cost-pricing Stage 3) ---
+
+	// ListUnpricedModels returns rows from the pending-pricing queue
+	// (unpriced_models), sorted by event_count DESC. status "" or "all"
+	// returns every row; otherwise it filters to that status
+	// (pending / acknowledged / fixed).
+	ListUnpricedModels(ctx context.Context, status string) ([]UnpricedModel, error)
+
+	// UpdateUnpricedModelStatus sets the status of one (provider, model)
+	// row. Returns ErrNotFound when no such row exists so the handler can
+	// reply 404 rather than a silent 200 on a typo'd model name.
+	UpdateUnpricedModelStatus(ctx context.Context, provider, model, status string) error
+
+	// GetEventAudit returns the full cost-audit trail for one event,
+	// JOINing usage_fact_dwd with pricing_snapshots. Returns ErrNotFound
+	// when the event_id is unknown.
+	GetEventAudit(ctx context.Context, eventID string) (*EventAudit, error)
 }

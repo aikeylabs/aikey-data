@@ -12,7 +12,7 @@ import (
 //
 // db is used only for the /internal/canary-check liveness endpoint. Nil is
 // tolerated for tests that don't exercise that path.
-func NewRouter(h *UsageHandler, db *sql.DB, serviceToken string) http.Handler {
+func NewRouter(h *UsageHandler, admin *AdminHandler, db *sql.DB, serviceToken string) http.Handler {
 	mux := http.NewServeMux()
 
 	// Health check
@@ -61,6 +61,16 @@ func NewRouter(h *UsageHandler, db *sql.DB, serviceToken string) http.Handler {
 	authed.HandleFunc("GET /v1/usage/master/ranking", h.MasterUserRanking)
 	authed.HandleFunc("GET /v1/usage/master/by-protocol/total", h.MasterByProtocolTotal)
 	authed.HandleFunc("GET /v1/usage/master/timeline", h.MasterTimeline)
+
+	// Admin (cost-pricing Stage 3) — pending-pricing queue + per-event
+	// audit. Same service-token auth as above; user admin-role gating is
+	// enforced upstream in aikey-control (Stage 6). admin may be nil in
+	// tests that don't exercise these routes.
+	if admin != nil {
+		authed.HandleFunc("GET /v1/admin/unpriced-models", admin.ListUnpricedModels)
+		authed.HandleFunc("POST /v1/admin/unpriced-models/{provider}/{model}", admin.UpdateUnpricedModelStatus)
+		authed.HandleFunc("GET /v1/admin/events/{event_id}/audit", admin.GetEventAudit)
+	}
 
 	mux.Handle("/v1/", shared.ServiceTokenAuth(serviceToken, authed))
 
