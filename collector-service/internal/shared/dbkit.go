@@ -80,6 +80,28 @@ func (d *DB) NowMillis() string {
 	return "NOW()"
 }
 
+// NowEpochMillis returns a SQL expression that evaluates to the current
+// moment as int64 epoch-millis on BOTH dialects (SQLite INTEGER, Postgres
+// BIGINT). Use this for plain-bigint timestamp columns — e.g. the quota_*
+// tables (quota_subject / quota_counter), whose updated_at/created_at are
+// declared BIGINT (PG) / INTEGER (SQLite) in v1_0_0_rc7_quota.go, NOT the
+// β-hybrid TIMESTAMPTZ shape.
+//
+// Why a separate helper from NowMillis(): NowMillis() returns NOW()
+// (TIMESTAMPTZ) on Postgres because it targets β-hybrid columns. Feeding
+// that into a BIGINT column raises `column "updated_at" is of type bigint
+// but expression is of type timestamp with time zone` — the materializer
+// UPSERT silently failed on Postgres while SQLite (loose typing) passed.
+// See workflow/CI/bugfix/2026-06-03-team-usage-refresh-contract-mismatch.md.
+func (d *DB) NowEpochMillis() string {
+	if d.Dialect == DialectSQLite {
+		return "(CAST(strftime('%s','now') AS INTEGER) * 1000)"
+	}
+	// Postgres: EXTRACT(EPOCH ...) is double seconds; ×1000 → millis; cast
+	// to bigint to match the column type (mirrors AgeMillis's PG branch).
+	return "(EXTRACT(EPOCH FROM NOW()) * 1000)::bigint"
+}
+
 // DateOf returns a SQL expression that projects a timestamp column
 // as a DATE / YYYY-MM-DD string. Used for grouping / filtering that
 // needs the calendar day of an instant.

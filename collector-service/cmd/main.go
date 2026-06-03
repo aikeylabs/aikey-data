@@ -19,6 +19,7 @@ import (
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/integrity"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/pricing"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/projector"
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/quota"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
 	"github.com/AiKeyLabs/pkg/aikeycompat"
 	"github.com/AiKeyLabs/pkg/buildinfo"
@@ -111,6 +112,9 @@ func main() {
 	// Stage D1: the ingest repo doubles as the known-loss LossPromoter so the
 	// detection tick promotes stale gaps to the ledger + advances contiguous.
 	projWorker.SetLossPromoter(odsRepo)
+	// Phase 2 Stage 5: materialize quota_counter + record threshold crossings as
+	// facts project (no-op when no quota_subject rows; best-effort, panic-guarded).
+	projWorker.SetQuotaMaterializer(quota.NewMaterializer(quota.NewStorage(ddb), 0))
 
 	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, gapScanner, odsRepo, cfg.JWTSecret, cfg.ServiceToken)
 	if cfg.ServiceToken != "" {

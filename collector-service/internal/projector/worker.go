@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/integrity"
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/quota"
 )
 
 const (
@@ -56,6 +58,12 @@ type Worker struct {
 	// seqs and re-advances its watermark so contiguous converges. nil → no
 	// promotion (detection still WARN-logs). Satisfied by the ingest repository.
 	lossPromoter LossPromoter
+
+	// quotaMat (optional, Phase 2 Stage 5) materializes quota_counter + records
+	// crossed thresholds as each new fact projects. nil → no quota work (Personal
+	// / quota-less). Best-effort + panic-guarded inside, so it can never break
+	// projection. Wired via SetQuotaMaterializer at both edition entrypoints.
+	quotaMat *quota.Materializer
 }
 
 // LossPromoter is the write-side the projector needs to record known losses —
@@ -102,6 +110,12 @@ func (w *Worker) SetGapScanner(s *integrity.Scanner) {
 // only WARN-logs, never promotes (keeps existing tests/editions unaffected).
 func (w *Worker) SetLossPromoter(p LossPromoter) {
 	w.lossPromoter = p
+}
+
+// SetQuotaMaterializer enables Phase 2 Stage 5 quota materialization on the
+// projection path. nil → no quota work (the default; Personal / quota-less).
+func (w *Worker) SetQuotaMaterializer(m *quota.Materializer) {
+	w.quotaMat = m
 }
 
 // Run starts the projection loop. Blocks until ctx is cancelled. When a gap
@@ -304,6 +318,17 @@ func (w *Worker) projectOne(ctx context.Context, rec *ODSRecord) error {
 		slog.Debug("dwd duplicate, marking projected", "event_id", rec.EventID)
 	}
 
+	// Phase 2 Stage 5: materialize quota_counter + record threshold crossings,
+	// ONLY for genuinely-new facts (inserted) so re-projection never double-counts
+	// (tied to the DWD insert's org_id+event_id idempotency). Best-effort +
+	// panic-guarded inside — never blocks projection.
+	if inserted && w.quotaMat != nil {
+		tokenDelta := float64(fact.InputTokens + fact.OutputTokens + fact.CachedInputTokens +
+			fact.CacheCreationInputTokens + fact.ReasoningTokens)
+		w.quotaMat.OnFact(ctx, fact.SeatID, tokenDelta, billableFloat(fact.BillableAmount),
+			fact.BillingPeriod, fact.EventTime.Time())
+	}
+
 	if err := w.odsReader.MarkProjected(ctx, rec.OdsID); err != nil {
 		slog.Error("mark projected failed", "ods_id", rec.OdsID, "error", err)
 		return err
@@ -311,6 +336,19 @@ func (w *Worker) projectOne(ctx context.Context, rec *ODSRecord) error {
 
 	w.metrics.Projected.Add(1)
 	return nil
+}
+
+// billableFloat parses the DWD fact's billable_amount (a *string decimal, nil
+// when unpriced) into a float for $ quota accumulation; unparseable/nil → 0.
+func billableFloat(s *string) float64 {
+	if s == nil || *s == "" {
+		return 0
+	}
+	v, err := strconv.ParseFloat(*s, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 func (w *Worker) handleError(ctx context.Context, rec *ODSRecord, errCode, errMsg string) error {
