@@ -269,16 +269,29 @@ func (e *Enricher) applyCost(fact *DWDFact) {
 	}
 }
 
-// inputIncludesCache reports whether a provider's reported input/prompt token
-// count INCLUDES cached tokens (OpenAI-style, must subtract to get uncached) vs
-// already being the uncached portion (Anthropic-style). See pricing.ComputeCost.
+// inputIncludesCache reports whether the proxy-reported Input token count INCLUDES
+// the cache_read + cache_creation buckets — i.e. whether ComputeCost must subtract
+// them to get the uncached portion billed at the input rate.
+//
+// In THIS system it is ALWAYS true: every proxy adapter reports the TOTAL input.
+//   - aikey-proxy anthropic.go: br.InputTokens = usage.totalInput()
+//     = input + cache_creation + cache_read.
+//   - aikey-proxy openai.go: br.InputTokens = prompt_tokens (OpenAI/compatible
+//     providers — kimi, moonshot, … — fold cached tokens into prompt_tokens).
+// Verified on real usage_fact_dwd: cache_read+cache_creation <= input_tokens and
+// total_tokens == input_tokens + output_tokens (cache is a SUBSET of input).
+//
+// 2026-06-04 fix B: anthropic (and every non-openai provider) previously returned
+// false — assuming Anthropic's API-native input, which IS uncached. But the proxy
+// adapter pre-sums cache into br.InputTokens, so false billed the cache buckets at
+// BOTH the input rate (via the inflated input) and their own rate → ~10x over-charge
+// on cache-heavy requests (~80% of billed in the test data). Since both adapters
+// report total, the only correct answer is true for all. No-cache providers are
+// unaffected (subtracting 0). If a future adapter reports a genuinely uncached
+// Input, add a false case for its provider_code here.
+// See bugfix/2026-06-04-quota-token-metric-cache-semantics.md.
 func inputIncludesCache(provider string) bool {
-	switch provider {
-	case "openai", "azure", "azure_ai":
-		return true
-	default:
-		return false
-	}
+	return true
 }
 
 func (e *Enricher) applyControlEvent(fact *DWDFact, rec *ODSRecord, ce *ControlEvent) {

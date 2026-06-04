@@ -16,6 +16,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
@@ -27,6 +28,10 @@ const (
 	KindGroup    = "group"
 	MetricTokens = "tokens"
 	MetricUSD    = "usd"
+	// ActionHardBlock is the threshold action that, when newly crossed, triggers
+	// the P5 push (bump the affected seats' sync_version so the proxy re-pulls the
+	// over-limit baseline promptly). "warn" crossings don't push (they don't block).
+	ActionHardBlock = "hard_block"
 )
 
 // Subject is the config root as read from quota_subject (only the fields the
@@ -145,9 +150,9 @@ func (s *Storage) RecomputeFromDWD(ctx context.Context, subjectID, metric, perio
 }
 
 // sumFromDWD returns Σ(metric) over usage_fact_dwd for the given seats in the
-// period. Shared by RecomputeFromDWD (materialize) and UsdUsedFromDWD (P4 local
-// source read). Tolerant: a missing usage_fact_dwd (pre-Phase-2 / Personal
-// without the data component) yields 0, not an error.
+// period (used by RecomputeFromDWD to materialize the counter). Tolerant: a
+// missing usage_fact_dwd (pre-Phase-2 / Personal without the data component)
+// yields 0, not an error.
 func (s *Storage) sumFromDWD(ctx context.Context, metric, periodKey string, seatIDs []string) (float64, error) {
 	if len(seatIDs) == 0 {
 		return 0, nil
@@ -177,14 +182,6 @@ func (s *Storage) sumFromDWD(ctx context.Context, metric, periodKey string, seat
 		return 0, fmt.Errorf("quota: sum dwd %s/%s: %w", metric, periodKey, err)
 	}
 	return used, nil
-}
-
-// UsdUsedFromDWD returns Σ(billable_amount) over usage_fact_dwd for the given
-// seats in the period — the LOCAL usd "used" the proxy polls for offline/real-time
-// enforcement (P4 D-U3). Read-only (no quota_counter write); works even where the
-// quota tables are absent (Personal), since it only reads usage_fact_dwd.
-func (s *Storage) UsdUsedFromDWD(ctx context.Context, seatIDs []string, periodKey string) (float64, error) {
-	return s.sumFromDWD(ctx, MetricUSD, periodKey, seatIDs)
 }
 
 // dwdMetricSumExpr maps a quota metric to its usage_fact_dwd SUM expression.
@@ -231,6 +228,52 @@ func (s *Storage) MarkTriggered(ctx context.Context, subjectID, metric, periodKe
 		WHERE subject_id = ? AND metric = ? AND period_key = ?`,
 		string(b), subjectID, metric, periodKey)
 	return err
+}
+
+// BumpSyncVersionForSeats nudges each seat's account sync_version so the CLI
+// re-pulls the snapshot promptly — the P5 "push": after a hard_block crossing the
+// proxy should learn the new over-limit baseline without waiting for the periodic
+// pull. Mirrors control's snapshot.Service.BumpForSeat (seat→account→bump) but runs
+// on the collector's shared PG, consistent with the materializer already writing
+// quota_counter there (avoids a control-master module dependency).
+//
+// Best-effort + tolerant (this is a TIMELINESS signal, never a correctness
+// dependency — usd/token are already enforced from the baseline + P7 local pricing):
+//   - missing org_seats/account_sync_versions (Personal — no org schema) → skip silently;
+//   - unclaimed seat (no account_id) / no row → skip;
+//   - a real write error → WARN, continue with the other seats.
+// The bump SQL is dialect-handled by shared.DB (? rewrite + Now()); the ON CONFLICT
+// increment matches snapshot.{postgres,sqlite}.BumpSyncVersion.
+func (s *Storage) BumpSyncVersionForSeats(ctx context.Context, seatIDs []string) {
+	now := s.db.Now()
+	for _, seatID := range seatIDs {
+		if seatID == "" {
+			continue
+		}
+		var accountID string
+		err := s.db.QueryRowContext(ctx,
+			`SELECT account_id FROM org_seats WHERE seat_id = ? AND account_id IS NOT NULL AND account_id != ''`,
+			seatID).Scan(&accountID)
+		if err == sql.ErrNoRows || isMissingTable(err) {
+			continue // unclaimed seat, or Personal without org schema — expected
+		}
+		if err != nil {
+			slog.Warn("quota.sync_version.resolve_failed", "seat_id", seatID, "error", err.Error())
+			continue
+		}
+		if accountID == "" {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO account_sync_versions (account_id, sync_version, updated_at)
+			 VALUES (?, 1, `+now+`)
+			 ON CONFLICT (account_id) DO UPDATE
+			     SET sync_version = account_sync_versions.sync_version + 1,
+			         updated_at   = `+now+``,
+			accountID); err != nil {
+			slog.Warn("quota.sync_version.bump_failed", "account_id", accountID, "error", err.Error())
+		}
+	}
 }
 
 func isMissingTable(err error) bool {

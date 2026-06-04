@@ -228,3 +228,58 @@ func TestMaterializer_DualValueTokenAndUsd(t *testing.T) {
 		t.Fatalf("usd unchanged by unpriced fact: want 0.5 got %v", used)
 	}
 }
+
+// TestMaterializer_HardBlockCrossing_BumpsSyncVersion is the P5 regression guard:
+// a newly-crossed hard_block threshold bumps the seat's account sync_version (so
+// the proxy re-pulls the over-limit baseline promptly), while a warn-only crossing
+// does NOT. Uses the real master schema (global_accounts → organizations →
+// org_seats → account_sync_versions) so the seat→account resolve + bump UPSERT run
+// against production DDL.
+func TestMaterializer_HardBlockCrossing_BumpsSyncVersion(t *testing.T) {
+	db := freshDB(t)
+	ctx := context.Background()
+	mustExecQ := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, q, args...); err != nil {
+			t.Fatalf("setup exec failed (%s): %v", q, err)
+		}
+	}
+	// FK chains for two seats: acc-1 (hard_block) + acc-2 (warn-only).
+	mustExecQ(`INSERT INTO global_accounts (account_id, email) VALUES (?, ?)`, "acc-1", "a1@x.z")
+	mustExecQ(`INSERT INTO global_accounts (account_id, email) VALUES (?, ?)`, "acc-2", "a2@x.z")
+	mustExecQ(`INSERT INTO organizations (org_id, name) VALUES (?, ?)`, "org-1", "Org")
+	mustExecQ(`INSERT INTO org_seats (seat_id, org_id, account_id, invited_email, seat_status) VALUES (?,?,?,?,?)`,
+		"seat-hb", "org-1", "acc-1", "a1@x.z", "claimed")
+	mustExecQ(`INSERT INTO org_seats (seat_id, org_id, account_id, invited_email, seat_status) VALUES (?,?,?,?,?)`,
+		"seat-warn", "org-1", "acc-2", "a2@x.z", "claimed")
+
+	insertSubject(t, db, "seat-hb", "seat", "",
+		`[{"metric":"usd","period":"monthly","limit_amount":0.001,"thresholds":[{"pct":100,"action":"hard_block"}]}]`)
+	insertSubject(t, db, "seat-warn", "seat", "",
+		`[{"metric":"usd","period":"monthly","limit_amount":0.001,"thresholds":[{"pct":80,"action":"warn"}]}]`)
+
+	m := NewMaterializer(NewStorage(db), time.Hour)
+	now := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
+
+	// hard_block seat crosses (billable 0.5 >> limit 0.001) → must bump acc-1.
+	insertDWDFact(t, db, "hb1", "seat-hb", "2026-06", 100, 0.5)
+	m.OnFact(ctx, "seat-hb", 100, 0.5, "2026-06", now)
+	var v int64
+	if err := db.QueryRowContext(ctx, `SELECT sync_version FROM account_sync_versions WHERE account_id=?`, "acc-1").Scan(&v); err != nil {
+		t.Fatalf("hard_block crossing must bump acc-1 sync_version: %v", err)
+	}
+	if v < 1 {
+		t.Errorf("acc-1 sync_version want >=1 after hard_block, got %d", v)
+	}
+
+	// warn-only seat crosses the 80% warn (0.5 >= 0.0008) but action=warn → NO bump.
+	insertDWDFact(t, db, "wn1", "seat-warn", "2026-06", 100, 0.5)
+	m.OnFact(ctx, "seat-warn", 100, 0.5, "2026-06", now)
+	var cnt int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM account_sync_versions WHERE account_id=?`, "acc-2").Scan(&cnt); err != nil {
+		t.Fatalf("count acc-2: %v", err)
+	}
+	if cnt != 0 {
+		t.Errorf("warn-only crossing must NOT bump (acc-2 rows want 0, got %d)", cnt)
+	}
+}

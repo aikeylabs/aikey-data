@@ -3,6 +3,7 @@ package projector
 import (
 	"context"
 	"database/sql"
+	"math"
 	"testing"
 	"time"
 
@@ -51,8 +52,11 @@ func fixedTestResolver(t *testing.T) *pricing.Resolver {
 }
 
 // The enricher computes cost from the fixed test resolver and stamps the full
-// audit trail. claude-3-5-sonnet (anthropic, input already uncached):
-// 100*3e-6 + 20*3.75e-6 + 50*3e-7 + 200*1.5e-5 = 0.00339000.
+// audit trail. The proxy reports the TOTAL input (input_tokens=100 INCLUDES the
+// 50 cache_read + 20 cache_creation), so the billable input is the uncached
+// portion 100−50−20=30 (2026-06-04 fix B — cache must not also be billed at the
+// input rate). claude-3-5-sonnet (anthropic):
+// 30*3e-6 + 20*3.75e-6 + 50*3e-7 + 200*1.5e-5 = 0.00318000.
 func TestEnrich_ComputesCostAndAuditTrail(t *testing.T) {
 	e := NewEnricher(&mockControlReader{}, fixedTestResolver(t))
 
@@ -65,7 +69,7 @@ func TestEnrich_ComputesCostAndAuditTrail(t *testing.T) {
 	if fact.BillableAmount == nil {
 		t.Fatal("billable_amount must be computed, got nil")
 	}
-	if want := "0.00339000"; *fact.BillableAmount != want {
+	if want := "0.00318000"; *fact.BillableAmount != want {
 		t.Errorf("cost = %s, want %s", *fact.BillableAmount, want)
 	}
 	if fact.Currency != "USD" {
@@ -153,5 +157,36 @@ func TestEnrich_NilResolverNoCostNoPanic(t *testing.T) {
 	}
 	if fact.BillingPeriod != "2026-06" {
 		t.Errorf("billing_period still derived without resolver, got %q", fact.BillingPeriod)
+	}
+}
+
+// TestInputIncludesCache_NoCacheOvercharge is the regression guard for the
+// 2026-06-04 fix B (bugfix/2026-06-04-quota-token-metric-cache-semantics.md):
+// every proxy adapter reports the TOTAL input (cache is a subset), so the
+// uncached-subtract flag must be true for ALL providers — otherwise cache is
+// billed at BOTH the input rate and the cache rate (~10x over-charge).
+func TestInputIncludesCache_NoCacheOvercharge(t *testing.T) {
+	for _, p := range []string{"anthropic", "openai", "kimi", "moonshot", "gemini", ""} {
+		if !inputIncludesCache(p) {
+			t.Errorf("inputIncludesCache(%q) must be true (proxy reports TOTAL input for all providers)", p)
+		}
+	}
+
+	// Cache-heavy anthropic request priced via the enricher's flag must charge the
+	// cache bucket at the CACHE rate, not the input rate. opus-4-8 rates: input
+	// 5e-6, cache_read 5e-7 (10x cheaper). Total input=1000 (998 cached, 2 pure).
+	up := pricing.UnitPrices{InputPerToken: 5e-6, OutputPerToken: 2.5e-5,
+		CacheReadInputPerToken: 5e-7, CacheCreationInputPerToken: 6.25e-6}
+	tk := pricing.TokenCounts{Input: 1000, CacheRead: 998}
+	got := pricing.ComputeCost(up, tk, inputIncludesCache("anthropic"))
+	want := 2*5e-6 + 998*5e-7 // pure 2 @ input + 998 @ cache_read
+	if math.Abs(got-want) > 1e-12 {
+		t.Errorf("cache-heavy anthropic cost: want %v (cache @ cache rate) got %v", want, got)
+	}
+	// the old false-flag would have over-charged (cache @ input rate too).
+	if over := pricing.ComputeCost(up, tk, false); over <= got {
+		t.Fatalf("sanity: false flag must over-charge (%v) vs correct (%v)", over, got)
+	} else if over < want*5 {
+		t.Logf("over-charge factor ~%.1fx (over=%v correct=%v)", over/want, over, want)
 	}
 }

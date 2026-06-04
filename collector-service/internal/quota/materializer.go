@@ -138,6 +138,7 @@ func (m *Materializer) applyToSubject(ctx context.Context, sub *Subject, tokenDe
 	}
 	// 2) Per bucket, check ALL its rules' thresholds against the accumulated used,
 	//    record newly crossed (dedup via triggered_thresholds).
+	hardBlockCrossed := false
 	for k, res := range results {
 		triggered := res.triggered
 		changed := false
@@ -149,6 +150,9 @@ func (m *Materializer) applyToSubject(ctx context.Context, sub *Subject, tokenDe
 				if res.used >= r.LimitAmount*float64(th.Pct)/100 && !containsInt(triggered, th.Pct) {
 					triggered = append(triggered, th.Pct)
 					changed = true
+					if th.Action == ActionHardBlock {
+						hardBlockCrossed = true
+					}
 					slog.Info("quota.threshold.crossed",
 						"subject_id", sub.SubjectID, "metric", k.metric, "period_key", res.pk,
 						"pct", th.Pct, "action", th.Action, "used", res.used, "limit", r.LimitAmount)
@@ -160,6 +164,15 @@ func (m *Materializer) applyToSubject(ctx context.Context, sub *Subject, tokenDe
 				slog.Warn("quota.threshold.mark_failed", "subject_id", sub.SubjectID, "error", err.Error())
 			}
 		}
+	}
+	// 3) P5 push (timeliness): a newly-crossed hard_block bumps the subject's seats'
+	//    sync_version so the CLI re-pulls + the proxy learns the over-limit baseline
+	//    promptly, instead of waiting for the periodic backstop pull. Best-effort —
+	//    post-D-U8 this only sharpens cross-machine propagation (P7 already enforces
+	//    the local machine in real time). Once per applyToSubject (deduped across
+	//    metrics/periods via the single flag).
+	if hardBlockCrossed {
+		m.store.BumpSyncVersionForSeats(ctx, seatIDs)
 	}
 }
 
