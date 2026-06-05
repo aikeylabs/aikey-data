@@ -98,7 +98,7 @@ type ProtocolTotal struct {
 // regex logic into SQL.
 type ModelTotal struct {
 	Model                    string `json:"model"`
-	InputTokens              int64  `json:"input_tokens"`                // total prompt input (incl. cached + creation)
+	InputTokens              int64  `json:"input_tokens"`                // 方案 A: PURE (uncached) input; total input = input + cached + creation
 	CachedInputTokens        int64  `json:"cached_input_tokens"`         // Anthropic cache_read_input_tokens
 	CacheCreationInputTokens int64  `json:"cache_creation_input_tokens"` // Anthropic cache_creation_input_tokens
 	OutputTokens             int64  `json:"output_tokens"`
@@ -201,7 +201,7 @@ type KeyTotal struct {
 	Alias                    string `json:"alias,omitempty"`             // human-readable key alias (personal/team BYOK)
 	Identity                 string `json:"identity,omitempty"`          // email / display_identity (OAuth sessions)
 	AppSlug                  string `json:"app_slug,omitempty"`          // UA-derived (OAuth) or registered (Connected App) client app slug
-	InputTokens              int64  `json:"input_tokens"`                // Anthropic: total prompt input (incl. cache_read + cache_creation)
+	InputTokens              int64  `json:"input_tokens"`                // 方案 A: PURE (uncached) input; total input = input + cache_read + cache_creation
 	CachedInputTokens        int64  `json:"cached_input_tokens"`         // = Anthropic cache_read_input_tokens (legacy column name)
 	CacheCreationInputTokens int64  `json:"cache_creation_input_tokens"` // Anthropic cache_creation_input_tokens
 	OutputTokens             int64  `json:"output_tokens"`

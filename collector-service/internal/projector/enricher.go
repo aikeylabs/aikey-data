@@ -238,8 +238,13 @@ func (e *Enricher) applyCost(fact *DWDFact) {
 	if fact.Model == "" {
 		return // no model → cannot price
 	}
+	// 方案 A: fact.InputTokens is now PURE (uncached). The long-context price tier
+	// (e.g. Anthropic >128k) keys off the TOTAL context window, so pass pure + both
+	// cache buckets — otherwise a cache-heavy request whose total exceeds 128k but
+	// whose pure input is small would wrongly get the cheaper base-tier rate.
+	totalContext := fact.InputTokens + fact.CachedInputTokens + fact.CacheCreationInputTokens
 	up, err := e.resolver.Lookup(fact.ProviderCode, fact.Model,
-		fact.EventTime.Time().UnixMilli(), fact.InputTokens, fact.OrgID)
+		fact.EventTime.Time().UnixMilli(), totalContext, fact.OrgID)
 	if err != nil {
 		// Unknown (provider, model): cost stays NULL (never zero); surface
 		// loudly AND enqueue for the "pending pricing" dashboard. The enqueue is
@@ -273,25 +278,20 @@ func (e *Enricher) applyCost(fact *DWDFact) {
 // the cache_read + cache_creation buckets — i.e. whether ComputeCost must subtract
 // them to get the uncached portion billed at the input rate.
 //
-// In THIS system it is ALWAYS true: every proxy adapter reports the TOTAL input.
-//   - aikey-proxy anthropic.go: br.InputTokens = usage.totalInput()
-//     = input + cache_creation + cache_read.
-//   - aikey-proxy openai.go: br.InputTokens = prompt_tokens (OpenAI/compatible
-//     providers — kimi, moonshot, … — fold cached tokens into prompt_tokens).
-// Verified on real usage_fact_dwd: cache_read+cache_creation <= input_tokens and
-// total_tokens == input_tokens + output_tokens (cache is a SUBSET of input).
+// 方案 A (2026-06-04): always FALSE. The proxy adapters now report PURE (uncached)
+// input — cache lives in its own DWD columns (cached_input_tokens /
+// cache_creation_input_tokens), and the long-context tier uses the reconstructed
+// total (enricher.go totalContext). So ComputeCost must NOT subtract again.
 //
-// 2026-06-04 fix B: anthropic (and every non-openai provider) previously returned
-// false — assuming Anthropic's API-native input, which IS uncached. But the proxy
-// adapter pre-sums cache into br.InputTokens, so false billed the cache buckets at
-// BOTH the input rate (via the inflated input) and their own rate → ~10x over-charge
-// on cache-heavy requests (~80% of billed in the test data). Since both adapters
-// report total, the only correct answer is true for all. No-cache providers are
-// unaffected (subtracting 0). If a future adapter reports a genuinely uncached
-// Input, add a false case for its provider_code here.
-// See bugfix/2026-06-04-quota-token-metric-cache-semantics.md.
+// History: fix B briefly returned true to compensate for the adapter pre-summing
+// cache into the reported input (the cache over-charge stopgap). 方案 A moved that
+// subtraction to the source (the adapter reports pure), so the collector reverts to
+// false — the value cost.go's `false` branch documents as "Input already uncached".
+// REQUIRES the pure-input proxy build to be deployed first (see Phase 5 deploy
+// order). See roadmap20260320/技术实现/update/20260604-token-input-纯输入语义治本-方案A.md
+// and bugfix/2026-06-04-quota-token-metric-cache-semantics.md.
 func inputIncludesCache(provider string) bool {
-	return true
+	return false
 }
 
 func (e *Enricher) applyControlEvent(fact *DWDFact, rec *ODSRecord, ce *ControlEvent) {

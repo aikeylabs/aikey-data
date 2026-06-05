@@ -186,6 +186,12 @@ func (s *Storage) sumFromDWD(ctx context.Context, metric, periodKey string, seat
 
 // dwdMetricSumExpr maps a quota metric to its usage_fact_dwd SUM expression.
 // Hardcoded per metric (never interpolate caller input into SQL).
+//
+// 方案 A (2026-06-04): input_tokens is now the PURE (uncached) input, so the token
+// SUM (input + output + cached + cache_creation + reasoning) is the TRUE token
+// count — no cache double-count. (Pre-方案-A input_tokens was the total incl. cache,
+// so this same sum double-counted the cache buckets, consistently on both proxy and
+// server but inflated.) See update/20260604-token-input-纯输入语义治本-方案A.md.
 func dwdMetricSumExpr(metric string) (string, bool) {
 	switch metric {
 	case MetricTokens:

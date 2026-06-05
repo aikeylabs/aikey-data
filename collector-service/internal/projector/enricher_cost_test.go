@@ -52,11 +52,10 @@ func fixedTestResolver(t *testing.T) *pricing.Resolver {
 }
 
 // The enricher computes cost from the fixed test resolver and stamps the full
-// audit trail. The proxy reports the TOTAL input (input_tokens=100 INCLUDES the
-// 50 cache_read + 20 cache_creation), so the billable input is the uncached
-// portion 100−50−20=30 (2026-06-04 fix B — cache must not also be billed at the
-// input rate). claude-3-5-sonnet (anthropic):
-// 30*3e-6 + 20*3.75e-6 + 50*3e-7 + 200*1.5e-5 = 0.00318000.
+// audit trail. 方案 A: input_tokens=100 is the PURE (uncached) input; the 50
+// cache_read + 20 cache_creation are SEPARATE, billed at their own rates
+// (inputIncludesCache=false → no subtraction). claude-3-5-sonnet (anthropic):
+// 100*3e-6 + 20*3.75e-6 + 50*3e-7 + 200*1.5e-5 = 0.00339000.
 func TestEnrich_ComputesCostAndAuditTrail(t *testing.T) {
 	e := NewEnricher(&mockControlReader{}, fixedTestResolver(t))
 
@@ -69,7 +68,7 @@ func TestEnrich_ComputesCostAndAuditTrail(t *testing.T) {
 	if fact.BillableAmount == nil {
 		t.Fatal("billable_amount must be computed, got nil")
 	}
-	if want := "0.00318000"; *fact.BillableAmount != want {
+	if want := "0.00339000"; *fact.BillableAmount != want {
 		t.Errorf("cost = %s, want %s", *fact.BillableAmount, want)
 	}
 	if fact.Currency != "USD" {
@@ -160,33 +159,70 @@ func TestEnrich_NilResolverNoCostNoPanic(t *testing.T) {
 	}
 }
 
-// TestInputIncludesCache_NoCacheOvercharge is the regression guard for the
-// 2026-06-04 fix B (bugfix/2026-06-04-quota-token-metric-cache-semantics.md):
-// every proxy adapter reports the TOTAL input (cache is a subset), so the
-// uncached-subtract flag must be true for ALL providers — otherwise cache is
-// billed at BOTH the input rate and the cache rate (~10x over-charge).
-func TestInputIncludesCache_NoCacheOvercharge(t *testing.T) {
+// TestInputIncludesCache_PureInputNoSubtract is the 方案 A regression guard:
+// the proxy adapters now report PURE (uncached) input, so the collector flag is
+// FALSE for ALL providers (no subtraction) and cache is billed only at its own
+// rate via the separate buckets. Passing the TOTAL with this flag would over-charge
+// — which is exactly why 方案 A moved the split to the source.
+func TestInputIncludesCache_PureInputNoSubtract(t *testing.T) {
 	for _, p := range []string{"anthropic", "openai", "kimi", "moonshot", "gemini", ""} {
-		if !inputIncludesCache(p) {
-			t.Errorf("inputIncludesCache(%q) must be true (proxy reports TOTAL input for all providers)", p)
+		if inputIncludesCache(p) {
+			t.Errorf("inputIncludesCache(%q) must be false (proxy reports PURE input post-方案-A)", p)
 		}
 	}
 
-	// Cache-heavy anthropic request priced via the enricher's flag must charge the
-	// cache bucket at the CACHE rate, not the input rate. opus-4-8 rates: input
-	// 5e-6, cache_read 5e-7 (10x cheaper). Total input=1000 (998 cached, 2 pure).
+	// opus-4-8 rates: input 5e-6, cache_read 5e-7 (10x cheaper). Cache-heavy request:
+	// pure input=2, cache_read=998. With pure input + flag=false (no subtract), the
+	// cost charges 2 at input and 998 at cache_read.
 	up := pricing.UnitPrices{InputPerToken: 5e-6, OutputPerToken: 2.5e-5,
 		CacheReadInputPerToken: 5e-7, CacheCreationInputPerToken: 6.25e-6}
-	tk := pricing.TokenCounts{Input: 1000, CacheRead: 998}
-	got := pricing.ComputeCost(up, tk, inputIncludesCache("anthropic"))
+	pure := pricing.TokenCounts{Input: 2, CacheRead: 998}
+	got := pricing.ComputeCost(up, pure, inputIncludesCache("anthropic"))
 	want := 2*5e-6 + 998*5e-7 // pure 2 @ input + 998 @ cache_read
 	if math.Abs(got-want) > 1e-12 {
 		t.Errorf("cache-heavy anthropic cost: want %v (cache @ cache rate) got %v", want, got)
 	}
-	// the old false-flag would have over-charged (cache @ input rate too).
-	if over := pricing.ComputeCost(up, tk, false); over <= got {
-		t.Fatalf("sanity: false flag must over-charge (%v) vs correct (%v)", over, got)
-	} else if over < want*5 {
-		t.Logf("over-charge factor ~%.1fx (over=%v correct=%v)", over/want, over, want)
+	// sanity: had the adapter still sent the TOTAL (1000) with this false flag (the
+	// pre-方案-A bug shape), it would over-charge — 方案 A's pure input avoids it.
+	totalShape := pricing.TokenCounts{Input: 1000, CacheRead: 998}
+	if over := pricing.ComputeCost(up, totalShape, false); over <= got {
+		t.Fatalf("sanity: total-input shape must over-charge (%v) vs correct (%v)", over, got)
+	} else if over >= want*5 {
+		t.Logf("over-charge factor ~%.1fx if total were sent (over=%v correct=%v)", over/want, over, want)
+	}
+}
+
+// TestEnrich_LongContextTier_UsesTotalContext is the 方案 A guard for the 128k
+// tier fix: the long-context price tier keys off TOTAL context (pure + cache), not
+// the (now pure) input_tokens alone. A request with small pure input but large
+// cache that crosses 128k must get the above-128k input rate — else cache-heavy
+// long-context requests are under-charged.
+func TestEnrich_LongContextTier_UsesTotalContext(t *testing.T) {
+	litellm := []byte(`{"tiered-claude":{` +
+		`"input_cost_per_token":0.000003,` +
+		`"input_cost_per_token_above_128k_tokens":0.000006,` +
+		`"output_cost_per_token":0.000015,` +
+		`"cache_read_input_token_cost":0.0000003,` +
+		`"litellm_provider":"anthropic"}}`)
+	empty := []byte(`{"schema_version":1,"entries":[]}`)
+	r, err := pricing.LoadFrom(litellm, empty, empty)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	e := NewEnricher(&mockControlReader{}, r)
+
+	// pure input=100 (<128k), cache_read=200000 → total context 200100 (>128k).
+	fact, err := e.Enrich(context.Background(),
+		odsForCost("tiered-claude", "anthropic", 100, 0, 200000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fact.BillableAmount == nil {
+		t.Fatal("billable_amount nil")
+	}
+	// above-128k tier: pure 100 @ 6e-6 + cache 200000 @ 3e-7 = 0.0006 + 0.06 = 0.06060000.
+	// (bug — tier keyed off pure input 100<128k — would give base 100@3e-6 = 0.06030000.)
+	if want := "0.06060000"; *fact.BillableAmount != want {
+		t.Errorf("long-context tier must key off TOTAL context: want %s, got %s", want, *fact.BillableAmount)
 	}
 }
