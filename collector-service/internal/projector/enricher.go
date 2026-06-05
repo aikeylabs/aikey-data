@@ -59,7 +59,15 @@ func isVaultOriginVK(vk string) bool {
 	return false
 }
 
-const projectorVersion = "0.1.0"
+// projectorVersion stamps each DWD row with the projection logic that produced
+// it. 方案 A (2026-06-04) bumped 0.1.0 → 0.2.0 because the projection semantics
+// changed: input_tokens is now the PURE (uncached) input (the proxy reports pure;
+// inputIncludesCache=false; 128k tier keys off reconstructed total). This version
+// is also the OLD/NEW marker for the one-time reproject-with-conversion migration:
+// rows at "0.1.0" carry the old TOTAL-input semantics and must be converted
+// (input -= cache) + re-priced; rows at "0.2.0" are already pure. See
+// roadmap20260320/技术实现/update/20260604-token-input-纯输入语义治本-方案A.md.
+const projectorVersion = "0.2.0"
 
 // Enricher transforms an ODS record into a DWD fact by looking up control events
 // and computing cost from the pricing resolver.

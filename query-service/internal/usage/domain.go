@@ -34,9 +34,10 @@ type TimelinePoint struct {
 // chart that mapped UTC hour 4 onto the user's local hour slot,
 // producing a 4 AM peak for a local-noon request).
 type HourlyPoint struct {
-	Hour         int   `json:"hour"` // 0..23 in the caller's local tz
-	TotalTokens  int64 `json:"total_tokens"`
-	RequestCount int64 `json:"request_count"`
+	Hour         int     `json:"hour"` // 0..23 in the caller's local tz
+	TotalTokens  int64   `json:"total_tokens"`
+	RequestCount int64   `json:"request_count"`
+	CostUSD      float64 `json:"cost_usd"` // USD billable summed for the hour
 }
 
 // ProtocolTimelinePoint adds provider dimension to a timeline point.

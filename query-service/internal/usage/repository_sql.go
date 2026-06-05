@@ -137,7 +137,8 @@ func (r *sqlRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]
 	args := []interface{}{id, r.db.BindMillis(dayStart), r.db.BindMillis(dayEnd)}
 	args = appendNonNil(args, appSlugArg)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT %s AS hour, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT %s AS hour, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0),
+		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0)
 		FROM usage_fact_dwd
 		WHERE %s
 		  AND event_time >= ? AND event_time < ?%s
@@ -151,7 +152,7 @@ func (r *sqlRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]
 	var result []HourlyPoint
 	for rows.Next() {
 		var hp HourlyPoint
-		if err := rows.Scan(&hp.Hour, &hp.TotalTokens, &hp.RequestCount); err != nil {
+		if err := rows.Scan(&hp.Hour, &hp.TotalTokens, &hp.RequestCount, &hp.CostUSD); err != nil {
 			return nil, err
 		}
 		result = append(result, hp)
