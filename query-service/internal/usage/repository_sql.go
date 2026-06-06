@@ -370,7 +370,7 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT MIN(COALESCE(d.virtual_key_id, '')),
 		       COALESCE(NULLIF(MAX(d.virtual_key_alias), ''), REPLACE(MIN(COALESCE(d.virtual_key_id, '')), 'personal:', '')),
-		       COALESCE(id.identity, ''),
+		       COALESCE(MAX(id.identity), ''),
 		       COALESCE(d.app_slug, ''),
 		       COALESCE(SUM(d.input_tokens),0),
 		       COALESCE(SUM(d.cached_input_tokens),0),
@@ -617,6 +617,119 @@ func (r *sqlRepo) PersonalRecent(ctx context.Context, p QueryParams) ([]RecentRe
 			return nil, err
 		}
 		result = append(result, rr)
+	}
+	return result, rows.Err()
+}
+
+// PersonalUsageDetail returns per-request rows for the Usage Detail page. Reads
+// usage_event_ods (per-event), windowed by [StartDate, EndDate] (the caller sets
+// the last-7-days range; a single ?date= collapses start==end), with optional
+// drill-down filters. billable_amount stays NULL for unpriced rows (the "未计价"
+// filter selects exactly those).
+func (r *sqlRepo) PersonalUsageDetail(ctx context.Context, p QueryParams) ([]UsageDetailRow, error) {
+	filter, id := personalFilter(p)
+	startMs, endMs := p.LocalWindowMs()
+	args := []interface{}{id, r.db.BindMillis(startMs), r.db.BindMillis(endMs)}
+	where := filter + " AND route_source != 'canary' AND event_time >= ? AND event_time < ?"
+	if p.Unpriced {
+		where += " AND billable_amount IS NULL"
+	}
+	if p.Model != "" {
+		where += " AND model = ?"
+		args = append(args, p.Model)
+	}
+	if p.VirtualKeyID != "" {
+		where += " AND virtual_key_id = ?"
+		args = append(args, p.VirtualKeyID)
+	}
+	if p.SessionID != "" {
+		where += " AND session_id = ?"
+		args = append(args, p.SessionID)
+	}
+	if p.AppSlug != "" {
+		where += " AND app_slug = ?"
+		args = append(args, p.AppSlug)
+	}
+	if p.Protocol != "" {
+		where += " AND protocol_type = ?"
+		args = append(args, p.Protocol)
+	}
+	if p.OAuthIdentity != "" {
+		// Drill-down by OAuth email. One identity spans many virtual keys (the
+		// oauth session vk + every app run under that login), so filtering by a
+		// single vk_id can't represent the by-key card's email row — this does.
+		// oauth_identity is projected onto DWD (rc.12) so this stays on the read
+		// model (no ODS join).
+		where += " AND oauth_identity = ?"
+		args = append(args, p.OAuthIdentity)
+	}
+	limit := p.Limit
+	if limit <= 0 {
+		limit = 500
+	}
+	args = append(args, limit)
+	// Primary source is usage_fact_dwd (the curated read model): billable_amount is
+	// computed during ODS→DWD projection, so the cost column + the "未计价"
+	// (billable IS NULL) filter only exist on DWD — and reading DWD makes the
+	// unpriced rows match usage-ledger's unpriced count exactly (same source). The
+	// upstream error_message/error_code live ONLY on the raw ODS, so we LEFT JOIN it
+	// (by event_id) for the click-to-expand failure detail. The inner subquery does
+	// the DWD filter/window/limit FIRST (unqualified columns → personalFilter needs
+	// no alias + no account_id/seat_id ambiguity with ODS), then we join the (≤limit)
+	// rows to ODS. event_time is INTEGER millis on SQLite but TIMESTAMPTZ on Postgres
+	// → project via EpochMillis so the int64 Scan works on both.
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT %s AS event_time_ms, d.model, d.provider_code,
+		       d.request_status, d.http_status_code,
+		       COALESCE(o.error_code,''), COALESCE(o.error_message,''),
+		       d.input_tokens, d.cached_input_tokens,
+		       d.cache_creation_input_tokens, d.output_tokens,
+		       d.total_tokens, d.billable_amount, d.currency,
+		       d.endpoint_url, d.session_id,
+		       d.virtual_key_id, d.virtual_key_alias, d.app_slug,
+		       COALESCE(%s, 0) AS latency_ms
+		FROM (
+			SELECT event_id, event_time, COALESCE(model,'') AS model,
+			       COALESCE(provider_code,'') AS provider_code,
+			       COALESCE(request_status,'') AS request_status,
+			       COALESCE(http_status_code,0) AS http_status_code,
+			       COALESCE(input_tokens,0) AS input_tokens,
+			       COALESCE(cached_input_tokens,0) AS cached_input_tokens,
+			       COALESCE(cache_creation_input_tokens,0) AS cache_creation_input_tokens,
+			       COALESCE(output_tokens,0) AS output_tokens,
+			       COALESCE(total_tokens,0) AS total_tokens,
+			       billable_amount, COALESCE(currency,'') AS currency,
+			       COALESCE(endpoint_url,'') AS endpoint_url,
+			       COALESCE(session_id,'') AS session_id,
+			       COALESCE(virtual_key_id,'') AS virtual_key_id,
+			       COALESCE(virtual_key_alias,'') AS virtual_key_alias,
+			       COALESCE(app_slug,'') AS app_slug
+			FROM usage_fact_dwd
+			WHERE %s
+			ORDER BY event_time DESC
+			LIMIT ?
+		) d
+		LEFT JOIN usage_event_ods o ON o.event_id = d.event_id
+		ORDER BY d.event_time DESC`, r.db.EpochMillis("d.event_time"), r.db.LatencyMillis("o.started_at", "o.finished_at"), where), args...)
+	if err != nil {
+		return nil, fmt.Errorf("personal usage detail: %w", err)
+	}
+	defer rows.Close()
+	var result []UsageDetailRow
+	for rows.Next() {
+		var d UsageDetailRow
+		var billable sql.NullString
+		if err := rows.Scan(&d.EventTimeMs, &d.Model, &d.ProviderCode,
+			&d.RequestStatus, &d.HTTPStatusCode, &d.ErrorCode, &d.ErrorMessage,
+			&d.InputTokens, &d.CachedInputTokens, &d.CacheCreationInputTokens, &d.OutputTokens,
+			&d.TotalTokens, &billable, &d.Currency, &d.EndpointURL, &d.SessionID,
+			&d.VirtualKeyID, &d.VirtualKeyAlias, &d.AppSlug, &d.LatencyMs); err != nil {
+			return nil, err
+		}
+		if billable.Valid {
+			d.BillableAmount = &billable.String
+		}
+		result = append(result, d)
 	}
 	return result, rows.Err()
 }

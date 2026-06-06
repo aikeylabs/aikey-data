@@ -78,7 +78,19 @@ func main() {
 	odsReader := projector.NewSQLODSReader(ddb)
 	dwdWriter := projector.NewSQLDWDWriter(ddb)
 	checkpoint := projector.NewSQLCheckpointStore(ddb)
-	controlReader := projector.NewSQLControlEventReader(ddb)
+	// LRU + TTL cache in front of the control-event reader. Projector
+	// batches (100 events) frequently share the same virtual_key_id; the
+	// inner SQL would otherwise re-fetch the same row per event. See
+	// internal/projector/cached_control_reader.go for the design notes.
+	// Sizes/TTL chosen for "thousands of active VKs, control changes
+	// settle within a few minutes" — operators can tighten the TTL or
+	// restart the worker if they need stronger freshness.
+	rawControlReader := projector.NewSQLControlEventReader(ddb)
+	controlReader, cerr := projector.NewCachedControlEventReader(rawControlReader, 10000, 5*time.Minute)
+	if cerr != nil {
+		slog.Error("init control-event cache", "error", cerr)
+		os.Exit(1)
+	}
 	// Cost-pricing resolver (v1.0.0-rc.8): load the embedded
 	// LiteLLM/history/overrides snapshot once at startup. Fail-fast — an empty
 	// price table would silently mark every event unpriced, hiding a

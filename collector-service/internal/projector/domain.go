@@ -59,6 +59,13 @@ type ODSRecord struct {
 	VirtualKeyID               sql.NullString
 	VirtualKeyRevision         sql.NullString
 	VirtualKeyHash             sql.NullString
+	// VirtualKeyAlias — v1.0.0-rc.11. Populated at ingest from the
+	// wire `key_label` field; the enricher copies it verbatim into
+	// DWD's `virtual_key_alias` so usage-ledger renders the friendly
+	// name instead of the raw vk_id UUID (the gap that made team-key
+	// rows in the by-key chart appear as `5f9758a2-...` before this
+	// column was carried through).
+	VirtualKeyAlias            sql.NullString
 	BindingID                  sql.NullString
 	CredentialID               sql.NullString
 	CredentialRevision         sql.NullString
@@ -105,6 +112,11 @@ type ODSRecord struct {
 	// price by region; endpoint for forensics).
 	Region                     sql.NullString
 	EndpointURL                sql.NullString
+
+	// OAuth identity (v1.0.1-alpha.1): email behind an OAuth-direct route.
+	// Already on ODS; carried into DWD so the read model can group/filter by
+	// identity WITHOUT joining back to ODS (CQRS — reads stay on the read model).
+	OAuthIdentity              sql.NullString
 }
 
 // ControlEvent is a read-only projection of managed_key_control_events.
@@ -205,4 +217,8 @@ type DWDFact struct {
 	BillingPeriod      string  // 'YYYY-MM' monthly bucket derived from occurred_at
 	UnitPricesSnapshot *string // JSON of the unit prices used; NULL when unpriced
 	PricingSnapshotID  string  // which global pricing_snapshots state was active
+
+	// OAuth identity (v1.0.1-alpha.1): projected verbatim from ODS so the read
+	// model can group/filter by email without an ODS join. "" when not OAuth.
+	OAuthIdentity      string
 }

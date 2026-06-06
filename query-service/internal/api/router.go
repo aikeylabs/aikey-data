@@ -56,6 +56,8 @@ func NewRouter(h *UsageHandler, admin *AdminHandler, db *sql.DB, serviceToken st
 	authed.HandleFunc("GET /v1/usage/personal/by-session/total", h.PersonalBySessionTotal)
 	// Phase 3B R23 (2026-05-11): raw recent requests for Overview card.
 	authed.HandleFunc("GET /v1/usage/personal/recent", h.PersonalRecent)
+	// Usage Detail page (2026-06-05): per-request rows, last 7 days, drill-down.
+	authed.HandleFunc("GET /v1/usage/personal/detail", h.PersonalUsageDetail)
 
 	// Master page
 	authed.HandleFunc("GET /v1/usage/master/ranking", h.MasterUserRanking)

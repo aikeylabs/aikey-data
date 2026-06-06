@@ -35,6 +35,9 @@ func NewSQLODSRepository(db *shared.DB) ODSRepository {
 // shifting historic positions. v1.0.0-rc.5 added app_slug; v1.0.0-rc.6
 // adds session_id for the Performance Top N sessions chart; v1.0.0-rc.7
 // adds source_id + source_seq for delivery integrity (per-source sequence).
+// v1.0.0-rc.11 adds virtual_key_alias (from wire `key_label`) closing the
+// gap where DWD.virtual_key_alias had been permanently empty — see
+// aikey-config-tool/.../v1_0_0_rc11_virtual_key_alias.go.
 const odsColumns = `event_id, request_id, trace_id, proxy_instance_id, device_id,
     schema_version, source_type, source_version, client_version,
     proxy_config_version, proxy_loaded_control_seq,
@@ -53,6 +56,7 @@ const odsColumns = `event_id, request_id, trace_id, proxy_instance_id, device_id
     app_slug, session_id,
     source_id, source_seq,
     region, endpoint_url,
+    virtual_key_alias,
     content_hash, ingest_status, dwd_status`
 
 const odsPlaceholders = `?,?,?,?,?,
@@ -73,6 +77,7 @@ const odsPlaceholders = `?,?,?,?,?,
     ?,?,
     ?,?,
     ?,?,
+    ?,
     ?,?,?`
 
 // InsertEvent persists one event. quarantined drives the disposition columns:
@@ -110,6 +115,7 @@ func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte,
 		nullStr(e.SessionID),
 		nullStr(e.SourceID), e.SourceSeq, // delivery integrity (v2); SourceSeq nil → NULL for v1 events
 		nullStr(e.Region), nullStr(e.EndpointURL), // cost-pricing audit (v1.0.0-rc.8)
+		nullStr(e.KeyLabel),                            // virtual_key_alias (v1.0.0-rc.11) — display label, carried into DWD by projector
 		nullStr(e.ContentHash), ingestStatus, dwdStatus, // stage C: content fingerprint + disposition
 	)
 	if err != nil {

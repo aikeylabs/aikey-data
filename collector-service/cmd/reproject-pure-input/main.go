@@ -28,6 +28,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -86,27 +87,35 @@ func run(ctx context.Context, db *shared.DB, resolver *pricing.Resolver, dryRun 
 	if !db.IsSQLite() {
 		tsExpr = "(EXTRACT(EPOCH FROM event_time)*1000)::bigint"
 	}
+	// Rows needing work: old (0.1.0, total→pure conversion) OR any priced row still
+	// missing its per-row unit_prices_snapshot (audit re-derivability backfill —
+	// e.g. rows priced before the rc.8 snapshot feature, or reprojected earlier
+	// without storing it). Idempotent: once converted + snapshotted, neither
+	// predicate matches on a re-run.
 	rows, err := db.QueryContext(ctx, `
 		SELECT event_id, COALESCE(provider_code,''), COALESCE(model,''), `+tsExpr+`,
 		       COALESCE(org_id,''), input_tokens, cached_input_tokens,
-		       cache_creation_input_tokens, output_tokens, reasoning_tokens
+		       cache_creation_input_tokens, output_tokens, reasoning_tokens,
+		       COALESCE(projector_version,'')
 		  FROM usage_fact_dwd
-		 WHERE projector_version = ?`, oldVersion)
+		 WHERE projector_version = ?
+		    OR (unit_prices_snapshot IS NULL AND billable_amount IS NOT NULL)`, oldVersion)
 	if err != nil {
 		return fmt.Errorf("select rows: %w", err)
 	}
 	type rowT struct {
-		eventID                                                string
-		provider, model                                        string
-		ts                                                     int64
-		org                                                    string
-		input, cached, creation, output, reasoning             int64
+		eventID                                    string
+		provider, model                            string
+		ts                                         int64
+		org                                        string
+		input, cached, creation, output, reasoning int64
+		pver                                       string
 	}
 	var batch []rowT
 	for rows.Next() {
 		var r rowT
 		if err := rows.Scan(&r.eventID, &r.provider, &r.model, &r.ts, &r.org,
-			&r.input, &r.cached, &r.creation, &r.output, &r.reasoning); err != nil {
+			&r.input, &r.cached, &r.creation, &r.output, &r.reasoning, &r.pver); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan: %w", err)
 		}
@@ -117,13 +126,23 @@ func run(ctx context.Context, db *shared.DB, resolver *pricing.Resolver, dryRun 
 		return err
 	}
 
-	var converted, repriced, unpriced int
+	var converted, snapBackfill, repriced, unpriced int
 	for _, r := range batch {
-		pure := r.input - r.cached - r.creation
-		if pure < 0 {
-			pure = 0
+		old := r.pver == oldVersion
+		// old (0.1.0): input WAS the total → convert to pure, tier off the total.
+		// new (already 0.2.0): input is already pure → don't subtract again; the tier
+		// keys off the reconstructed total (pure + cache).
+		var pure, totalContext int64
+		if old {
+			pure = r.input - r.cached - r.creation
+			if pure < 0 {
+				pure = 0
+			}
+			totalContext = r.input
+		} else {
+			pure = r.input
+			totalContext = r.input + r.cached + r.creation
 		}
-		totalContext := r.input // old input WAS the total context
 
 		var billable sql.NullString
 		var snap sql.NullString
@@ -135,11 +154,20 @@ func run(ctx context.Context, db *shared.DB, resolver *pricing.Resolver, dryRun 
 			}, false /* input is now pure */)
 			billable = sql.NullString{String: pricing.FormatCostUSD(cost), Valid: true}
 			cur = sql.NullString{String: "USD", Valid: true}
+			// Snapshot the effective rates per row so cost is re-derivable from the
+			// row alone (audit), matching the enricher's unit_prices_snapshot.
+			if b, mErr := json.Marshal(up); mErr == nil {
+				snap = sql.NullString{String: string(b), Valid: true}
+			}
 			repriced++
 		} else {
 			unpriced++ // leave billable NULL (unknown model); input still converted
 		}
-		converted++
+		if old {
+			converted++
+		} else {
+			snapBackfill++
+		}
 
 		if dryRun {
 			fmt.Printf("[dry-run] %s %s input %d→%d cache(%d+%d) billable=%s\n",
@@ -160,8 +188,8 @@ func run(ctx context.Context, db *shared.DB, resolver *pricing.Resolver, dryRun 
 	if dryRun {
 		mode = "dry-run"
 	}
-	fmt.Printf("reproject %s: %d rows at %s → converted=%d repriced=%d unpriced(left NULL)=%d → %s\n",
-		mode, len(batch), oldVersion, converted, repriced, unpriced, newVersion)
+	fmt.Printf("reproject %s: %d rows → converted(0.1.0→pure)=%d snapshot-backfill=%d repriced=%d unpriced(left NULL)=%d → %s\n",
+		mode, len(batch), converted, snapBackfill, repriced, unpriced, newVersion)
 	return nil
 }
 

@@ -104,6 +104,7 @@ func newSQLiteODSTestDB(t *testing.T) *shared.DB {
 			virtual_key_id TEXT,
 			virtual_key_revision TEXT,
 			virtual_key_hash TEXT,
+			virtual_key_alias TEXT,
 			binding_id TEXT,
 			credential_id TEXT,
 			credential_revision TEXT,
@@ -138,7 +139,9 @@ func newSQLiteODSTestDB(t *testing.T) *shared.DB {
 			session_id TEXT,
 			-- Cost-pricing audit (v1.0.0-rc.8)
 			region TEXT,
-			endpoint_url TEXT
+			endpoint_url TEXT,
+			-- OAuth identity (v1.0.1-alpha.1)
+			oauth_identity TEXT
 		);
 	`)
 	if err != nil {
@@ -308,6 +311,8 @@ func newSQLiteDWDTestDB(t *testing.T, includeSQLDefaults bool) *shared.DB {
 			billing_period TEXT,
 			unit_prices_snapshot TEXT,
 			pricing_snapshot_id TEXT,
+			-- OAuth identity (v1.0.1-alpha.1)
+			oauth_identity TEXT,
 			UNIQUE (org_id, event_id)
 		);
 	`)

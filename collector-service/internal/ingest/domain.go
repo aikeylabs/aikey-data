@@ -76,6 +76,17 @@ type UsageEvent struct {
 	VirtualKeyID               string `json:"virtual_key_id,omitempty"`
 	VirtualKeyRevision         string `json:"virtual_key_revision,omitempty"`
 	VirtualKeyHash             string `json:"virtual_key_hash,omitempty"`
+	// KeyLabel — user-friendly name for the credential the proxy resolved
+	// (account-scoped alias for personal, OAuth email, team-side
+	// `key-<id>-<alias>` for team keys, app slug for app routes, etc.).
+	// Wire field: `key_label`. Persisted to ODS column `virtual_key_alias`
+	// (naming matches DWD where it's been carried since rc.5 baseline).
+	// v1.0.0-rc.11 closed the gap where this field was silently dropped
+	// at ingest — the proxy had been emitting it for months but the
+	// collector struct didn't carry it, so DWD's `virtual_key_alias` was
+	// permanently empty and the team-key row in usage-ledger fell back
+	// to rendering the bare vk_id UUID.
+	KeyLabel                   string `json:"key_label,omitempty"`
 	BindingID                  string `json:"binding_id,omitempty"`
 	CredentialID               string `json:"credential_id,omitempty"`
 	CredentialRevision         string `json:"credential_revision,omitempty"`

@@ -179,6 +179,13 @@ func (e *Enricher) buildBaseFact(rec *ODSRecord) *DWDFact {
 		VirtualKeyID:               rec.VirtualKeyID.String,
 		VirtualKeyRevision:         rec.VirtualKeyRevision.String,
 		VirtualKeyHash:             rec.VirtualKeyHash.String,
+		// VirtualKeyAlias (v1.0.0-rc.11): carried verbatim from ODS,
+		// which got it from the proxy's wire `key_label`. No
+		// enrichment / lookup — the proxy already resolved the friendly
+		// label at request time. Without this assignment the DWD
+		// column stays empty and usage-ledger's deriveKeyLabel falls
+		// back to the raw vk_id (UUID for team keys → unreadable row).
+		VirtualKeyAlias:            rec.VirtualKeyAlias.String,
 
 		BindingID:                  rec.BindingID.String,
 		CredentialID:               rec.CredentialID.String,
@@ -221,6 +228,10 @@ func (e *Enricher) buildBaseFact(rec *ODSRecord) *DWDFact {
 		// Cost-pricing audit (v1.0.0-rc.8): region/endpoint passthrough from ODS.
 		Region:                     rec.Region.String,
 		EndpointURL:                rec.EndpointURL.String,
+
+		// OAuth identity (v1.0.1-alpha.1): passthrough from ODS so DWD can
+		// group/filter by email without re-joining ODS.
+		OAuthIdentity:              rec.OAuthIdentity.String,
 	}
 }
 

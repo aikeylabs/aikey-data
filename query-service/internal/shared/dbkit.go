@@ -129,6 +129,34 @@ func (d *DB) DateString(col string) string {
 	return col + "::text"
 }
 
+// EpochMillis returns a SQL expression projecting a timestamp column as INT64
+// epoch milliseconds, so a per-row Scan into int64 works on BOTH dialects.
+//   - SQLite: the column is already stored as INTEGER millis → verbatim.
+//   - Postgres: TIMESTAMPTZ → (EXTRACT(EPOCH FROM col)*1000)::bigint.
+// Use this for per-row event_time projection. (The aggregation paths bucket by
+// day via DateOf instead, so they never hit this; per-row list endpoints —
+// usage detail — must project explicitly or lib/pq returns time.Time and the
+// int64 Scan fails with "converting time.Time to int64".)
+func (d *DB) EpochMillis(col string) string {
+	if d.Dialect == DialectSQLite {
+		return col
+	}
+	return fmt.Sprintf("(EXTRACT(EPOCH FROM %s)*1000)::bigint", col)
+}
+
+// LatencyMillis returns a SQL expression for the millisecond gap between a start
+// and end timestamp column, dialect-aware:
+//   - SQLite: both are INTEGER millis → plain subtraction (end - start).
+//   - Postgres: TIMESTAMPTZ → EXTRACT(EPOCH FROM (end - start))*1000.
+// NULL when either endpoint is NULL (caller COALESCEs to 0). Used for the usage
+// detail request latency (started_at → finished_at).
+func (d *DB) LatencyMillis(startCol, endCol string) string {
+	if d.Dialect == DialectSQLite {
+		return fmt.Sprintf("(%s - %s)", endCol, startCol)
+	}
+	return fmt.Sprintf("(EXTRACT(EPOCH FROM (%s - %s))*1000)::bigint", endCol, startCol)
+}
+
 // DateOf returns a SQL expression that projects a timestamp column
 // (INTEGER millis on SQLite, TIMESTAMPTZ on Postgres) as a DATE.
 //

@@ -239,6 +239,37 @@ type RecentRequest struct {
 	RequestStatus  string `json:"request_status"` // "success" | "error" | ...
 }
 
+// UsageDetailRow is one per-request row for the Usage Detail page (last 7 days,
+// drill-down). Richer than RecentRequest: full token breakdown + cost so the
+// "未计价" (billable nil) rows are visible. Cost/tokens/status come from
+// usage_fact_dwd (the curated read model — that's where projection computes
+// billable_amount; the raw ODS has it NULL). ErrorCode/ErrorMessage are LEFT
+// JOINed from the raw ODS (the only place the upstream error text lives) for the
+// click-to-expand failure detail. CQRS read of the local store — personal events
+// on control.db, team events on Production.
+type UsageDetailRow struct {
+	EventTimeMs              int64   `json:"event_time_ms"`
+	Model                   string  `json:"model"`
+	ProviderCode            string  `json:"provider_code"`
+	RequestStatus           string  `json:"request_status"`
+	HTTPStatusCode          int     `json:"http_status_code"`
+	ErrorCode               string  `json:"error_code"`    // from ODS (JOIN); failure detail
+	ErrorMessage            string  `json:"error_message"` // from ODS (JOIN); shown in row expand
+	LatencyMs               int64   `json:"latency_ms"`    // finished_at - started_at (ODS); 0 if no timing
+	InputTokens             int64   `json:"input_tokens"` // PURE (uncached) — 方案 A
+	CachedInputTokens       int64   `json:"cached_input_tokens"`
+	CacheCreationInputTokens int64  `json:"cache_creation_input_tokens"`
+	OutputTokens            int64   `json:"output_tokens"`
+	TotalTokens             int64   `json:"total_tokens"`
+	BillableAmount          *string `json:"billable_amount"` // nil = 未计价
+	Currency                string  `json:"currency"`
+	EndpointURL             string  `json:"endpoint_url"`
+	SessionID               string  `json:"session_id"`
+	VirtualKeyID            string  `json:"virtual_key_id"`
+	VirtualKeyAlias         string  `json:"virtual_key_alias"`
+	AppSlug                 string  `json:"app_slug"`
+}
+
 // UserRanking is a single entry in the per-user ranking.
 type UserRanking struct {
 	AccountID    string `json:"account_id"`
@@ -279,6 +310,14 @@ type QueryParams struct {
 	// — selecting a session shouldn't shrink the session ranking to
 	// one row (see design doc §5.3 for the orthogonality rationale).
 	SessionID string
+
+	// Usage-detail page filters (drill-down). Empty/false = no narrowing.
+	// Consumed only by PersonalUsageDetail.
+	Model         string // narrow to one model
+	VirtualKeyID  string // narrow to one virtual key (drill-down by key)
+	Protocol      string // narrow to one protocol_type (drill-down by protocol)
+	OAuthIdentity string // narrow to one OAuth email (drill-down by identity — spans multiple vks)
+	Unpriced      bool   // only rows with NULL billable_amount (the "未计价" filter)
 
 	// TZ is the IANA name (e.g. "Asia/Shanghai") of the caller's
 	// local time zone. Empty = UTC. Used to bucket per-day / per-hour

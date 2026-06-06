@@ -64,6 +64,13 @@ type Repository interface {
 	// handler boundary so this layer trusts whatever Limit is set.
 	PersonalRecent(ctx context.Context, p QueryParams) ([]RecentRequest, error)
 
+	// PersonalUsageDetail returns per-request rows for the Usage Detail page
+	// (last 7 days window via StartDate/EndDate, optional drill-down filters:
+	// Unpriced / Model / VirtualKeyID / SessionID / AppSlug). Reads
+	// usage_event_ods (per-event source) — full token breakdown + cost +
+	// failure reason so the "未计价" rows explain themselves.
+	PersonalUsageDetail(ctx context.Context, p QueryParams) ([]UsageDetailRow, error)
+
 	// --- Master page ---
 
 	// MasterUserRanking returns top users by total_tokens within an org.

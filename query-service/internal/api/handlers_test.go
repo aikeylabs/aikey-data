@@ -144,6 +144,14 @@ func (m *mockRepo) PersonalRecent(_ context.Context, p usage.QueryParams) ([]usa
 	}, nil
 }
 
+func (m *mockRepo) PersonalUsageDetail(_ context.Context, p usage.QueryParams) ([]usage.UsageDetailRow, error) {
+	return []usage.UsageDetailRow{
+		{EventTimeMs: 1700000000000, Model: "claude-test", ProviderCode: "anthropic",
+			RequestStatus: "success", HTTPStatusCode: 200, TotalTokens: 100, InputTokens: 60,
+			OutputTokens: 40, VirtualKeyID: "personal:my-key"},
+	}, nil
+}
+
 // --- Admin (cost-pricing Stage 3) mock stubs ---
 // Satisfy the Repository interface; AdminHandler tests use a dedicated
 // adminMockRepo (admin_handlers_test.go) with controllable behaviour.

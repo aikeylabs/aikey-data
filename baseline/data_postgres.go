@@ -39,6 +39,7 @@ func dataPostgres() []string {
 			virtual_key_id            VARCHAR(64),
 			virtual_key_revision      VARCHAR(64),
 			virtual_key_hash          VARCHAR(128),
+			virtual_key_alias         VARCHAR(255),
 			binding_id                VARCHAR(64),
 			credential_id             VARCHAR(64),
 			credential_revision       VARCHAR(64),

@@ -264,6 +264,44 @@ func (h *UsageHandler) PersonalRecent(w http.ResponseWriter, r *http.Request) {
 	shared.JSON(w, http.StatusOK, map[string]any{"requests": data})
 }
 
+// GET /v1/usage/personal/detail?seat_id=...&start_date=&end_date=&filter=unpriced&model=&key=&session_id=
+// Per-request rows for the Usage Detail page (last 7 days via start/end_date;
+// optional drill-down filters). Reads usage_event_ods (per-event source).
+func (h *UsageHandler) PersonalUsageDetail(w http.ResponseWriter, r *http.Request) {
+	p, err := parsePersonalParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	q := r.URL.Query()
+	p.Model = q.Get("model")
+	p.VirtualKeyID = q.Get("key")
+	p.Protocol = q.Get("protocol")
+	p.OAuthIdentity = q.Get("identity")
+	p.Unpriced = q.Get("filter") == "unpriced"
+	limit := 500
+	if l := q.Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	p.Limit = limit
+
+	data, err := h.repo.PersonalUsageDetail(r.Context(), p)
+	if err != nil {
+		slog.Error("PersonalUsageDetail query failed", "error", err)
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	if data == nil {
+		data = []usage.UsageDetailRow{}
+	}
+	shared.JSON(w, http.StatusOK, map[string]any{"rows": data})
+}
+
 // GET /v1/usage/personal/by-model/total?seat_id=...&start_date=...&end_date=...
 // OR account_id= / org_id=personal
 //

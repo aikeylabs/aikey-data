@@ -27,7 +27,7 @@ func NewSQLODSReader(db *shared.DB) ODSReader { return &sqlODSReader{db: db} }
 const fetchPendingTpl = `
 SELECT ods_id, event_id, event_time, occurred_at,
        org_id, account_id, seat_id, account_status_snapshot,
-       virtual_key_id, virtual_key_revision, virtual_key_hash,
+       virtual_key_id, virtual_key_revision, virtual_key_hash, virtual_key_alias,
        binding_id, credential_id, credential_revision,
        real_key_hash, credential_fingerprint, provider_account_fingerprint,
        provider_id, provider_code, protocol_type, route_source,
@@ -38,7 +38,8 @@ SELECT ods_id, event_id, event_time, occurred_at,
        dwd_retry_count,
        app_slug,
        session_id,
-       region, endpoint_url
+       region, endpoint_url,
+       oauth_identity
 FROM usage_event_ods
 WHERE ((dwd_status = 'pending')
    OR (dwd_status = 'retry' AND dwd_next_retry_at <= %s))
@@ -66,7 +67,7 @@ func (r *sqlODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord
 		if err := rows.Scan(
 			&rec.OdsID, &rec.EventID, &rec.EventTime, &rec.OccurredAt,
 			&rec.OrgID, &rec.AccountID, &rec.SeatID, &rec.AccountStatusSnapshot,
-			&rec.VirtualKeyID, &rec.VirtualKeyRevision, &rec.VirtualKeyHash,
+			&rec.VirtualKeyID, &rec.VirtualKeyRevision, &rec.VirtualKeyHash, &rec.VirtualKeyAlias,
 			&rec.BindingID, &rec.CredentialID, &rec.CredentialRevision,
 			&rec.RealKeyHash, &rec.CredentialFingerprint, &rec.ProviderAccountFingerprint,
 			&rec.ProviderID, &rec.ProviderCode, &rec.ProtocolType, &rec.RouteSource,
@@ -78,6 +79,7 @@ func (r *sqlODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord
 			&rec.AppSlug,
 			&rec.SessionID,
 			&rec.Region, &rec.EndpointURL,
+			&rec.OAuthIdentity,
 		); err != nil {
 			return nil, fmt.Errorf("scan ods row: %w", err)
 		}
@@ -215,7 +217,8 @@ const dwdColumns = `event_id, ods_id, occurred_at, event_time, usage_date,
     anomaly_type, anomaly_reason, billing_scope, user_usage_scope,
     control_event_id, control_event_revision, projector_version, projected_at,
     app_slug, session_id,
-    region, endpoint_url, billing_period, unit_prices_snapshot, pricing_snapshot_id`
+    region, endpoint_url, billing_period, unit_prices_snapshot, pricing_snapshot_id,
+    oauth_identity`
 
 const dwdPlaceholders = `?,?,?,?,?,
     ?,?,?,
@@ -232,7 +235,8 @@ const dwdPlaceholders = `?,?,?,?,?,
     ?,?,?,?,
     ?,?,?,?,
     ?,?,
-    ?,?,?,?,?`
+    ?,?,?,?,?,
+    ?`
 
 func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 	insertDWDSQL := w.db.InsertOrIgnoreOn("usage_fact_dwd", dwdColumns, dwdPlaceholders, "org_id, event_id")
@@ -271,6 +275,10 @@ func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 		// projector-computed cost trail (billable_amount/currency bound above
 		// are now enricher-computed, not passthrough).
 		f.Region, f.EndpointURL, f.BillingPeriod, f.UnitPricesSnapshot, f.PricingSnapshotID,
+		// oauth_identity (v1.0.1-alpha.1): carried ODS→DWD so the read model can filter
+		// by OAuth email directly (was dropped during projection — see the
+		// PersonalByKeyTotal ODS-join hack this removes the need for).
+		f.OAuthIdentity,
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert dwd fact %s: %w", f.EventID, err)

@@ -74,7 +74,19 @@ func New(db *sql.DB, cfg Config) Result {
 	odsReader := projector.NewSQLODSReader(ddb)
 	dwdWriter := projector.NewSQLDWDWriter(ddb)
 	checkpoint := projector.NewSQLCheckpointStore(ddb)
-	ctrlReader := projector.NewSQLControlEventReader(ddb)
+	// LRU + TTL cache in front of the control-event reader. Projector
+	// batches frequently share the same virtual_key_id; the inner SQL
+	// would otherwise re-fetch the same row per event. See
+	// internal/projector/cached_control_reader.go for the design notes.
+	// Trial/Personal assemble in-process and this func returns no error,
+	// so cache-init failure (a bad lru.New, virtually impossible at
+	// size=10000) panics = fail-fast, matching the production path.
+	rawCtrlReader := projector.NewSQLControlEventReader(ddb)
+	ctrlReader, cerr := projector.NewCachedControlEventReader(rawCtrlReader, 10000, 5*time.Minute)
+	if cerr != nil {
+		logger.Error("init control-event cache", "error", cerr)
+		panic("control-event cache init failed: " + cerr.Error())
+	}
 	// Cost-pricing resolver (v1.0.0-rc.8): embedded price table loaded once.
 	// Trial/Personal assemble in-process and this func returns no error, so a
 	// load failure (corrupt embedded file — unrecoverable) panics = fail-fast,
