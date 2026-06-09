@@ -85,6 +85,20 @@ type Repository interface {
 	// Filters: billing_scope IN ('org_only','org_and_user')
 	MasterTimeline(ctx context.Context, p QueryParams) ([]TimelinePoint, error)
 
+	// MasterUsageDetail returns per-event audit rows for one org within
+	// [p.StartDate, p.EndDate] (inclusive, by usage_date — the DWD partition
+	// key, so the scan prunes to the relevant months). Ordered event_time DESC,
+	// capped at p.Limit. Powers the enterprise usage-audit page's last-3-days
+	// table. v1.0.1-alpha.4.
+	MasterUsageDetail(ctx context.Context, p QueryParams) ([]MasterUsageAuditRow, error)
+
+	// StreamMasterUsageExport streams every audit row for one org within
+	// [p.StartDate, p.EndDate] (inclusive, by usage_date) to fn, one row at a
+	// time via a DB cursor — memory stays O(1) regardless of range size so a
+	// full year exports without materialising. fn is the CSV writer; a non-nil
+	// fn error aborts the stream. The handler enforces the ≤366-day cap.
+	StreamMasterUsageExport(ctx context.Context, p QueryParams, fn func(*MasterUsageAuditRow) error) error
+
 	// --- Admin (cost-pricing Stage 3) ---
 
 	// ListUnpricedModels returns rows from the pending-pricing queue

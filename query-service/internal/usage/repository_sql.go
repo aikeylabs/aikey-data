@@ -804,6 +804,116 @@ func (r *sqlRepo) MasterTimeline(ctx context.Context, p QueryParams) ([]Timeline
 	return scanTimeline(rows)
 }
 
+// masterAuditSelect builds the dialect-correct projection for an audit row:
+// event_time/occurred_at as epoch millis, usage_date as YYYY-MM-DD text (PG DATE
+// would otherwise scan as time.Time, not string), nullable strings COALESCE'd to
+// ''. Column order must match scanMasterAuditRow.
+// Columns are qualified with the `d` (usage_fact_dwd) / `s` (org_seats) aliases
+// because masterAuditFrom LEFT JOINs org_seats to resolve seat_alias — org_id /
+// account_id / seat_id exist in both tables and would otherwise be ambiguous.
+func masterAuditSelect(db *shared.DB) string {
+	usageDate := "d.usage_date" // SQLite: already TEXT 'YYYY-MM-DD'
+	if !db.IsSQLite() {
+		usageDate = "to_char(d.usage_date,'YYYY-MM-DD')" // PG: DATE → text
+	}
+	return fmt.Sprintf(`d.event_id, %s, %s, %s, COALESCE(d.billing_period,''),
+		COALESCE(d.account_id,''), COALESCE(d.seat_id,''), COALESCE(s.alias,''), COALESCE(d.provider_code,''), COALESCE(d.model,''),
+		COALESCE(d.protocol_type,''), COALESCE(d.route_source,''),
+		COALESCE(d.virtual_key_id,''), COALESCE(d.virtual_key_hash,''),
+		COALESCE(d.credential_id,''), COALESCE(d.credential_fingerprint,''), COALESCE(d.real_key_hash,''), COALESCE(d.binding_id,''),
+		d.input_tokens, d.output_tokens, d.cached_input_tokens, d.cache_creation_input_tokens, d.reasoning_tokens, d.total_tokens,
+		d.billable_amount, COALESCE(d.currency,''), COALESCE(d.pricing_snapshot_id,''),
+		COALESCE(d.quality_status,''), COALESCE(d.validation_code,''), COALESCE(d.anomaly_type,''), COALESCE(d.completion_source,''),
+		COALESCE(d.content_hash,''), COALESCE(d.source_id,''), d.source_seq`,
+		db.EpochMillis("d.event_time"), db.EpochMillis("d.occurred_at"), usageDate)
+}
+
+// masterAuditFrom: usage_fact_dwd LEFT JOIN org_seats to resolve the current
+// seat alias for display. seat_id is org_seats' PK so the join is 1:1 (no row
+// fan-out, LIMIT stays exact). LEFT so events whose seat_id has no org_seats row
+// (e.g. legacy / non-seat tags) still appear, with seat_alias = ''. org_seats is
+// a control-plane table living in the same DB as DWD in every edition that can
+// reach the master audit endpoints (Trial / Production share one DB); the
+// alternative — denormalising seat_alias into DWD — would freeze a stale alias
+// at event time and needs a projector control-plane read, so the read-time join
+// is both simpler and shows the *current* alias (matching the page).
+const masterAuditFrom = `usage_fact_dwd d LEFT JOIN org_seats s ON s.seat_id = d.seat_id AND s.org_id = d.org_id`
+
+func scanMasterAuditRow(rows *sql.Rows) (*MasterUsageAuditRow, error) {
+	var a MasterUsageAuditRow
+	var billable sql.NullString
+	var sourceSeq sql.NullInt64
+	if err := rows.Scan(&a.EventID, &a.EventTimeMs, &a.OccurredAtMs, &a.UsageDate, &a.BillingPeriod,
+		&a.AccountID, &a.SeatID, &a.SeatAlias, &a.ProviderCode, &a.Model, &a.ProtocolType, &a.RouteSource,
+		&a.VirtualKeyID, &a.VirtualKeyHash, &a.CredentialID, &a.CredentialFingerprint, &a.RealKeyHash, &a.BindingID,
+		&a.InputTokens, &a.OutputTokens, &a.CachedInputTokens, &a.CacheCreationInputTokens, &a.ReasoningTokens, &a.TotalTokens,
+		&billable, &a.Currency, &a.PricingSnapshotID,
+		&a.QualityStatus, &a.ValidationCode, &a.AnomalyType, &a.CompletionSource,
+		&a.ContentHash, &a.SourceID, &sourceSeq); err != nil {
+		return nil, err
+	}
+	if billable.Valid {
+		a.BillableAmount = &billable.String
+	}
+	if sourceSeq.Valid {
+		v := sourceSeq.Int64
+		a.SourceSeq = &v
+	}
+	return &a, nil
+}
+
+// masterAuditWhere filters by org + usage_date range (inclusive). usage_date is
+// the DWD partition key, so this WHERE prunes the scan to the relevant months.
+// p.StartDate/EndDate are interpreted as calendar dates (their YYYY-MM-DD part).
+func masterAuditWhere(p QueryParams) (string, []any) {
+	return "d.org_id = ? AND d.usage_date >= ? AND d.usage_date <= ?",
+		[]any{p.OrgID, p.StartDate.Format("2006-01-02"), p.EndDate.Format("2006-01-02")}
+}
+
+func (r *sqlRepo) MasterUsageDetail(ctx context.Context, p QueryParams) ([]MasterUsageAuditRow, error) {
+	where, args := masterAuditWhere(p)
+	args = append(args, p.Limit)
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(
+		`SELECT %s FROM %s WHERE %s ORDER BY d.event_time DESC LIMIT ?`,
+		masterAuditSelect(r.db), masterAuditFrom, where), args...)
+	if err != nil {
+		return nil, fmt.Errorf("master usage detail: %w", err)
+	}
+	defer rows.Close()
+	var result []MasterUsageAuditRow
+	for rows.Next() {
+		a, err := scanMasterAuditRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *a)
+	}
+	return result, rows.Err()
+}
+
+func (r *sqlRepo) StreamMasterUsageExport(ctx context.Context, p QueryParams, fn func(*MasterUsageAuditRow) error) error {
+	where, args := masterAuditWhere(p)
+	// No LIMIT — full range. The driver reads rows incrementally off the wire as
+	// fn consumes them, so memory stays O(1) even for a year-long export.
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(
+		`SELECT %s FROM %s WHERE %s ORDER BY d.event_time DESC`,
+		masterAuditSelect(r.db), masterAuditFrom, where), args...)
+	if err != nil {
+		return fmt.Errorf("master usage export: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		a, err := scanMasterAuditRow(rows)
+		if err != nil {
+			return err
+		}
+		if err := fn(a); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 // --- scan helpers ---
 
 func scanTimeline(rows *sql.Rows) ([]TimelinePoint, error) {

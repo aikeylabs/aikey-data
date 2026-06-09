@@ -2,6 +2,8 @@
 package api
 
 import (
+	"encoding/csv"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -403,6 +405,161 @@ func (h *UsageHandler) MasterTimeline(w http.ResponseWriter, r *http.Request) {
 		data = []usage.TimelinePoint{}
 	}
 	shared.JSON(w, http.StatusOK, data)
+}
+
+// GET /v1/usage/master/detail?org_id=...&days=3&limit=1000
+//
+// Per-event audit rows for the enterprise usage-audit page. Window is the last
+// `days` usage_date days (default 3 — the page deliberately shows only recent
+// detail; the full history goes through /export). usage_date is UTC (matches the
+// projector). v1.0.1-alpha.4.
+func (h *UsageHandler) MasterUsageDetail(w http.ResponseWriter, r *http.Request) {
+	p, err := parseMasterParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	days := 3
+	if d := r.URL.Query().Get("days"); d != "" {
+		if n, e := strconv.Atoi(d); e == nil && n > 0 {
+			days = n
+		}
+	}
+	if days > 31 {
+		days = 31 // hard cap — the page is a "recent" view, not the export
+	}
+	now := time.Now().UTC()
+	p.EndDate = now
+	p.StartDate = now.AddDate(0, 0, -(days - 1))
+	limit := 1000
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, e := strconv.Atoi(l); e == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 5000 {
+		limit = 5000
+	}
+	p.Limit = limit
+
+	data, err := h.repo.MasterUsageDetail(r.Context(), p)
+	if err != nil {
+		slog.Error("MasterUsageDetail query failed", "error", err)
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	if data == nil {
+		data = []usage.MasterUsageAuditRow{}
+	}
+	shared.JSON(w, http.StatusOK, map[string]any{"rows": data})
+}
+
+// GET /v1/usage/master/export?org_id=...&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+//
+// Streams the full audit column set as CSV for [start_date, end_date] (inclusive
+// by usage_date). Both dates are REQUIRED and the span is capped at 366 days so
+// an unbounded scan can't be requested. The body streams row-by-row off a DB
+// cursor (memory O(1)) so a year-long export never materialises. NULL
+// billable_amount is emitted as empty — read it together with pricing_snapshot_id
+// (="unpriced", not "no charge"). v1.0.1-alpha.4.
+func (h *UsageHandler) MasterUsageExport(w http.ResponseWriter, r *http.Request) {
+	p, err := parseMasterParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	q := r.URL.Query()
+	sd, ed := q.Get("start_date"), q.Get("end_date")
+	if sd == "" || ed == "" {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", "start_date and end_date are required")
+		return
+	}
+	start, e1 := time.Parse("2006-01-02", sd)
+	end, e2 := time.Parse("2006-01-02", ed)
+	if e1 != nil || e2 != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", "start_date/end_date must be YYYY-MM-DD")
+		return
+	}
+	if end.Before(start) {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", "end_date must not be before start_date")
+		return
+	}
+	if end.Sub(start) > 366*24*time.Hour {
+		shared.Error(w, http.StatusBadRequest, "RANGE_TOO_LARGE", "export range must not exceed 366 days")
+		return
+	}
+	p.StartDate, p.EndDate = start, end
+
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="usage-audit-%s-%s_%s.csv"`, p.OrgID, sd, ed))
+	cw := csv.NewWriter(w)
+	_ = cw.Write(masterAuditCSVHeader)
+	flusher, _ := w.(http.Flusher)
+	n := 0
+	streamErr := h.repo.StreamMasterUsageExport(r.Context(), p, func(a *usage.MasterUsageAuditRow) error {
+		if err := cw.Write(masterAuditCSVRecord(a)); err != nil {
+			return err
+		}
+		n++
+		if n%500 == 0 { // periodic flush keeps the download progressing for big ranges
+			cw.Flush()
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		return nil
+	})
+	cw.Flush()
+	if flusher != nil {
+		flusher.Flush()
+	}
+	if streamErr != nil {
+		// Headers + partial body already sent — can't switch to an error status.
+		// Surface in logs so a truncated export is diagnosable.
+		slog.Error("MasterUsageExport stream failed", "error", streamErr, "rows_written", n)
+	}
+}
+
+// masterAuditCSVHeader is the column order for the audit export. en-US / fixed —
+// not locale-dependent (code-and-ui-language rule).
+var masterAuditCSVHeader = []string{
+	"event_id", "event_time", "occurred_at", "usage_date", "billing_period",
+	"account_id", "seat_id", "seat_alias", "provider_code", "model", "protocol_type", "route_source",
+	"virtual_key_id", "virtual_key_hash", "credential_id", "credential_fingerprint", "real_key_hash", "binding_id",
+	"input_tokens", "output_tokens", "cached_input_tokens", "cache_creation_input_tokens", "reasoning_tokens", "total_tokens",
+	"billable_amount", "currency", "pricing_snapshot_id",
+	"quality_status", "validation_code", "anomaly_type", "completion_source",
+	"content_hash", "source_id", "source_seq",
+}
+
+func masterAuditCSVRecord(a *usage.MasterUsageAuditRow) []string {
+	billable := ""
+	if a.BillableAmount != nil {
+		billable = *a.BillableAmount
+	}
+	sourceSeq := ""
+	if a.SourceSeq != nil {
+		sourceSeq = strconv.FormatInt(*a.SourceSeq, 10)
+	}
+	return []string{
+		a.EventID, msToRFC3339(a.EventTimeMs), msToRFC3339(a.OccurredAtMs), a.UsageDate, a.BillingPeriod,
+		a.AccountID, a.SeatID, a.SeatAlias, a.ProviderCode, a.Model, a.ProtocolType, a.RouteSource,
+		a.VirtualKeyID, a.VirtualKeyHash, a.CredentialID, a.CredentialFingerprint, a.RealKeyHash, a.BindingID,
+		strconv.FormatInt(a.InputTokens, 10), strconv.FormatInt(a.OutputTokens, 10),
+		strconv.FormatInt(a.CachedInputTokens, 10), strconv.FormatInt(a.CacheCreationInputTokens, 10),
+		strconv.FormatInt(a.ReasoningTokens, 10), strconv.FormatInt(a.TotalTokens, 10),
+		billable, a.Currency, a.PricingSnapshotID,
+		a.QualityStatus, a.ValidationCode, a.AnomalyType, a.CompletionSource,
+		a.ContentHash, a.SourceID, sourceSeq,
+	}
+}
+
+// msToRFC3339 renders epoch millis as UTC RFC3339 (locale-independent). 0 → "".
+func msToRFC3339(ms int64) string {
+	if ms == 0 {
+		return ""
+	}
+	return time.UnixMilli(ms).UTC().Format(time.RFC3339)
 }
 
 // --- param parsers ---

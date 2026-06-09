@@ -125,6 +125,67 @@ func TestEnrich_SessionIDPropagatesFromODSToDWD(t *testing.T) {
 	}
 }
 
+// TestEnrich_IntegrityColumnsPropagateFromODSToDWD pins the v1.0.1-alpha.3
+// projector contract: content_hash / source_id / source_seq written on ODS
+// (since rc.7) must appear verbatim in DWD so the enterprise usage-audit
+// export carries tamper/gap evidence without joining ODS. Three points:
+//   - present values flow through unchanged
+//   - a NULL source_seq (old-proxy event) stays NULL on DWD (*int64 nil),
+//     NOT coerced to 0 — the export must distinguish "no sequence" from seq 0
+//   - absent content_hash/source_id surface as "" (same convention as AppSlug)
+func TestEnrich_IntegrityColumnsPropagateFromODSToDWD(t *testing.T) {
+	enricher := NewEnricher(&mockControlReader{}, nil)
+
+	withIntegrity := &ODSRecord{
+		OdsID:         201,
+		EventID:       "evt-with-integrity",
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
+		OrgID:         "org1",
+		RequestCount:  1,
+		RequestStatus: "success",
+		ContentHash:   sql.NullString{String: "sha256:v1:abc123", Valid: true},
+		SourceID:      sql.NullString{String: "src-uuid-1", Valid: true},
+		SourceSeq:     sql.NullInt64{Int64: 1024, Valid: true},
+	}
+	fact, err := enricher.Enrich(context.Background(), withIntegrity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fact.ContentHash != "sha256:v1:abc123" {
+		t.Errorf("content_hash not propagated: got %q", fact.ContentHash)
+	}
+	if fact.SourceID != "src-uuid-1" {
+		t.Errorf("source_id not propagated: got %q", fact.SourceID)
+	}
+	if fact.SourceSeq == nil || *fact.SourceSeq != 1024 {
+		t.Errorf("source_seq not propagated: got %v", fact.SourceSeq)
+	}
+
+	// Old-proxy event: source_seq NULL must stay NULL (nil), content_hash/
+	// source_id absent must surface as "".
+	legacy := &ODSRecord{
+		OdsID:         202,
+		EventID:       "evt-legacy-no-seq",
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
+		OrgID:         "org1",
+		RequestCount:  1,
+		RequestStatus: "success",
+		// ContentHash / SourceID / SourceSeq intentionally zero-value (NULL)
+	}
+	fact2, err := enricher.Enrich(context.Background(), legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fact2.SourceSeq != nil {
+		t.Errorf("NULL source_seq must stay nil (not coerced to 0), got %v", *fact2.SourceSeq)
+	}
+	if fact2.ContentHash != "" || fact2.SourceID != "" {
+		t.Errorf("absent content_hash/source_id should be empty string, got %q / %q", fact2.ContentHash, fact2.SourceID)
+	}
+}
+
 func TestEnrich_NoVirtualKey(t *testing.T) {
 	enricher := NewEnricher(&mockControlReader{}, nil)
 	rec := &ODSRecord{

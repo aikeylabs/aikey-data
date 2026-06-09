@@ -94,7 +94,16 @@ func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte,
 	if quarantined {
 		ingestStatus, dwdStatus = "quarantined", "quarantined"
 	}
-	insertODS := r.db.InsertOrIgnoreOn("usage_event_ods", odsColumns, odsPlaceholders, "org_id, event_id")
+	// Dialect-aware conflict target: PostgreSQL's usage_event_ods is partitioned
+	// by event_time (v1.0.1-alpha.4), so its dedup UNIQUE is
+	// (org_id, event_id, event_time) — the partition key must be in the ON
+	// CONFLICT inference. SQLite is not partitioned and uses INSERT OR IGNORE
+	// (target ignored). Dedup-equivalent: event_time is deterministic per event.
+	conflictTarget := "org_id, event_id"
+	if r.db.Dialect == shared.DialectPostgres {
+		conflictTarget = "org_id, event_id, event_time"
+	}
+	insertODS := r.db.InsertOrIgnoreOn("usage_event_ods", odsColumns, odsPlaceholders, conflictTarget)
 	res, err := r.db.ExecContext(ctx, insertODS,
 		e.EventID, nullStr(e.RequestID), nullStr(e.TraceID), nullStr(e.ProxyInstanceID), nullStr(e.DeviceID),
 		e.SchemaVersion, "local_proxy", nullStr(e.SourceVersion), nullStr(e.ClientVersion),
@@ -143,9 +152,12 @@ func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte,
 	// keep the first-stored row (do NOT overwrite — never silently pick one);
 	// the caller logs + counts the conflict.
 	var storedHash sql.NullString
+	// event_time in the WHERE prunes to the one partition on PostgreSQL (harmless
+	// extra filter on SQLite). It matches the existing row because event_time is
+	// deterministic per event, so it never hides a genuine duplicate.
 	verr := r.db.QueryRowContext(ctx,
-		"SELECT content_hash FROM usage_event_ods WHERE org_id = ? AND event_id = ? LIMIT 1",
-		e.OrgID, e.EventID,
+		"SELECT content_hash FROM usage_event_ods WHERE org_id = ? AND event_id = ? AND event_time = ? LIMIT 1",
+		e.OrgID, e.EventID, r.db.BindMillis(e.EventTime),
 	).Scan(&storedHash)
 	if verr == nil {
 		conflict := e.ContentHash != "" && storedHash.Valid && storedHash.String != "" && storedHash.String != e.ContentHash

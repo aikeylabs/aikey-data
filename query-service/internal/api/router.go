@@ -63,6 +63,12 @@ func NewRouter(h *UsageHandler, admin *AdminHandler, db *sql.DB, serviceToken st
 	authed.HandleFunc("GET /v1/usage/master/ranking", h.MasterUserRanking)
 	authed.HandleFunc("GET /v1/usage/master/by-protocol/total", h.MasterByProtocolTotal)
 	authed.HandleFunc("GET /v1/usage/master/timeline", h.MasterTimeline)
+	// Enterprise usage-audit (v1.0.1-alpha.4): recent per-event detail + full
+	// CSV export. detail = last N days (default 3) on usage_date; export streams
+	// a ≤366-day range as CSV. Reads usage_fact_dwd (audit columns incl. the
+	// content_hash/source_id/source_seq projected in v1.0.1-alpha.3).
+	authed.HandleFunc("GET /v1/usage/master/detail", h.MasterUsageDetail)
+	authed.HandleFunc("GET /v1/usage/master/export", h.MasterUsageExport)
 
 	// Admin (cost-pricing Stage 3) — pending-pricing queue + per-event
 	// audit. Same service-token auth as above; user admin-role gating is

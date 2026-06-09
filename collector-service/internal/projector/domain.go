@@ -117,6 +117,16 @@ type ODSRecord struct {
 	// Already on ODS; carried into DWD so the read model can group/filter by
 	// identity WITHOUT joining back to ODS (CQRS — reads stay on the read model).
 	OAuthIdentity              sql.NullString
+
+	// Delivery-integrity columns (v1.0.1-alpha.3): on ODS since rc.7, now also
+	// projected into DWD so the enterprise usage-audit export can carry
+	// tamper/gap evidence without joining ODS. ContentHash = sha256 over the
+	// metering tuple (tamper evidence). SourceID = which client source (vault).
+	// SourceSeq = per-source dense seq (a gap = a dropped event); nullable
+	// because old-proxy events carry no seq.
+	ContentHash                sql.NullString
+	SourceID                   sql.NullString
+	SourceSeq                  sql.NullInt64
 }
 
 // ControlEvent is a read-only projection of managed_key_control_events.
@@ -221,4 +231,12 @@ type DWDFact struct {
 	// OAuth identity (v1.0.1-alpha.1): projected verbatim from ODS so the read
 	// model can group/filter by email without an ODS join. "" when not OAuth.
 	OAuthIdentity      string
+
+	// Delivery-integrity passthrough (v1.0.1-alpha.3): copied verbatim from ODS
+	// for the usage-audit export. ContentHash/SourceID are "" when absent.
+	// SourceSeq is *int64 (not int64) to preserve SQL NULL — old-proxy events
+	// have no seq, and the audit export must distinguish "no seq" from "seq 0".
+	ContentHash        string
+	SourceID           string
+	SourceSeq          *int64
 }

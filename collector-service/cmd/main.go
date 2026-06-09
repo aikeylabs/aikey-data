@@ -17,6 +17,7 @@ import (
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/api"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/ingest"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/integrity"
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/partition"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/pricing"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/projector"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/quota"
@@ -68,6 +69,21 @@ func main() {
 
 	// Wrap DB with dialect (production always uses postgres).
 	ddb := shared.NewDB(db, shared.DialectPostgres)
+
+	// Ensure the current + next monthly partitions exist for the two
+	// partitioned usage tables (v1.0.1-alpha.4 enterprise usage-audit). Non-fatal:
+	// the baseline DEFAULT partition keeps writes working even if this hiccups, so
+	// a partition issue must NOT block the collector (stability > pruning). ahead=2
+	// gives slack against month-boundary restarts.
+	for _, p := range []struct{ table, key string }{
+		{"usage_fact_dwd", partition.KeyDate},
+		{"usage_event_ods", partition.KeyTimestamptz},
+	} {
+		if err := partition.EnsureMonthlyPartitions(context.Background(), ddb, p.table, p.key, 2, time.Now()); err != nil {
+			slog.Warn("ensure monthly partitions",
+				"event.name", "partition.ensure_failed", "table", p.table, "error", err)
+		}
+	}
 
 	// Assemble dependencies — ingest
 	odsRepo := ingest.NewSQLODSRepository(ddb)

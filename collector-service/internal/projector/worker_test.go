@@ -25,17 +25,17 @@ func (m *mockODSReader) FetchPending(_ context.Context, _ int) ([]ODSRecord, err
 	return out, nil
 }
 
-func (m *mockODSReader) MarkProjected(_ context.Context, odsID int64) error {
+func (m *mockODSReader) MarkProjected(_ context.Context, odsID int64, _ aikeytime.Millis) error {
 	m.markProjected = append(m.markProjected, odsID)
 	return nil
 }
 
-func (m *mockODSReader) MarkRetry(_ context.Context, odsID int64, _ int, _, _ string) error {
+func (m *mockODSReader) MarkRetry(_ context.Context, odsID int64, _ aikeytime.Millis, _ int, _, _ string) error {
 	m.markRetry = append(m.markRetry, odsID)
 	return nil
 }
 
-func (m *mockODSReader) MarkDeadLetter(_ context.Context, odsID int64, _, _ string) error {
+func (m *mockODSReader) MarkDeadLetter(_ context.Context, odsID int64, _ aikeytime.Millis, _, _ string) error {
 	m.markDeadLetter = append(m.markDeadLetter, odsID)
 	return nil
 }
@@ -170,6 +170,6 @@ type failingMarkReader struct {
 	err error
 }
 
-func (f *failingMarkReader) MarkProjected(_ context.Context, _ int64) error {
+func (f *failingMarkReader) MarkProjected(_ context.Context, _ int64, _ aikeytime.Millis) error {
 	return f.err
 }

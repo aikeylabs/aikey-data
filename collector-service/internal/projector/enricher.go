@@ -232,6 +232,13 @@ func (e *Enricher) buildBaseFact(rec *ODSRecord) *DWDFact {
 		// OAuth identity (v1.0.1-alpha.1): passthrough from ODS so DWD can
 		// group/filter by email without re-joining ODS.
 		OAuthIdentity:              rec.OAuthIdentity.String,
+
+		// Delivery-integrity passthrough (v1.0.1-alpha.3): copy verbatim from
+		// ODS for the usage-audit export. SourceSeq stays nullable (old-proxy
+		// events have no seq) so the export can show "no sequence" vs "seq 0".
+		ContentHash:                rec.ContentHash.String,
+		SourceID:                   rec.SourceID.String,
+		SourceSeq:                  nullInt64Ptr(rec.SourceSeq),
 	}
 }
 
@@ -440,6 +447,16 @@ func nullStrPtr(n sql.NullString) *string {
 func nullInt32Ptr(n sql.NullInt32) *int {
 	if n.Valid {
 		v := int(n.Int32)
+		return &v
+	}
+	return nil
+}
+
+// nullInt64Ptr preserves SQL NULL as a nil *int64 (used for source_seq, where
+// NULL = "old-proxy event with no sequence" must stay distinct from seq 0).
+func nullInt64Ptr(n sql.NullInt64) *int64 {
+	if n.Valid {
+		v := n.Int64
 		return &v
 	}
 	return nil

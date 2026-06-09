@@ -295,7 +295,7 @@ func (w *Worker) projectOne(ctx context.Context, rec *ODSRecord) error {
 	// ODS.dwd_status='projected' for the canary DWD watermark, so acking here
 	// is what advances that watermark and keeps watermark_health healthy.
 	if rec.VirtualKeyID.Valid && rec.VirtualKeyID.String == canaryVirtualKeyID {
-		if err := w.odsReader.MarkProjected(ctx, rec.OdsID); err != nil {
+		if err := w.odsReader.MarkProjected(ctx, rec.OdsID, rec.EventTime); err != nil {
 			slog.Error("canary mark projected failed", "ods_id", rec.OdsID, "error", err)
 			return err
 		}
@@ -329,7 +329,7 @@ func (w *Worker) projectOne(ctx context.Context, rec *ODSRecord) error {
 			fact.BillingPeriod, fact.EventTime.Time())
 	}
 
-	if err := w.odsReader.MarkProjected(ctx, rec.OdsID); err != nil {
+	if err := w.odsReader.MarkProjected(ctx, rec.OdsID, rec.EventTime); err != nil {
 		slog.Error("mark projected failed", "ods_id", rec.OdsID, "error", err)
 		return err
 	}
@@ -357,12 +357,12 @@ func (w *Worker) handleError(ctx context.Context, rec *ODSRecord, errCode, errMs
 		slog.Warn("projector dead letter",
 			"ods_id", rec.OdsID, "event_id", rec.EventID, "retry_count", newRetryCount)
 		w.metrics.DeadLetter.Add(1)
-		return w.odsReader.MarkDeadLetter(ctx, rec.OdsID, errCode, errMsg)
+		return w.odsReader.MarkDeadLetter(ctx, rec.OdsID, rec.EventTime, errCode, errMsg)
 	}
 
 	w.metrics.Retried.Add(1)
 	slog.Warn("projector retry",
 		"ods_id", rec.OdsID, "event_id", rec.EventID,
 		"retry_count", newRetryCount, "error_code", errCode)
-	return w.odsReader.MarkRetry(ctx, rec.OdsID, newRetryCount, errCode, errMsg)
+	return w.odsReader.MarkRetry(ctx, rec.OdsID, rec.EventTime, newRetryCount, errCode, errMsg)
 }

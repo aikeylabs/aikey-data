@@ -141,7 +141,11 @@ func newSQLiteODSTestDB(t *testing.T) *shared.DB {
 			region TEXT,
 			endpoint_url TEXT,
 			-- OAuth identity (v1.0.1-alpha.1)
-			oauth_identity TEXT
+			oauth_identity TEXT,
+			-- Delivery-integrity columns (rc.7 on ODS; projected to DWD in v1.0.1-alpha.3)
+			content_hash TEXT,
+			source_id TEXT,
+			source_seq INTEGER
 		);
 	`)
 	if err != nil {
@@ -150,7 +154,10 @@ func newSQLiteODSTestDB(t *testing.T) *shared.DB {
 	return shared.NewDB(raw, shared.DialectSQLite)
 }
 
-func insertODSTestRow(t *testing.T, db *shared.DB, odsID int64, status string, nextRetryAt aikeytime.Millis) {
+// insertODSTestRow inserts a minimal ODS row and returns the event_time it
+// stamped — Mark* methods now take event_time (partition-pruning, v1.0.1-alpha.4)
+// so callers need the value to target the row.
+func insertODSTestRow(t *testing.T, db *shared.DB, odsID int64, status string, nextRetryAt aikeytime.Millis) aikeytime.Millis {
 	t.Helper()
 	now := aikeytime.Now()
 	_, err := db.DB.Exec(`
@@ -175,6 +182,7 @@ func insertODSTestRow(t *testing.T, db *shared.DB, odsID int64, status string, n
 	if err != nil {
 		t.Fatal(err)
 	}
+	return now
 }
 
 // TestInsertDWDFact_UpgradedSchemaNoSQLDefault is the regression guard
@@ -313,6 +321,10 @@ func newSQLiteDWDTestDB(t *testing.T, includeSQLDefaults bool) *shared.DB {
 			pricing_snapshot_id TEXT,
 			-- OAuth identity (v1.0.1-alpha.1)
 			oauth_identity TEXT,
+			-- Delivery-integrity projection (v1.0.1-alpha.3)
+			content_hash TEXT,
+			source_id TEXT,
+			source_seq INTEGER,
 			UNIQUE (org_id, event_id)
 		);
 	`)
@@ -337,7 +349,7 @@ func newSQLiteDWDTestDB(t *testing.T, includeSQLDefaults bool) *shared.DB {
 // it on the next FetchPending.
 func TestMarkDeadLetter_UpdatesStatusAndErrorFields(t *testing.T) {
 	db := newSQLiteODSTestDB(t)
-	insertODSTestRow(t, db, 42, "retry", aikeytime.Millis(0))
+	eventTime := insertODSTestRow(t, db, 42, "retry", aikeytime.Millis(0))
 
 	// Sanity precondition: row exists in 'retry' state with no error fields.
 	var preStatus string
@@ -351,7 +363,7 @@ func TestMarkDeadLetter_UpdatesStatusAndErrorFields(t *testing.T) {
 	}
 
 	reader := NewSQLODSReader(db)
-	if err := reader.MarkDeadLetter(context.Background(), 42, "ENRICH_FAILED", "schema mismatch"); err != nil {
+	if err := reader.MarkDeadLetter(context.Background(), 42, eventTime, "ENRICH_FAILED", "schema mismatch"); err != nil {
 		t.Fatalf("MarkDeadLetter: %v", err)
 	}
 

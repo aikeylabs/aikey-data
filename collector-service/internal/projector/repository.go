@@ -12,13 +12,17 @@ type ODSReader interface {
 	FetchPending(ctx context.Context, limit int) ([]ODSRecord, error)
 
 	// MarkProjected marks an ODS record as successfully projected.
-	MarkProjected(ctx context.Context, odsID int64) error
+	// eventTime is the record's event_time — it prunes the UPDATE to the one
+	// monthly partition on PostgreSQL (usage_event_ods is partitioned by
+	// event_time, v1.0.1-alpha.4); without it the UPDATE would scan every
+	// partition. Harmless on SQLite (not partitioned).
+	MarkProjected(ctx context.Context, odsID int64, eventTime aikeytime.Millis) error
 
 	// MarkRetry marks an ODS record for retry with exponential backoff.
-	MarkRetry(ctx context.Context, odsID int64, retryCount int, errCode, errMsg string) error
+	MarkRetry(ctx context.Context, odsID int64, eventTime aikeytime.Millis, retryCount int, errCode, errMsg string) error
 
 	// MarkDeadLetter marks an ODS record as permanently failed.
-	MarkDeadLetter(ctx context.Context, odsID int64, errCode, errMsg string) error
+	MarkDeadLetter(ctx context.Context, odsID int64, eventTime aikeytime.Millis, errCode, errMsg string) error
 }
 
 // ControlEventReader reads control events for enrichment (D5: only this table, no joins).

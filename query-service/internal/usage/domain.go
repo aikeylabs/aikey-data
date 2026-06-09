@@ -270,6 +270,51 @@ type UsageDetailRow struct {
 	AppSlug                 string  `json:"app_slug"`
 }
 
+// MasterUsageAuditRow is one usage_fact_dwd row for the enterprise usage-audit
+// page (org-scoped, v1.0.1-alpha.4). Carries the full audit column set so a row
+// is self-verifiable from the read model: identity (who/which key), time
+// (occurred vs usage_date/billing_period), usage+cost (with pricing_snapshot_id
+// so a NULL billable_amount is explainable as "unpriced" not "no charge"), and
+// integrity (content_hash/source_id/source_seq projected from ODS in
+// v1.0.1-alpha.3). The page shows a trimmed subset; the CSV export emits every
+// field. SourceSeq is *int64 — NULL for old-proxy events that carry no sequence.
+type MasterUsageAuditRow struct {
+	EventID                  string  `json:"event_id"`
+	EventTimeMs              int64   `json:"event_time_ms"`
+	OccurredAtMs             int64   `json:"occurred_at_ms"`
+	UsageDate                string  `json:"usage_date"`
+	BillingPeriod            string  `json:"billing_period"`
+	AccountID                string  `json:"account_id"`
+	SeatID                   string  `json:"seat_id"`
+	SeatAlias                string  `json:"seat_alias"` // org_seats.alias (current); "" when no seat row
+	ProviderCode             string  `json:"provider_code"`
+	Model                    string  `json:"model"`
+	ProtocolType             string  `json:"protocol_type"`
+	RouteSource              string  `json:"route_source"`
+	VirtualKeyID             string  `json:"virtual_key_id"`
+	VirtualKeyHash           string  `json:"virtual_key_hash"`
+	CredentialID             string  `json:"credential_id"`
+	CredentialFingerprint    string  `json:"credential_fingerprint"`
+	RealKeyHash              string  `json:"real_key_hash"`
+	BindingID                string  `json:"binding_id"`
+	InputTokens              int64   `json:"input_tokens"`
+	OutputTokens             int64   `json:"output_tokens"`
+	CachedInputTokens        int64   `json:"cached_input_tokens"`
+	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens"`
+	ReasoningTokens          int64   `json:"reasoning_tokens"`
+	TotalTokens              int64   `json:"total_tokens"`
+	BillableAmount           *string `json:"billable_amount"`
+	Currency                 string  `json:"currency"`
+	PricingSnapshotID        string  `json:"pricing_snapshot_id"`
+	QualityStatus            string  `json:"quality_status"`
+	ValidationCode           string  `json:"validation_code"`
+	AnomalyType              string  `json:"anomaly_type"`
+	CompletionSource         string  `json:"completion_source"`
+	ContentHash              string  `json:"content_hash"`
+	SourceID                 string  `json:"source_id"`
+	SourceSeq                *int64  `json:"source_seq"`
+}
+
 // UserRanking is a single entry in the per-user ranking.
 type UserRanking struct {
 	AccountID    string `json:"account_id"`

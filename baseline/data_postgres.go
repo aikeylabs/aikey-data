@@ -13,8 +13,17 @@ package baseline
 func dataPostgres() []string {
 	return []string{
 		// --- ODS: raw usage events --------------------------------------------
+		//
+		// PARTITIONED BY RANGE (event_time) — monthly (v1.0.1-alpha.4). ODS is the
+		// larger firehose; same rationale as usage_fact_dwd (pruning + cheap
+		// retention). Partition key is event_time (the only time column every read
+		// path filters on). PK and the dedup UNIQUE gain event_time (PostgreSQL
+		// requires the partition key in them). Dedup stays equivalent: event_time
+		// is stamped once by the proxy and never changes across retransmits, so a
+		// given (org_id, event_id) always lands on the same event_time. SQLite
+		// (Personal/Trial) is NOT partitioned — see data_sqlite.go.
 		`CREATE TABLE IF NOT EXISTS usage_event_ods (
-			ods_id                    BIGSERIAL PRIMARY KEY,
+			ods_id                    BIGSERIAL,
 			event_id                  VARCHAR(64) NOT NULL,
 			request_id                VARCHAR(64),
 			trace_id                  VARCHAR(64),
@@ -78,8 +87,15 @@ func dataPostgres() []string {
 			dwd_last_error_msg        VARCHAR(1024),
 			anomaly_type              VARCHAR(64),
 			anomaly_reason            VARCHAR(1024),
-			UNIQUE (org_id, event_id)
-		)`,
+			-- event_time appended to PK + the dedup UNIQUE: PostgreSQL requires the
+			-- partition key in unique constraints. Dedup-equivalent — see the
+			-- partitioning note on the CREATE TABLE above.
+			PRIMARY KEY (ods_id, event_time),
+			UNIQUE (org_id, event_id, event_time)
+		) PARTITION BY RANGE (event_time)`,
+		// Default partition so inserts never fail before EnsureMonthlyPartitions
+		// (collector startup) creates the current/next month.
+		`CREATE TABLE IF NOT EXISTS usage_event_ods_default PARTITION OF usage_event_ods DEFAULT`,
 		`CREATE INDEX IF NOT EXISTS idx_ods_event_time ON usage_event_ods (event_time)`,
 		`CREATE INDEX IF NOT EXISTS idx_ods_org_time   ON usage_event_ods (org_id, event_time)`,
 		`CREATE INDEX IF NOT EXISTS idx_ods_seat_time  ON usage_event_ods (seat_id, event_time)`,
@@ -87,8 +103,21 @@ func dataPostgres() []string {
 		`CREATE INDEX IF NOT EXISTS idx_ods_dwd_scan   ON usage_event_ods (dwd_status, dwd_next_retry_at, ods_id)`,
 
 		// --- DWD: standardised usage fact -------------------------------------
+		//
+		// PARTITIONED BY RANGE (usage_date) — monthly (v1.0.1-alpha.4, enterprise
+		// usage-audit). Why partition: the audit page reads the last 3 days and
+		// the audit export can span a year; range-partitioning on usage_date gives
+		// partition pruning (bounded per-query cost) + cheap retention (DETACH +
+		// DROP an old month, no big DELETE). Why usage_date is the key: every read
+		// path filters on it, so pruning actually fires. PostgreSQL requires the
+		// partition key in the PK and every UNIQUE constraint, so dwd_id/event_id/
+		// ods_id all gain usage_date below. This is dedup-equivalent to the old
+		// keys because usage_date = date(event_time) and event_time is stamped once
+		// at event creation and never changes across retransmits — so a given
+		// (org_id, event_id) always lands on the same usage_date. SQLite (Personal/
+		// Trial) is NOT partitioned — see data_sqlite.go (low volume, single table).
 		`CREATE TABLE IF NOT EXISTS usage_fact_dwd (
-			dwd_id                        BIGSERIAL PRIMARY KEY,
+			dwd_id                        BIGSERIAL,
 			event_id                      VARCHAR(64) NOT NULL,
 			ods_id                        BIGINT NOT NULL,
 			occurred_at                   TIMESTAMPTZ NOT NULL,
@@ -138,12 +167,21 @@ func dataPostgres() []string {
 			control_event_revision        VARCHAR(64),
 			projector_version             VARCHAR(64) NOT NULL,
 			projected_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			UNIQUE (event_id),
-			UNIQUE (ods_id)
-		)`,
-		// 2026-05-11 fix: composite UNIQUE matching collector-service's
-		// projector ON CONFLICT (org_id, event_id) target.
-		`CREATE UNIQUE INDEX IF NOT EXISTS uq_dwd_org_event_id ON usage_fact_dwd (org_id, event_id)`,
+			-- usage_date appended to PK + every UNIQUE: PostgreSQL requires the
+			-- partition key in unique constraints. Dedup-equivalent — see the
+			-- partitioning note on the CREATE TABLE above.
+			PRIMARY KEY (dwd_id, usage_date),
+			UNIQUE (event_id, usage_date),
+			UNIQUE (ods_id, usage_date)
+		) PARTITION BY RANGE (usage_date)`,
+		// Default partition catches any row whose month has no dedicated
+		// partition yet, so inserts never fail before EnsureMonthlyPartitions
+		// (collector startup) has created the current/next month. Monthly
+		// partitions are created at runtime, not here (time-dependent).
+		`CREATE TABLE IF NOT EXISTS usage_fact_dwd_default PARTITION OF usage_fact_dwd DEFAULT`,
+		// 2026-05-11 fix: composite UNIQUE matching collector-service's projector
+		// ON CONFLICT target. v1.0.1-alpha.4: + usage_date for the partition key.
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_dwd_org_event_id ON usage_fact_dwd (org_id, event_id, usage_date)`,
 		`CREATE INDEX IF NOT EXISTS idx_dwd_org_date      ON usage_fact_dwd (org_id, usage_date)`,
 		`CREATE INDEX IF NOT EXISTS idx_dwd_seat_date     ON usage_fact_dwd (seat_id, usage_date)`,
 		`CREATE INDEX IF NOT EXISTS idx_dwd_account_date  ON usage_fact_dwd (account_id, usage_date)`,

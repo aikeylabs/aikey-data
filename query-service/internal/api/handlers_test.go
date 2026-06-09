@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/usage"
@@ -68,6 +69,16 @@ func (m *mockRepo) MasterTimeline(_ context.Context, p usage.QueryParams) ([]usa
 	return []usage.TimelinePoint{
 		{Date: "2026-03-01", TotalTokens: 5000, RequestCount: 25},
 	}, nil
+}
+
+func (m *mockRepo) MasterUsageDetail(_ context.Context, p usage.QueryParams) ([]usage.MasterUsageAuditRow, error) {
+	return []usage.MasterUsageAuditRow{
+		{EventID: "evt-1", SeatID: "seat-1", ProviderCode: "anthropic", Model: "claude-sonnet-4-6", TotalTokens: 1200, UsageDate: "2026-06-08"},
+	}, nil
+}
+
+func (m *mockRepo) StreamMasterUsageExport(_ context.Context, p usage.QueryParams, fn func(*usage.MasterUsageAuditRow) error) error {
+	return fn(&usage.MasterUsageAuditRow{EventID: "evt-1", SeatID: "seat-1", ProviderCode: "anthropic", TotalTokens: 1200, UsageDate: "2026-06-08"})
 }
 
 func (m *mockRepo) PersonalByKeyTotal(_ context.Context, p usage.QueryParams) ([]usage.KeyTotal, error) {
@@ -194,6 +205,81 @@ func TestPersonalTimeline_MissingSeatID(t *testing.T) {
 
 	if w.Code != 400 {
 		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMasterUsageDetail(t *testing.T) {
+	h := NewUsageHandler(&mockRepo{})
+	req := httptest.NewRequest("GET", "/v1/usage/master/detail?org_id=org1", nil)
+	w := httptest.NewRecorder()
+	h.MasterUsageDetail(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Rows []usage.MasterUsageAuditRow `json:"rows"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Rows) != 1 || resp.Rows[0].EventID != "evt-1" {
+		t.Errorf("expected 1 audit row evt-1, got %+v", resp.Rows)
+	}
+}
+
+func TestMasterUsageDetail_MissingOrgID(t *testing.T) {
+	h := NewUsageHandler(&mockRepo{})
+	req := httptest.NewRequest("GET", "/v1/usage/master/detail", nil)
+	w := httptest.NewRecorder()
+	h.MasterUsageDetail(w, req)
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMasterUsageExport_StreamsCSV(t *testing.T) {
+	h := NewUsageHandler(&mockRepo{})
+	req := httptest.NewRequest("GET", "/v1/usage/master/export?org_id=org1&start_date=2026-06-01&end_date=2026-06-08", nil)
+	w := httptest.NewRecorder()
+	h.MasterUsageExport(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "text/csv; charset=utf-8" {
+		t.Errorf("expected CSV content-type, got %q", ct)
+	}
+	if cd := w.Header().Get("Content-Disposition"); cd == "" {
+		t.Errorf("expected Content-Disposition attachment header")
+	}
+	body := w.Body.String()
+	// header row + one data row from the mock stream
+	if !strings.Contains(body, "event_id,event_time") {
+		t.Errorf("missing CSV header, got: %q", body)
+	}
+	if !strings.Contains(body, "evt-1") {
+		t.Errorf("missing streamed data row, got: %q", body)
+	}
+}
+
+func TestMasterUsageExport_RequiresDateRange(t *testing.T) {
+	h := NewUsageHandler(&mockRepo{})
+	req := httptest.NewRequest("GET", "/v1/usage/master/export?org_id=org1", nil)
+	w := httptest.NewRecorder()
+	h.MasterUsageExport(w, req)
+	if w.Code != 400 {
+		t.Fatalf("expected 400 (missing date range), got %d", w.Code)
+	}
+}
+
+func TestMasterUsageExport_RejectsOverlongRange(t *testing.T) {
+	h := NewUsageHandler(&mockRepo{})
+	req := httptest.NewRequest("GET", "/v1/usage/master/export?org_id=org1&start_date=2024-01-01&end_date=2026-01-01", nil)
+	w := httptest.NewRecorder()
+	h.MasterUsageExport(w, req)
+	if w.Code != 400 {
+		t.Fatalf("expected 400 (range >366d), got %d", w.Code)
 	}
 }
 

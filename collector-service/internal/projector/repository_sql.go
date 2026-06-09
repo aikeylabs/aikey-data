@@ -39,7 +39,8 @@ SELECT ods_id, event_id, event_time, occurred_at,
        app_slug,
        session_id,
        region, endpoint_url,
-       oauth_identity
+       oauth_identity,
+       content_hash, source_id, source_seq
 FROM usage_event_ods
 WHERE ((dwd_status = 'pending')
    OR (dwd_status = 'retry' AND dwd_next_retry_at <= %s))
@@ -80,6 +81,7 @@ func (r *sqlODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord
 			&rec.SessionID,
 			&rec.Region, &rec.EndpointURL,
 			&rec.OAuthIdentity,
+			&rec.ContentHash, &rec.SourceID, &rec.SourceSeq,
 		); err != nil {
 			return nil, fmt.Errorf("scan ods row: %w", err)
 		}
@@ -88,17 +90,22 @@ func (r *sqlODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord
 	return records, rows.Err()
 }
 
-func (r *sqlODSReader) MarkProjected(ctx context.Context, odsID int64) error {
+func (r *sqlODSReader) MarkProjected(ctx context.Context, odsID int64, eventTime aikeytime.Millis) error {
+	// event_time in the WHERE prunes to the one partition on PostgreSQL (ODS is
+	// partitioned by event_time, v1.0.1-alpha.4) — without it this per-event
+	// UPDATE would scan every monthly partition. Harmless extra filter on SQLite.
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE usage_event_ods SET dwd_status = 'projected' WHERE ods_id = ?`, odsID)
+		`UPDATE usage_event_ods SET dwd_status = 'projected' WHERE ods_id = ? AND event_time = ?`,
+		odsID, r.db.BindMillis(eventTime))
 	return err
 }
 
-func (r *sqlODSReader) MarkRetry(ctx context.Context, odsID int64, retryCount int, errCode, errMsg string) error {
+func (r *sqlODSReader) MarkRetry(ctx context.Context, odsID int64, eventTime aikeytime.Millis, retryCount int, errCode, errMsg string) error {
 	// Compute retry time in Go to avoid PG-specific interval arithmetic.
 	// Wrap as aikeytime.Millis so the dialect-aware bind helper emits the
 	// right driver type (int64 for SQLite INTEGER, time.Time for PG TIMESTAMPTZ).
 	nextRetryAt := aikeytime.FromTime(time.Now().Add(retryDelay(retryCount)))
+	// event_time prunes to one partition on PG (see MarkProjected).
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE usage_event_ods
 		 SET dwd_status = 'retry',
@@ -106,12 +113,12 @@ func (r *sqlODSReader) MarkRetry(ctx context.Context, odsID int64, retryCount in
 		     dwd_next_retry_at = ?,
 		     dwd_last_error_code = ?,
 		     dwd_last_error_msg = ?
-		 WHERE ods_id = ?`,
-		retryCount, r.db.BindMillis(nextRetryAt), errCode, errMsg, odsID)
+		 WHERE ods_id = ? AND event_time = ?`,
+		retryCount, r.db.BindMillis(nextRetryAt), errCode, errMsg, odsID, r.db.BindMillis(eventTime))
 	return err
 }
 
-func (r *sqlODSReader) MarkDeadLetter(ctx context.Context, odsID int64, errCode, errMsg string) error {
+func (r *sqlODSReader) MarkDeadLetter(ctx context.Context, odsID int64, eventTime aikeytime.Millis, errCode, errMsg string) error {
 	// Bind order matches the three `?` placeholders by POSITION (SQLite/PG
 	// shared dialect): code → msg → ods_id. The original 4/8 shared.DB
 	// refactor (commit 39a8e526) translated PG named placeholders ($1=odsID,
@@ -121,13 +128,15 @@ func (r *sqlODSReader) MarkDeadLetter(ctx context.Context, odsID int64, errCode,
 	// 'dead_letter' and `FetchPending` re-fetched them every scan → the
 	// projector worker stalled at the first permanent-error event and
 	// never advanced `last_scanned_ods_id`. See bugfix 20260522.
+	// event_time prunes to one partition on PG (see MarkProjected). Bind order
+	// follows the `?` positions: code → msg → ods_id → event_time.
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE usage_event_ods
 		 SET dwd_status = 'dead_letter',
 		     dwd_last_error_code = ?,
 		     dwd_last_error_msg = ?
-		 WHERE ods_id = ?`,
-		errCode, errMsg, odsID)
+		 WHERE ods_id = ? AND event_time = ?`,
+		errCode, errMsg, odsID, r.db.BindMillis(eventTime))
 	return err
 }
 
@@ -218,7 +227,8 @@ const dwdColumns = `event_id, ods_id, occurred_at, event_time, usage_date,
     control_event_id, control_event_revision, projector_version, projected_at,
     app_slug, session_id,
     region, endpoint_url, billing_period, unit_prices_snapshot, pricing_snapshot_id,
-    oauth_identity`
+    oauth_identity,
+    content_hash, source_id, source_seq`
 
 const dwdPlaceholders = `?,?,?,?,?,
     ?,?,?,
@@ -236,10 +246,22 @@ const dwdPlaceholders = `?,?,?,?,?,
     ?,?,?,?,
     ?,?,
     ?,?,?,?,?,
-    ?`
+    ?,
+    ?,?,?`
 
 func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
-	insertDWDSQL := w.db.InsertOrIgnoreOn("usage_fact_dwd", dwdColumns, dwdPlaceholders, "org_id, event_id")
+	// Dialect-aware conflict target: PostgreSQL's usage_fact_dwd is partitioned
+	// by usage_date (v1.0.1-alpha.4), so its UNIQUE constraint is
+	// (org_id, event_id, usage_date) — the partition key must be in the
+	// constraint, hence in the ON CONFLICT inference. SQLite is not partitioned
+	// and uses INSERT OR IGNORE (conflictTarget ignored), so the plain
+	// (org_id, event_id) UNIQUE still applies. Both are dedup-equivalent because
+	// usage_date is deterministic from event_time (stamped once, never changes).
+	conflictTarget := "org_id, event_id"
+	if w.db.Dialect == shared.DialectPostgres {
+		conflictTarget = "org_id, event_id, usage_date"
+	}
+	insertDWDSQL := w.db.InsertOrIgnoreOn("usage_fact_dwd", dwdColumns, dwdPlaceholders, conflictTarget)
 	res, err := w.db.ExecContext(ctx, insertDWDSQL,
 		// Why int64 millis (via BindMillis) instead of time.Time: Go's default
 		// time.Time String() format contains a local tz suffix (e.g. "+0800
@@ -279,6 +301,10 @@ func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 		// by OAuth email directly (was dropped during projection — see the
 		// PersonalByKeyTotal ODS-join hack this removes the need for).
 		f.OAuthIdentity,
+		// Delivery-integrity passthrough (v1.0.1-alpha.3): content_hash/source_id/
+		// source_seq carried ODS→DWD for the usage-audit export's tamper/gap
+		// evidence. SourceSeq is *int64 → binds SQL NULL for old-proxy events.
+		f.ContentHash, f.SourceID, f.SourceSeq,
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert dwd fact %s: %w", f.EventID, err)
@@ -293,9 +319,13 @@ func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 	// verify it's a real duplicate via SELECT before silently dropping
 	// the projection.
 	var found int
+	// usage_date in the WHERE prunes to the one partition on PostgreSQL (and is
+	// a harmless extra filter on SQLite) — without it this dedup-verify would
+	// scan every monthly partition. usage_date is deterministic per event so it
+	// cannot exclude a genuine duplicate.
 	verr := w.db.QueryRowContext(ctx,
-		"SELECT 1 FROM usage_fact_dwd WHERE org_id = ? AND event_id = ? LIMIT 1",
-		f.OrgID, f.EventID,
+		"SELECT 1 FROM usage_fact_dwd WHERE org_id = ? AND event_id = ? AND usage_date = ? LIMIT 1",
+		f.OrgID, f.EventID, f.UsageDate,
 	).Scan(&found)
 	if verr == nil && found == 1 {
 		return false, nil // genuine duplicate
