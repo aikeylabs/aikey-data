@@ -98,7 +98,16 @@ func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte,
 	// by event_time (v1.0.1-alpha.4), so its dedup UNIQUE is
 	// (org_id, event_id, event_time) — the partition key must be in the ON
 	// CONFLICT inference. SQLite is not partitioned and uses INSERT OR IGNORE
-	// (target ignored). Dedup-equivalent: event_time is deterministic per event.
+	// (target ignored).
+	//
+	// CONTRACT (not just an assumption): a given event_id always carries the
+	// SAME event_time across every (re)delivery — the proxy stamps event_time
+	// once and resends the persisted event verbatim, and usagehash excludes
+	// event_time. The dedup verify below (WHERE org_id,event_id,event_time)
+	// relies on this. If this contract is ever broken (clock skew across proxy
+	// instances, a client crafting a fresh event_time on resend), the SQLite
+	// path will misread a true duplicate as a NOT NULL/CHECK rejection. See
+	// workflow/CI/bugfix/2026-06-10-collector-dedup-event-time-misclassify.md.
 	conflictTarget := "org_id, event_id"
 	if r.db.Dialect == shared.DialectPostgres {
 		conflictTarget = "org_id, event_id, event_time"

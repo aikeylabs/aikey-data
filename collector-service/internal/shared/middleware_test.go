@@ -123,7 +123,10 @@ func TestIngestAuth_JWTSignedWithWrongSecretRejected(t *testing.T) {
 	tok := signTestToken(t, bad, "acct-abc")
 	req, _ := http.NewRequest("GET", srv.URL, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("wrong-secret JWT must 401; got %d", resp.StatusCode)
@@ -145,7 +148,10 @@ func TestIngestAuth_ExpiredJWTRejected(t *testing.T) {
 	})
 	req, _ := http.NewRequest("GET", srv.URL, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expired JWT must 401; got %d", resp.StatusCode)
@@ -163,7 +169,10 @@ func TestIngestAuth_JWTWithoutAccountIDRejected(t *testing.T) {
 	tok := signTestToken(t, secret, "" /* empty account_id */)
 	req, _ := http.NewRequest("GET", srv.URL, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("missing account_id JWT must 401; got %d", resp.StatusCode)
@@ -181,7 +190,10 @@ func TestIngestAuth_ServiceTokenMatchPopulatesSubject(t *testing.T) {
 
 	req, _ := http.NewRequest("GET", srv.URL, nil)
 	req.Header.Set("Authorization", "Bearer admin-svc-token")
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("status=%d, want 200", resp.StatusCode)
@@ -199,7 +211,10 @@ func TestIngestAuth_ServiceTokenMismatchRejects(t *testing.T) {
 
 	req, _ := http.NewRequest("GET", srv.URL, nil)
 	req.Header.Set("Authorization", "Bearer wrong-token")
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("wrong service_token must 401; got %d", resp.StatusCode)
@@ -222,7 +237,10 @@ func TestIngestAuth_JWTPreferredOverServiceToken(t *testing.T) {
 	tok := signTestToken(t, secret, "acct-via-jwt")
 	req, _ := http.NewRequest("GET", srv.URL, nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 	defer resp.Body.Close()
 	body := make([]byte, 256)
 	n, _ := resp.Body.Read(body)
@@ -243,7 +261,10 @@ func TestIngestAuth_FallsThroughToServiceTokenWhenJWTInvalid(t *testing.T) {
 	// parse will fail, then the service_token check should match.
 	req, _ := http.NewRequest("GET", srv.URL, nil)
 	req.Header.Set("Authorization", "Bearer admin-svc-token")
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 	defer resp.Body.Close()
 	body := make([]byte, 256)
 	n, _ := resp.Body.Read(body)
@@ -260,7 +281,10 @@ func TestIngestAuth_BothInvalidReturns401(t *testing.T) {
 
 	req, _ := http.NewRequest("GET", srv.URL, nil)
 	req.Header.Set("Authorization", "Bearer garbage")
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("got %d, want 401", resp.StatusCode)
@@ -274,7 +298,10 @@ func TestIngestAuth_MissingAuthHeaderRejected(t *testing.T) {
 	srv := httptest.NewServer(IngestAuth(secret, "admin-svc-token", echoSubjectHandler()))
 	defer srv.Close()
 
-	resp, _ := http.Get(srv.URL)
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("missing Authorization must 401; got %d", resp.StatusCode)
@@ -288,7 +315,10 @@ func TestIngestAuth_NonBearerSchemeRejected(t *testing.T) {
 
 	req, _ := http.NewRequest("GET", srv.URL, nil)
 	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("non-Bearer scheme must 401; got %d", resp.StatusCode)
@@ -304,7 +334,10 @@ func TestIngestAuth_NoAuthConfiguredPassesThrough(t *testing.T) {
 	srv := httptest.NewServer(IngestAuth(nil, "", echoSubjectHandler()))
 	defer srv.Close()
 
-	resp, _ := http.Get(srv.URL)
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("no-auth dev path must pass; got %d", resp.StatusCode)
@@ -324,7 +357,10 @@ func TestServiceTokenAuth_BackCompatAliasStillWorks(t *testing.T) {
 
 	req, _ := http.NewRequest("GET", srv.URL, nil)
 	req.Header.Set("Authorization", "Bearer legacy-token")
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("legacy alias must pass matching token; got %d", resp.StatusCode)

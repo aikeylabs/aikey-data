@@ -45,7 +45,6 @@ func dataSQLite() []string {
 			virtual_key_id            TEXT,
 			virtual_key_revision      TEXT,
 			virtual_key_hash          TEXT,
-			virtual_key_alias         TEXT,
 			binding_id                TEXT,
 			credential_id             TEXT,
 			credential_revision       TEXT,

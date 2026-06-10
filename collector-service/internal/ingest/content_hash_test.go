@@ -173,8 +173,17 @@ func TestContentHash_ConflictOnDuplicate(t *testing.T) {
 		t.Fatalf("first insert status=%s, want accepted", r.Status)
 	}
 
-	// Same event_id, different metering → different hash.
+	// Same event_id, different metering → different hash. A genuine
+	// re-delivery carries the SAME event_time (the proxy stamps it once and
+	// resends the persisted event verbatim — see InsertEvent's dedup
+	// contract), so we pin e2's event_time to e1's. Without this, two
+	// hashEvent() calls take aikeytime.Now() a hair apart and, when they
+	// straddle a millisecond boundary, the (org_id,event_id,event_time)
+	// verify misses the stored row and the duplicate is misread as rejected
+	// (flaky). See workflow/CI/bugfix/2026-06-10-collector-dedup-event-time-misclassify.md.
 	e2, h2 := hashEvent("h-dup", 1, 100, 999, 10, 20, "claude", "anthropic")
+	e2.EventTime = e1.EventTime
+	e2.OccurredAt = e1.OccurredAt
 	e2.ContentHash = h2
 	if h1 == h2 {
 		t.Fatal("test setup: the two hashes should differ")

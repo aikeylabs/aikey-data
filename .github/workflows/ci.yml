@@ -1,0 +1,40 @@
+# CI gate — runs unit/in-process tests on every push and PR.
+# Project rule: 持续交付 = CI/CD 失败即失败. A non-zero exit blocks the PR.
+#
+# aikey-data is a MULTI-MODULE repo: there is no root go.mod. Each service
+# (collector-service, baseline, query-service) is its own Go module, so the
+# matrix tests each module independently. fail-fast: false so one module's
+# failure still reports the others.
+#
+# Scope: native `go test ./...` per module only (no docker/PG); heavier
+# integration is left to nightly/opt-in.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [collector-service, baseline, query-service]
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./... -count=1
