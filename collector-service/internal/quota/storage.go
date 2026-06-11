@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
 )
@@ -56,6 +57,11 @@ type Rule struct {
 type Threshold struct {
 	Pct    int    `json:"pct"`
 	Action string `json:"action"`
+	// Email alert on crossing (2026-06-09): when Notify, the materializer asks
+	// control to send an alert as this threshold is newly crossed. NotifyEmail is
+	// forwarded as-is; control resolves "" to the seat's own email.
+	Notify      bool   `json:"notify,omitempty"`
+	NotifyEmail string `json:"notify_email,omitempty"`
 }
 
 // Storage reads quota_subject and read-modify-writes quota_counter on the
@@ -169,9 +175,9 @@ func (s *Storage) sumFromDWD(ctx context.Context, metric, periodKey string, seat
 		args = append(args, id)
 	}
 	where := "seat_id IN (" + strings.Join(ph, ",") + ")"
-	if pf, parg, ok := dwdPeriodFilter(s.db, periodKey); ok {
+	if pf, pargs, ok := dwdPeriodFilter(s.db, periodKey); ok {
 		where += " AND " + pf
-		args = append(args, parg)
+		args = append(args, pargs...)
 	}
 	var used float64
 	if err := s.db.QueryRowContext(ctx,
@@ -203,23 +209,47 @@ func dwdMetricSumExpr(metric string) (string, bool) {
 	}
 }
 
-// dwdPeriodFilter maps a periodKey ("monthly:2026-06" / "daily:2026-06-03") to a
-// usage_fact_dwd WHERE fragment + bind arg. monthly uses billing_period (DWD's
-// native 'YYYY-MM' column); daily dates event_time. Unknown shape → no filter
-// (ok=false), summing the whole table — defensive, shouldn't happen.
-func dwdPeriodFilter(db *shared.DB, periodKey string) (string, any, bool) {
+// dwdPeriodFilter maps a periodKey ("monthly:2026-06" / "daily:2026-06-03" /
+// "weekly:2026-W23") to a usage_fact_dwd WHERE fragment + bind args. monthly uses
+// billing_period (DWD's native 'YYYY-MM' column); daily dates event_time to a
+// single day; weekly is a [Mon, next-Mon) range (two bind args). Unknown shape →
+// no filter (ok=false), summing the whole table — defensive, shouldn't happen.
+func dwdPeriodFilter(db *shared.DB, periodKey string) (string, []any, bool) {
 	kind, val, found := strings.Cut(periodKey, ":")
 	if !found || val == "" {
 		return "", nil, false
 	}
 	switch kind {
 	case "monthly":
-		return "billing_period = ?", val, true
+		return "billing_period = ?", []any{val}, true
 	case "daily":
-		return db.DateOf("event_time") + " = ?", val, true
+		return db.DateOf("event_time") + " = ?", []any{val}, true
+	case "weekly":
+		// Mirror proxy.PeriodKey's ISO-week bucketing, translated to a DWD window.
+		start, end, ok := isoWeekRange(val)
+		if !ok {
+			return "", nil, false
+		}
+		d := db.DateOf("event_time")
+		return d + " >= ? AND " + d + " < ?", []any{start, end}, true
 	default:
 		return "", nil, false
 	}
+}
+
+// isoWeekRange maps an ISO-week label "2006-W02" to its [Monday, next-Monday)
+// date strings (YYYY-MM-DD, UTC). ISO week 1 is the week containing Jan 4. Keep
+// in lockstep with aikey-proxy quota.PeriodKey (weekly case) so the proxy's
+// counter bucket and this re-sum window cover the exact same days.
+func isoWeekRange(val string) (start, end string, ok bool) {
+	var y, w int
+	if n, err := fmt.Sscanf(val, "%d-W%d", &y, &w); err != nil || n != 2 || w < 1 || w > 53 {
+		return "", "", false
+	}
+	jan4 := time.Date(y, 1, 4, 0, 0, 0, 0, time.UTC)
+	week1Monday := jan4.AddDate(0, 0, -((int(jan4.Weekday())+6)%7))
+	monday := week1Monday.AddDate(0, 0, (w-1)*7)
+	return monday.Format("2006-01-02"), monday.AddDate(0, 0, 7).Format("2006-01-02"), true
 }
 
 // MarkTriggered overwrites the period's triggered_thresholds (the caller passes

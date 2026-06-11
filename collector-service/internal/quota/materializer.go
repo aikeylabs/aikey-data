@@ -2,6 +2,7 @@ package quota
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -14,14 +15,20 @@ import (
 // re-read it per fact. All work is best-effort: callers ignore errors so the
 // usage pipeline is never blocked by quota.
 type Materializer struct {
-	store *Storage
-	ttl   time.Duration
+	store    *Storage
+	ttl      time.Duration
+	notifier AlertNotifier // optional; nil = no email alerts on crossing
 
 	mu        sync.Mutex
 	seatIndex map[string][]*Subject // seat_id → applicable subjects (own seat + its groups)
 	loadedAt  time.Time
 	loaded    bool
 }
+
+// SetNotifier attaches an optional crossing-alert notifier (email via control).
+// Call before serving; nil-safe (no notifier ⇒ crossings are recorded but not
+// emailed). Kept a setter so NewMaterializer's signature stays unchanged.
+func (m *Materializer) SetNotifier(n AlertNotifier) { m.notifier = n }
 
 // NewMaterializer builds the materializer. ttl<=0 defaults to 30s.
 func NewMaterializer(store *Storage, ttl time.Duration) *Materializer {
@@ -156,6 +163,20 @@ func (m *Materializer) applyToSubject(ctx context.Context, sub *Subject, tokenDe
 					slog.Info("quota.threshold.crossed",
 						"subject_id", sub.SubjectID, "metric", k.metric, "period_key", res.pk,
 						"pct", th.Pct, "action", th.Action, "used", res.used, "limit", r.LimitAmount)
+					// Email alert (architecture B): only on the NEW crossing (we're
+					// inside the !containsInt dedup), only when the admin enabled it.
+					if th.Notify && m.notifier != nil {
+						m.notifier.NotifyCrossing(CrossingAlert{
+							SubjectID:   sub.SubjectID,
+							SubjectKind: sub.SubjectKind,
+							Metric:      k.metric,
+							Period:      k.period,
+							Pct:         th.Pct,
+							Used:        res.used,
+							Limit:       r.LimitAmount,
+							NotifyEmail: th.NotifyEmail,
+						})
+					}
 				}
 			}
 		}
@@ -225,6 +246,10 @@ func periodKey(period, billingPeriod string, eventTime time.Time) string {
 	switch period {
 	case "daily":
 		return "daily:" + eventTime.UTC().Format("2006-01-02")
+	case "weekly":
+		// ISO week (Mon-Sun); lockstep with proxy.PeriodKey + dwdPeriodFilter.
+		y, w := eventTime.UTC().ISOWeek()
+		return fmt.Sprintf("weekly:%04d-W%02d", y, w)
 	case "monthly":
 		m := billingPeriod
 		if m == "" {

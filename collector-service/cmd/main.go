@@ -142,7 +142,15 @@ func main() {
 	projWorker.SetLossPromoter(odsRepo)
 	// Phase 2 Stage 5: materialize quota_counter + record threshold crossings as
 	// facts project (no-op when no quota_subject rows; best-effort, panic-guarded).
-	projWorker.SetQuotaMaterializer(quota.NewMaterializer(quota.NewStorage(ddb), 0))
+	quotaMat := quota.NewMaterializer(quota.NewStorage(ddb), 0)
+	// Email alerts on threshold crossing (architecture B): POST to control's
+	// /internal/quota-alert. Nil notifier (CONTROL_URL/SERVICE_TOKEN unset) ⇒
+	// crossings still recorded, just not emailed.
+	if n := quota.NewHTTPNotifier(cfg.ControlURL, cfg.ServiceToken, slog.Default()); n != nil {
+		quotaMat.SetNotifier(n)
+		slog.Info("quota alert notifier enabled", "control_url", cfg.ControlURL)
+	}
+	projWorker.SetQuotaMaterializer(quotaMat)
 
 	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, gapScanner, odsRepo, cfg.JWTSecret, cfg.ServiceToken)
 	if cfg.ServiceToken != "" {

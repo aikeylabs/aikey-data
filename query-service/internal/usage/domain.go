@@ -316,11 +316,17 @@ type MasterUsageAuditRow struct {
 }
 
 // UserRanking is a single entry in the per-user ranking.
+//
+// CostUSD (2026-06-09) is Σ billable_amount over USD-priced rows for the seat —
+// same estimated-cost semantics as TimelinePoint/ProtocolTotal. UnpricedRequestCount
+// lets the FE flag "N 笔未计价 ⚠" so a low cost isn't mistaken for low usage.
 type UserRanking struct {
-	AccountID    string `json:"account_id"`
-	SeatID       string `json:"seat_id"`
-	TotalTokens  int64  `json:"total_tokens"`
-	RequestCount int64  `json:"request_count"`
+	AccountID            string  `json:"account_id"`
+	SeatID               string  `json:"seat_id"`
+	TotalTokens          int64   `json:"total_tokens"`
+	RequestCount         int64   `json:"request_count"`
+	CostUSD              float64 `json:"cost_usd"`
+	UnpricedRequestCount int64   `json:"unpriced_request_count"`
 }
 
 // QueryParams holds common query filters.

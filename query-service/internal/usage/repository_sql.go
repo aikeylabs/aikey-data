@@ -739,7 +739,9 @@ func (r *sqlRepo) PersonalUsageDetail(ctx context.Context, p QueryParams) ([]Usa
 func (r *sqlRepo) MasterUserRanking(ctx context.Context, p QueryParams) ([]UserRanking, error) {
 	startMs, endMs := p.LocalWindowMs()
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT account_id, seat_id, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
+		SELECT account_id, seat_id, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0),
+		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN request_count ELSE 0 END),0)
 		FROM usage_fact_dwd
 		WHERE org_id = ?
 		  AND event_time >= ? AND event_time < ?
@@ -755,7 +757,7 @@ func (r *sqlRepo) MasterUserRanking(ctx context.Context, p QueryParams) ([]UserR
 	var result []UserRanking
 	for rows.Next() {
 		var ur UserRanking
-		if err := rows.Scan(&ur.AccountID, &ur.SeatID, &ur.TotalTokens, &ur.RequestCount); err != nil {
+		if err := rows.Scan(&ur.AccountID, &ur.SeatID, &ur.TotalTokens, &ur.RequestCount, &ur.CostUSD, &ur.UnpricedRequestCount); err != nil {
 			return nil, err
 		}
 		result = append(result, ur)

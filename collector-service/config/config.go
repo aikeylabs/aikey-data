@@ -18,6 +18,12 @@ type Config struct {
 	// Empty means "no JWT ingest path; only ServiceToken accepted".
 	JWTSecret     []byte
 	LogLevel      string
+	// ControlURL is control-service's base URL (e.g. http://control-service:8080).
+	// Set ⇒ the quota materializer POSTs threshold-crossing alerts to control's
+	// /internal/quota-alert (authenticated with ServiceToken, the shared secret
+	// control verifies). Empty ⇒ crossings are recorded but no email is sent
+	// (Personal/Trial in-proc editions have no separate control plane to call).
+	ControlURL string
 }
 
 func Load() (*Config, error) {
@@ -38,6 +44,7 @@ func Load() (*Config, error) {
 		// round 5 F1: docs were always AIKEY_LOG_LEVEL but code read bare
 		// LOG_LEVEL — this aligns code to the documented contract.
 		LogLevel:      envOrDefault("AIKEY_LOG_LEVEL", "info"),
+		ControlURL:    os.Getenv("CONTROL_URL"),
 	}
 	return c, nil
 }

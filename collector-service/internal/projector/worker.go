@@ -34,6 +34,18 @@ const (
 )
 
 // Worker runs the ODS → DWD projection loop in the background.
+//
+// DEPLOYMENT CONSTRAINT — single instance only (2026-06-10 perf review,
+// user decision: document, don't lock). The pending/retry scan has no
+// cross-instance coordination (no FOR UPDATE SKIP LOCKED / advisory lock /
+// lease), so running the projector in two collector replicas means both
+// claim the same ODS rows. The DWD insert itself is conflict-guarded
+// (ON CONFLICT DO NOTHING on the dedup key) so no duplicate fact rows,
+// but side effects race: unpriced_models event_count double-bumps
+// (ON CONFLICT DO UPDATE) and the scan checkpoint can regress. If
+// horizontal collector scaling is ever committed, add SKIP LOCKED row
+// claims here first — until then, deploy exactly one projector-enabled
+// collector (see the Production install SOP).
 type Worker struct {
 	odsReader  ODSReader
 	dwdWriter  DWDWriter
