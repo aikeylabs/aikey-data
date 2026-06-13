@@ -11,6 +11,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -270,13 +272,24 @@ func HandleCanaryCheck(db DBQuerier) http.HandlerFunc {
 		err := db.QueryRowContext(ctx,
 			"SELECT dwd_status FROM usage_event_ods WHERE event_id = ? LIMIT 1", eventID,
 		).Scan(&dwdStatus)
-		if err == nil {
+		switch {
+		case err == nil:
 			result.ODSReceived = true
 			result.DWDProjected = (dwdStatus.Valid && dwdStatus.String == "projected")
+		case errors.Is(err, sql.ErrNoRows):
+			// Genuinely not ingested yet — the expected "not arrived" path.
+		default:
+			// A real query error (e.g. the ?-vs-$1 placeholder mismatch on PG)
+			// must NOT masquerade as "not received" — that silently turned the
+			// cluster pipeline health permanently red while ingest was fine.
+			slog.WarnContext(ctx, "canary-check query failed; ods_received=false may be wrong",
+				slog.String("event.name", "collector.canary_check.query_failed"),
+				slog.String("error.code", "CANARY_CHECK_QUERY_FAILED"),
+				slog.String("event_id", eventID),
+				slog.String("error", err.Error()))
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(result)
 	}
 }
-

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"database/sql"
 	"net/http"
 
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/diagnostics"
@@ -14,17 +13,24 @@ import (
 
 // MetricsResponse combines ingest and projector metrics.
 type MetricsResponse struct {
-	Ingest    ingest.MetricsSnapshot           `json:"ingest"`
-	Projector projector.WorkerMetricsSnapshot   `json:"projector"`
+	Ingest    ingest.MetricsSnapshot          `json:"ingest"`
+	Projector projector.WorkerMetricsSnapshot `json:"projector"`
 }
 
 // NewRouter creates the HTTP route multiplexer.
 //
 // db is used for diagnostics endpoints (/v1/diagnostics/pipeline and
-// /internal/canary-check). These are kept unauthenticated because:
+// /internal/canary-check). It MUST be the dialect-aware *shared.DB (which
+// rewrites ? → $1 for PostgreSQL), NOT a raw *sql.DB: HandleCanaryCheck's
+// `WHERE event_id = ?` silently errored on PG (canary-check returned
+// ods_received:false for rows that were actually present), making the cluster
+// usage-pipeline health permanently red while real ingest worked fine. SQLite
+// hid it (? is native there). Bug: 2026-06-13-cluster-canary-check-pg-placeholder.
+// These are kept unauthenticated because:
 //   - they are read-only and return pipeline freshness metadata, no business data
 //   - the proxy's canary probe hits /internal/canary-check without a bearer token
 //   - aikey doctor (CLI) reads /v1/diagnostics/pipeline without a bearer token
+//
 // If you need to restrict them, wrap both with shared.IngestAuth and
 // update the proxy/CLI callers accordingly.
 //
@@ -34,12 +40,13 @@ type MetricsResponse struct {
 //     ingest request context for force-overwrite (see HandleBatch).
 //   - service_token path (escape hatch): legacy S2S token; client may
 //     claim any account_id in event payloads.
+//
 // Either may be empty. Both empty = open ingest (dev / CI default).
 // gapScanner (optional) enables GET /v1/diagnostics/completeness — the
 // delivery-integrity per-source completeness view. nil → endpoint not mounted
 // (e.g. a build without watermark schema). Same dialect-aware scanner instance
 // the projector's detection loop uses (single source of truth for "what is a gap").
-func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, projWorker *projector.Worker, db *sql.DB, gapScanner *integrity.Scanner, deliveryRepo gapsRepo, jwtSecret []byte, serviceToken string) http.Handler {
+func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, projWorker *projector.Worker, db diagnostics.DBQuerier, gapScanner *integrity.Scanner, deliveryRepo gapsRepo, jwtSecret []byte, serviceToken string) http.Handler {
 	mux := http.NewServeMux()
 
 	// Health check — unauthenticated

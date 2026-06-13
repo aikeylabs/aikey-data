@@ -152,7 +152,10 @@ func main() {
 	}
 	projWorker.SetQuotaMaterializer(quotaMat)
 
-	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, gapScanner, odsRepo, cfg.JWTSecret, cfg.ServiceToken)
+	// Pass the dialect-aware ddb (NOT raw db) so diagnostics' ? placeholders
+	// rewrite to $1 on PostgreSQL — raw db made /internal/canary-check silently
+	// return ods_received:false on PG (2026-06-13-cluster-canary-check-pg-placeholder).
+	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, ddb, gapScanner, odsRepo, cfg.JWTSecret, cfg.ServiceToken)
 	if cfg.ServiceToken != "" {
 		slog.Warn(
 			"ingest auth: service_token fallback ENABLED — clients holding this token can forge events for any account. Prefer per-user JWT (set JWT_SECRET + clear SERVICE_TOKEN).",

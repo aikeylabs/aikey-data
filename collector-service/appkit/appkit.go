@@ -124,7 +124,10 @@ func New(db *sql.DB, cfg Config) Result {
 	// facts project (no-op when no quota_subject rows; best-effort, panic-guarded).
 	projWorker.SetQuotaMaterializer(quota.NewMaterializer(quota.NewStorage(ddb), 0))
 
-	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, db, gapScanner, odsRepo, cfg.JWTSecret, cfg.ServiceToken)
+	// ddb (dialect-aware ?→$1 rewrite), NOT raw db — so /internal/canary-check
+	// works if this embedded collector is ever PG-backed. Trial is SQLite (? is
+	// native) so this is defense-in-depth, matching collector main.go.
+	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, ddb, gapScanner, odsRepo, cfg.JWTSecret, cfg.ServiceToken)
 
 	return Result{
 		Handler: router,
