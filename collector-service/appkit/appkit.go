@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/api"
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/conversation"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/ingest"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/integrity"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/pricing"
@@ -71,6 +72,11 @@ func New(db *sql.DB, cfg Config) Result {
 	ingestSvc := ingest.NewService(odsRepo)
 	ingestHandler := api.NewIngestHandler(ingestSvc)
 
+	// Conversation audit (v1.0.1-alpha.2): self-contained content ingest path.
+	convRepo := conversation.NewSQLRepository(ddb)
+	convSvc := conversation.NewService(convRepo)
+	convHandler := api.NewConversationHandler(convSvc)
+
 	odsReader := projector.NewSQLODSReader(ddb)
 	dwdWriter := projector.NewSQLDWDWriter(ddb)
 	checkpoint := projector.NewSQLCheckpointStore(ddb)
@@ -127,7 +133,7 @@ func New(db *sql.DB, cfg Config) Result {
 	// ddb (dialect-aware ?→$1 rewrite), NOT raw db — so /internal/canary-check
 	// works if this embedded collector is ever PG-backed. Trial is SQLite (? is
 	// native) so this is defense-in-depth, matching collector main.go.
-	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, ddb, gapScanner, odsRepo, cfg.JWTSecret, cfg.ServiceToken)
+	router := api.NewRouter(ingestHandler, ingestSvc, convHandler, projWorker, ddb, gapScanner, odsRepo, cfg.JWTSecret, cfg.ServiceToken)
 
 	return Result{
 		Handler: router,

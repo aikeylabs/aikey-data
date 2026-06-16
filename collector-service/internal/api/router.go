@@ -46,7 +46,7 @@ type MetricsResponse struct {
 // delivery-integrity per-source completeness view. nil → endpoint not mounted
 // (e.g. a build without watermark schema). Same dialect-aware scanner instance
 // the projector's detection loop uses (single source of truth for "what is a gap").
-func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, projWorker *projector.Worker, db diagnostics.DBQuerier, gapScanner *integrity.Scanner, deliveryRepo gapsRepo, jwtSecret []byte, serviceToken string) http.Handler {
+func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, convH *ConversationHandler, projWorker *projector.Worker, db diagnostics.DBQuerier, gapScanner *integrity.Scanner, deliveryRepo gapsRepo, jwtSecret []byte, serviceToken string) http.Handler {
 	mux := http.NewServeMux()
 
 	// Health check — unauthenticated
@@ -103,6 +103,8 @@ func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, projWorker *pr
 	// Ingest API — authenticated
 	authed := http.NewServeMux()
 	authed.HandleFunc("POST /v1/usage-events:batch", ingestH.HandleBatch)
+	// Conversation audit (v1.0.1-alpha.2): content records, same auth mount.
+	authed.HandleFunc("POST /v1/conversation-records:batch", convH.HandleBatch)
 
 	mux.Handle("/v1/", shared.IngestAuth(jwtSecret, serviceToken, authed))
 

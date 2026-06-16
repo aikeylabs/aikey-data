@@ -15,6 +15,7 @@ import (
 	"github.com/AiKeyLabs/aikey-config-tool/pkg/dbmigrate/versions"
 	"github.com/AiKeyLabs/aikey-data/collector-service/config"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/api"
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/conversation"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/ingest"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/integrity"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/partition"
@@ -78,6 +79,9 @@ func main() {
 	for _, p := range []struct{ table, key string }{
 		{"usage_fact_dwd", partition.KeyDate},
 		{"usage_event_ods", partition.KeyTimestamptz},
+		// Conversation audit (v1.0.1-alpha.2): conversation_records is monthly
+		// RANGE-partitioned by conv_date (DATE), same as usage_fact_dwd.
+		{"conversation_records", partition.KeyDate},
 	} {
 		if err := partition.EnsureMonthlyPartitions(context.Background(), ddb, p.table, p.key, 2, time.Now()); err != nil {
 			slog.Warn("ensure monthly partitions",
@@ -155,7 +159,12 @@ func main() {
 	// Pass the dialect-aware ddb (NOT raw db) so diagnostics' ? placeholders
 	// rewrite to $1 on PostgreSQL — raw db made /internal/canary-check silently
 	// return ods_received:false on PG (2026-06-13-cluster-canary-check-pg-placeholder).
-	router := api.NewRouter(ingestHandler, ingestSvc, projWorker, ddb, gapScanner, odsRepo, cfg.JWTSecret, cfg.ServiceToken)
+	// Conversation audit (v1.0.1-alpha.2): self-contained content ingest path.
+	convRepo := conversation.NewSQLRepository(ddb)
+	convSvc := conversation.NewService(convRepo)
+	convHandler := api.NewConversationHandler(convSvc)
+
+	router := api.NewRouter(ingestHandler, ingestSvc, convHandler, projWorker, ddb, gapScanner, odsRepo, cfg.JWTSecret, cfg.ServiceToken)
 	if cfg.ServiceToken != "" {
 		slog.Warn(
 			"ingest auth: service_token fallback ENABLED — clients holding this token can forge events for any account. Prefer per-user JWT (set JWT_SECRET + clear SERVICE_TOKEN).",
