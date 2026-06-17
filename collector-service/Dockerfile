@@ -14,15 +14,25 @@ ARG BUILD_TIME=unknown
 
 WORKDIR /src
 
-# Copy buildinfo dependency first (for layer caching)
-COPY pkg/buildinfo/ /buildinfo/
+# Copy local module dependencies PRESERVING the repo-relative layout, so every
+# `replace` resolves with no rewriting — including the cascade where
+# aikey-config-tool (a collector production dep) itself replaces ../pkg/* and
+# ../aikey-data/baseline. (Previously only buildinfo was copied+sed'd, so a
+# clean build failed on the other local replaces — aikeytime/aikeycompat/
+# usagehash/baseline/aikey-config-tool — and only cached builds succeeded.)
+# Layout-preserving avoids editing every module's go.mod, which the cascade
+# would otherwise require.
+COPY pkg/buildinfo/ ./pkg/buildinfo/
+COPY pkg/aikeytime/ ./pkg/aikeytime/
+COPY pkg/aikeycompat/ ./pkg/aikeycompat/
+COPY pkg/usagehash/ ./pkg/usagehash/
+COPY aikey-config-tool/ ./aikey-config-tool/
+COPY aikey-data/baseline/ ./aikey-data/baseline/
+COPY aikey-data/collector-service/ ./aikey-data/collector-service/
 
-# Copy service source
-COPY aikey-data/collector-service/ .
+WORKDIR /src/aikey-data/collector-service
 
-# Fix replace directive: point to Docker-local path instead of dev layout
-RUN sed -i 's|=> ../../pkg/buildinfo|=> /buildinfo|' go.mod \
-    && go mod download \
+RUN go mod download \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath \
     -ldflags="-s -w \
       -X github.com/AiKeyLabs/pkg/buildinfo.Version=${BUILD_VERSION} \

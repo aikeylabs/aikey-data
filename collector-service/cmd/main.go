@@ -89,6 +89,22 @@ func main() {
 		}
 	}
 
+	// Conversation-audit retention (decision 7): drop conversation_records
+	// partitions older than the GLOBAL retention window (monthly partitions are
+	// shared across orgs, so retention can't be per-org — see session notes).
+	// Default 12 months; PG-only (no-op on SQLite). Boot-time, matching the
+	// partition-create cadence above; periodic retention is a follow-up for
+	// collectors that run > a month without restart.
+	const conversationRetentionMonths = 12
+	if dropped, err := partition.DropPartitionsBefore(context.Background(), ddb,
+		"conversation_records", time.Now().AddDate(0, -conversationRetentionMonths, 0)); err != nil {
+		slog.Warn("conversation retention: drop old partitions failed",
+			"event.name", "conversation.retention.drop_failed", "error", err)
+	} else if len(dropped) > 0 {
+		slog.Info("conversation retention: dropped old partitions",
+			"event.name", "conversation.retention.dropped", "count", len(dropped), "partitions", dropped)
+	}
+
 	// Assemble dependencies — ingest
 	odsRepo := ingest.NewSQLODSRepository(ddb)
 	ingestSvc := ingest.NewService(odsRepo)
@@ -189,6 +205,10 @@ func main() {
 	defer projCancel()
 	go projWorker.Run(projCtx)
 	go unpricedQueue.Run(projCtx)
+	// Conversation-audit known-loss promoter: unsticks contiguous_seq when a
+	// content source_seq is permanently lost, so the proxy's content WAL can
+	// keep pruning. No-op when there is no conversation traffic.
+	go conversation.NewKnownLossWorker(convRepo, slog.Default()).Run(projCtx)
 
 	go func() {
 		slog.Info("collector-service started", "addr", cfg.ListenAddr, "version", buildinfo.Get().String())

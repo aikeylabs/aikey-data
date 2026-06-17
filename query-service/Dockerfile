@@ -14,14 +14,28 @@ ARG BUILD_TIME=unknown
 
 WORKDIR /src
 
-# Copy buildinfo dependency first (for layer caching)
+# Copy local module dependencies (monorepo `replace` targets) first, for layer
+# caching. ALL local replaces must be present or `go mod download` fails on a
+# cache miss: buildinfo/aikeytime/aikeycompat are production deps, baseline is a
+# test-only dep — but `go mod download` resolves the whole module graph (incl.
+# test deps), so every replace target must exist. (Previously only buildinfo was
+# copied+rewritten; clean builds failed on aikeytime/baseline, masked by cache.)
+# These are leaf modules (no further local replaces), so no cascade.
 COPY pkg/buildinfo/ /buildinfo/
+COPY pkg/aikeytime/ /aikeytime/
+COPY pkg/aikeycompat/ /aikeycompat/
+COPY aikey-data/baseline/ /baseline/
 
 # Copy service source
 COPY aikey-data/query-service/ .
 
-# Fix replace directive: point to Docker-local path instead of dev layout
-RUN sed -i 's|=> ../../pkg/buildinfo|=> /buildinfo|' go.mod \
+# Rewrite the dev-layout replace directives to the Docker-local copies.
+RUN sed -i \
+    -e 's|=> ../../pkg/buildinfo|=> /buildinfo|' \
+    -e 's|=> ../../pkg/aikeytime|=> /aikeytime|' \
+    -e 's|=> ../../pkg/aikeycompat|=> /aikeycompat|' \
+    -e 's|=> ../baseline|=> /baseline|' \
+    go.mod \
     && go mod download \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath \
     -ldflags="-s -w \

@@ -103,7 +103,7 @@ func TestRouter_CostAndAdmin_Integration(t *testing.T) {
 	}
 
 	repo := usage.NewSQLRepository(shared.NewDB(raw, shared.DialectSQLite))
-	router := NewRouter(NewUsageHandler(repo), NewAdminHandler(repo), raw, intToken)
+	router := NewRouter(NewUsageHandler(repo), NewAdminHandler(repo), nil, raw, intToken)
 
 	do := func(method, path string, withAuth bool) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, nil)

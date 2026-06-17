@@ -33,4 +33,44 @@ type Repository interface {
 	// ingest.ODSRepository.AdvanceWatermark; self-contained (touches only the
 	// conversation_* tables, never the usage path).
 	AdvanceWatermark(ctx context.Context, orgID, sourceID string, clientAllocated int64) (contiguous int64, err error)
+
+	// --- P3 known-loss promotion (collector worker; mirrors usage's
+	// integrity/projector stale-gap promotion but self-contained on the
+	// conversation_* tables — never touches the usage path) ---
+
+	// ScanStaleGaps returns every source whose contiguous_seq trails its
+	// high-water (a delivery gap) AND whose last_event_at predates staleBeforeMs
+	// — by then the content WAL has had ample time to re-deliver, so a
+	// still-missing seq is genuinely lost (not just in-flight).
+	ScanStaleGaps(ctx context.Context, staleBeforeMs int64) ([]StaleGap, error)
+
+	// EnumerateMissingSeqs returns the seqs in (contiguous, hi] that are neither
+	// stored in conversation_records nor already in the known-loss ledger.
+	EnumerateMissingSeqs(ctx context.Context, orgID, sourceID string, contiguous, hi int64) ([]int64, error)
+
+	// RecordKnownLoss ledgers the given lost seqs (idempotent) then re-advances
+	// the watermark past them, returning the new contiguous_seq the proxy may
+	// prune its content WAL up to. Without this a permanently-lost seq would
+	// stall contiguous_seq forever → the content WAL could never prune.
+	RecordKnownLoss(ctx context.Context, orgID, sourceID string, seqs []int64, reason string) (contiguous int64, err error)
+}
+
+// StaleGap is one source with an aged delivery gap, returned by ScanStaleGaps.
+type StaleGap struct {
+	OrgID           string
+	SourceID        string
+	Contiguous      int64
+	MaxSeen         int64
+	ClientAllocated int64
+}
+
+// HighWater is the largest seq the source could possibly deliver — the ceiling
+// for missing-seq enumeration (covers both middle gaps ≤ max_seen and tail gaps
+// up to the reserved-ahead client_allocated).
+func (g StaleGap) HighWater() int64 {
+	hi := g.MaxSeen
+	if g.ClientAllocated > hi {
+		hi = g.ClientAllocated
+	}
+	return hi
 }

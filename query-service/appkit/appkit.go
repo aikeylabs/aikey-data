@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/api"
+	"github.com/AiKeyLabs/aikey-data/query-service/internal/conversation"
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/shared"
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/usage"
 )
@@ -29,5 +30,6 @@ func NewHandler(db *sql.DB, cfg Config) http.Handler {
 	repo := usage.NewSQLRepository(ddb)
 	handler := api.NewUsageHandler(repo)
 	admin := api.NewAdminHandler(repo)
-	return api.NewRouter(handler, admin, db, cfg.ServiceToken)
+	convH := api.NewConversationHandler(conversation.NewSQLRepository(ddb))
+	return api.NewRouter(handler, admin, convH, db, cfg.ServiceToken)
 }

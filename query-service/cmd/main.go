@@ -12,6 +12,7 @@ import (
 
 	"github.com/AiKeyLabs/aikey-data/query-service/config"
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/api"
+	"github.com/AiKeyLabs/aikey-data/query-service/internal/conversation"
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/shared"
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/usage"
 	"github.com/AiKeyLabs/pkg/aikeycompat"
@@ -43,10 +44,12 @@ func main() {
 	}
 	defer db.Close()
 
-	repo := usage.NewSQLRepository(shared.NewDB(db, shared.DialectPostgres))
+	ddb := shared.NewDB(db, shared.DialectPostgres)
+	repo := usage.NewSQLRepository(ddb)
 	handler := api.NewUsageHandler(repo)
 	admin := api.NewAdminHandler(repo)
-	router := api.NewRouter(handler, admin, db, cfg.ServiceToken)
+	convH := api.NewConversationHandler(conversation.NewSQLRepository(ddb))
+	router := api.NewRouter(handler, admin, convH, db, cfg.ServiceToken)
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,

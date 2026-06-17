@@ -142,6 +142,9 @@ func New(db *sql.DB, cfg Config) Result {
 		// they stop together on shutdown.
 		RunProjector: func(ctx context.Context) {
 			go unpricedQueue.Run(ctx)
+			// Conversation-audit known-loss promoter (no-op when no conversation
+			// traffic — e.g. non-Cluster bundles — so always-on is harmless).
+			go conversation.NewKnownLossWorker(convRepo, nil).Run(ctx)
 			projWorker.Run(ctx)
 		},
 	}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
+	"github.com/AiKeyLabs/pkg/aikeytime"
 )
 
 type sqlRepo struct{ db *shared.DB }
@@ -192,6 +193,70 @@ func (r *sqlRepo) presentSeqSet(ctx context.Context, orgID, sourceID string, lo,
 	}
 	ledRows.Close()
 	return present, ledRows.Err()
+}
+
+// ScanStaleGaps — see Repository.ScanStaleGaps. Self-contained on
+// conversation_source_watermark; staleBeforeMs is bound dialect-aware so the
+// last_event_at comparison works on PG (TIMESTAMPTZ) and SQLite (INTEGER ms).
+func (r *sqlRepo) ScanStaleGaps(ctx context.Context, staleBeforeMs int64) ([]StaleGap, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT org_id, source_id, contiguous_seq, max_seen_seq, client_allocated_seq
+		   FROM conversation_source_watermark
+		  WHERE (max_seen_seq > contiguous_seq OR client_allocated_seq > contiguous_seq)
+		    AND last_event_at < ?`,
+		r.db.BindMillis(aikeytime.Millis(staleBeforeMs)))
+	if err != nil {
+		return nil, fmt.Errorf("scan stale gaps: %w", err)
+	}
+	defer rows.Close()
+	var out []StaleGap
+	for rows.Next() {
+		var g StaleGap
+		if err := rows.Scan(&g.OrgID, &g.SourceID, &g.Contiguous, &g.MaxSeen, &g.ClientAllocated); err != nil {
+			return nil, fmt.Errorf("scan stale gap row: %w", err)
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// EnumerateMissingSeqs — see Repository.EnumerateMissingSeqs. Bounded by
+// advanceWatermarkScanLimit (same as AdvanceWatermark) so a huge gap promotes
+// across several ticks rather than one giant scan.
+func (r *sqlRepo) EnumerateMissingSeqs(ctx context.Context, orgID, sourceID string, contiguous, hi int64) ([]int64, error) {
+	if scanHi := contiguous + advanceWatermarkScanLimit; hi > scanHi {
+		hi = scanHi
+	}
+	if hi <= contiguous {
+		return nil, nil
+	}
+	present, err := r.presentSeqSet(ctx, orgID, sourceID, contiguous, hi)
+	if err != nil {
+		return nil, err
+	}
+	var missing []int64
+	for seq := contiguous + 1; seq <= hi; seq++ {
+		if !present[seq] {
+			missing = append(missing, seq)
+		}
+	}
+	return missing, nil
+}
+
+// RecordKnownLoss — see Repository.RecordKnownLoss. Ledgers each lost seq
+// idempotently (ON CONFLICT (org_id, source_id, seq) DO NOTHING), then
+// re-advances the watermark: presentSeqSet now counts the ledgered seqs, so the
+// zipper steps past the promoted gap. clientAllocated=0 is safe — AdvanceWatermark
+// keeps the GREATEST existing value, so it never shrinks the reserved high-water.
+func (r *sqlRepo) RecordKnownLoss(ctx context.Context, orgID, sourceID string, seqs []int64, reason string) (int64, error) {
+	insert := r.db.InsertOrIgnoreOn(
+		"conversation_known_loss_ledger", "org_id, source_id, seq, reason", "?, ?, ?, ?", "org_id, source_id, seq")
+	for _, seq := range seqs {
+		if _, err := r.db.ExecContext(ctx, insert, orgID, sourceID, seq, reason); err != nil {
+			return 0, fmt.Errorf("ledger known-loss seq=%d org=%s source=%s: %w", seq, orgID, sourceID, err)
+		}
+	}
+	return r.AdvanceWatermark(ctx, orgID, sourceID, 0)
 }
 
 func nullStr(s string) sql.NullString {
