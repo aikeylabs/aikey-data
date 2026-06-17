@@ -9,11 +9,25 @@ import (
 // Service handles conversation record ingestion. Mirrors ingest.Service:
 // per-record validate→insert, then ONE post-batch watermark advance per source.
 type Service struct {
-	repo Repository
+	repo        Repository
+	pinnedOrgID string
 }
 
-// NewService creates a conversation ingest service.
-func NewService(repo Repository) *Service { return &Service{repo: repo} }
+// NewService creates a conversation ingest service. pinnedOrgID, when non-empty
+// (single-tenant Cluster: CLUSTER_DELIVERY_ORG_ID), forces EVERY conversation
+// record's org to that one fixed delivery org — an authoritative override of
+// whatever org the proxy reported.
+//
+// Why: the Cluster edition is single-tenant (one cluster = one org, fixed). A
+// form-① employee proxy resolves the seat's *home* org from its local VK cache,
+// which is NOT the cluster delivery org (it has zero seats/VKs in this control
+// DB); without this pin its conversations land in that phantom org and the audit
+// page for the real org shows nothing. Same pin key-delivery/MyOrg use in
+// control-master main.go ("one cluster = one org, in code, not deployment
+// discipline"). Multi-tenant Production leaves it "" → trust the reported org.
+func NewService(repo Repository, pinnedOrgID string) *Service {
+	return &Service{repo: repo, pinnedOrgID: pinnedOrgID}
+}
 
 // IngestBatch processes a batch of conversation records. Each record is handled
 // independently (a bad record doesn't block the rest); the per-source contiguous
@@ -28,6 +42,13 @@ func (s *Service) IngestBatch(ctx context.Context, req *ConversationBatchRequest
 
 	for i := range req.Records {
 		e := &req.Records[i]
+		// Single-tenant cluster: pin org to the fixed delivery org BEFORE validate,
+		// seq-owner keying, and watermark accounting — so the whole pipeline is
+		// consistent on the one org (the proxy-reported org, e.g. a form-① seat's
+		// phantom home org, is overridden). No-op when unpinned (multi-tenant).
+		if s.pinnedOrgID != "" {
+			e.OrgID = s.pinnedOrgID
+		}
 		r := s.ingestOne(ctx, e)
 		results = append(results, r)
 		switch r.Status {

@@ -57,7 +57,7 @@ func ingest(ctx context.Context, svc *Service, recs ...ConversationRecord) *Conv
 // the real Service.IngestBatch path (not a simplified inline copy).
 func TestIngest_Idempotent_SeqConflict_SessionFirstWins(t *testing.T) {
 	db := newConvTestDB(t)
-	svc := NewService(NewSQLRepository(db))
+	svc := NewService(NewSQLRepository(db), "")
 	ctx := context.Background()
 	org, src, sess := "org1", "srcA", "sess1"
 
@@ -104,7 +104,7 @@ func TestIngest_Idempotent_SeqConflict_SessionFirstWins(t *testing.T) {
 func TestAdvanceWatermark_ZipperStopsAtGap(t *testing.T) {
 	db := newConvTestDB(t)
 	repo := NewSQLRepository(db)
-	svc := NewService(repo)
+	svc := NewService(repo, "")
 	ctx := context.Background()
 	org, src := "org1", "srcA"
 
@@ -124,5 +124,59 @@ func TestAdvanceWatermark_ZipperStopsAtGap(t *testing.T) {
 	ingest(ctx, svc, rec("ev4", org, "s", "seatX", src, 4, ""))
 	if c, _ = repo.AdvanceWatermark(ctx, org, src, 5); c != 5 {
 		t.Fatalf("contiguous=%d want 5 after gap filled", c)
+	}
+}
+
+// Single-tenant pin: when NewService has a pinnedOrgID, EVERY record's org is
+// forced to it — overriding whatever org the proxy reported. Guards the recurring
+// single-tenant org regression (a form-① employee proxy reports the seat's phantom
+// home org; dynamic per-VK org must never leak into stored records → audit page
+// for the real delivery org would otherwise be empty).
+func TestIngest_PinnedOrg_OverridesReportedOrg(t *testing.T) {
+	db := newConvTestDB(t)
+	const pinned, reported, src, sess = "org-DELIVERY-pinned", "org-PHANTOM-home", "srcA", "sessP"
+	svc := NewService(NewSQLRepository(db), pinned)
+	ctx := context.Background()
+
+	if r := ingest(ctx, svc, rec("evP", reported, sess, "seatX", src, 1, "SYS")); r.Accepted != 1 {
+		t.Fatalf("accepted=%d want 1", r.Accepted)
+	}
+	var gotOrg string
+	if err := db.QueryRowContext(ctx, "SELECT org_id FROM conversation_records WHERE event_id=?", "evP").Scan(&gotOrg); err != nil {
+		t.Fatalf("query evP: %v", err)
+	}
+	if gotOrg != pinned {
+		t.Fatalf("record org_id=%q want %q (pin must override reported %q)", gotOrg, pinned, reported)
+	}
+	// session metadata + watermark must also live under the pinned org, never the reported one
+	var sessOrg string
+	if err := db.QueryRowContext(ctx, "SELECT org_id FROM conversation_sessions WHERE session_id=?", sess).Scan(&sessOrg); err != nil {
+		t.Fatalf("query session: %v", err)
+	}
+	if sessOrg != pinned {
+		t.Fatalf("session org_id=%q want %q", sessOrg, pinned)
+	}
+	var phantomRows int
+	db.QueryRowContext(ctx, "SELECT COUNT(*) FROM conversation_records WHERE org_id=?", reported).Scan(&phantomRows)
+	if phantomRows != 0 {
+		t.Fatalf("found %d rows under reported phantom org %q, want 0 (pin must absorb all)", phantomRows, reported)
+	}
+}
+
+// Multi-tenant (no pin): the reported org is preserved as-is — the pin is a
+// single-tenant-only override and must not affect general Production.
+func TestIngest_NoPin_PreservesReportedOrg(t *testing.T) {
+	db := newConvTestDB(t)
+	svc := NewService(NewSQLRepository(db), "")
+	ctx := context.Background()
+	if r := ingest(ctx, svc, rec("evN", "org-tenantA", "sN", "seatX", "srcN", 1, "")); r.Accepted != 1 {
+		t.Fatalf("accepted=%d want 1", r.Accepted)
+	}
+	var gotOrg string
+	if err := db.QueryRowContext(ctx, "SELECT org_id FROM conversation_records WHERE event_id=?", "evN").Scan(&gotOrg); err != nil {
+		t.Fatalf("query evN: %v", err)
+	}
+	if gotOrg != "org-tenantA" {
+		t.Fatalf("record org_id=%q want org-tenantA (no pin → passthrough)", gotOrg)
 	}
 }

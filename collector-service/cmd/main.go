@@ -177,7 +177,11 @@ func main() {
 	// return ods_received:false on PG (2026-06-13-cluster-canary-check-pg-placeholder).
 	// Conversation audit (v1.0.1-alpha.2): self-contained content ingest path.
 	convRepo := conversation.NewSQLRepository(ddb)
-	convSvc := conversation.NewService(convRepo)
+	// CLUSTER_DELIVERY_ORG_ID: single-tenant Cluster pins every conversation record
+	// to the one fixed delivery org (overrides the proxy-reported org — a form-①
+	// employee proxy reports the seat's phantom home org). Empty in multi-tenant
+	// Production → records keep their reported org. Same pin control-master uses.
+	convSvc := conversation.NewService(convRepo, os.Getenv("CLUSTER_DELIVERY_ORG_ID"))
 	convHandler := api.NewConversationHandler(convSvc)
 
 	router := api.NewRouter(ingestHandler, ingestSvc, convHandler, projWorker, ddb, gapScanner, odsRepo, cfg.JWTSecret, cfg.ServiceToken)

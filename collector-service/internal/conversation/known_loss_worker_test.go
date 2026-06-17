@@ -34,7 +34,7 @@ func ledgerSeqs(t *testing.T, db *shared.DB, org, src string) []int64 {
 func TestKnownLossWorker_PromotesOnlyStaleGap(t *testing.T) {
 	db := newConvTestDB(t)
 	repo := NewSQLRepository(db)
-	svc := NewService(repo)
+	svc := NewService(repo, "")
 	ctx := context.Background()
 	org, src := "org1", "srcA"
 

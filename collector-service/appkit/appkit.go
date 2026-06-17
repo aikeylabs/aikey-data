@@ -74,7 +74,10 @@ func New(db *sql.DB, cfg Config) Result {
 
 	// Conversation audit (v1.0.1-alpha.2): self-contained content ingest path.
 	convRepo := conversation.NewSQLRepository(ddb)
-	convSvc := conversation.NewService(convRepo)
+	// Trial (aikey-full-trial) is NOT a single-tenant Cluster → no org pin; records
+	// keep their reported org. The CLUSTER_DELIVERY_ORG_ID pin applies only to the
+	// standalone cluster/production collector (cmd/main.go).
+	convSvc := conversation.NewService(convRepo, "")
 	convHandler := api.NewConversationHandler(convSvc)
 
 	odsReader := projector.NewSQLODSReader(ddb)
