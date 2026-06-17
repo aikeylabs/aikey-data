@@ -33,6 +33,13 @@ const (
 	SourceOverrides Source = "overrides"
 	SourceHistory   Source = "history"
 	SourceLiteLLM   Source = "litellm"
+	// SourceLiteLLMNormalized: matched via the canonical-model fallback, i.e. the
+	// exact (provider, model) key was absent but a region/version/provider-prefixed
+	// litellm entry canonicalizes to the same bare model (e.g. claude-3-5-haiku-
+	// 20241022 priced from anthropic.claude-3-5-haiku-20241022-v1:0). Tagged
+	// distinctly so the projector can WARN-log it and audits can see which models
+	// rely on the fallback rather than an exact list-price entry. (2026-06-10)
+	SourceLiteLLMNormalized Source = "litellm_normalized"
 )
 
 // UnitPrices is the per-token price set for one (provider, model) resolved at

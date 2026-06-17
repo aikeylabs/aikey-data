@@ -283,6 +283,14 @@ func (e *Enricher) applyCost(fact *DWDFact) {
 			"provider", fact.ProviderCode, "model", fact.Model)
 		return
 	}
+	// Priced via the canonical-name fallback (no exact key; matched a prefixed
+	// litellm entry). Surface so audits can see which models lean on the fallback
+	// rather than an exact list-price entry — and catch any future mis-match.
+	if up.Source == pricing.SourceLiteLLMNormalized {
+		slog.Warn("pricing normalized-match",
+			"event.name", "projector.pricing.normalized_match",
+			"provider", fact.ProviderCode, "model", fact.Model)
+	}
 	cost := pricing.ComputeCost(*up, pricing.TokenCounts{
 		Input:         fact.InputTokens,
 		Output:        fact.OutputTokens,
