@@ -20,9 +20,10 @@ func NewSQLRepository(db *shared.DB) Repository { return &sqlRepo{db: db} }
 const convColumns = "event_id, conv_date, org_id, session_id, owner_account_id, " +
 	"virtual_key_id, source_id, source_seq, model, provider_code, user_text, assistant_text, " +
 	"input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens, reasoning_tokens, " +
-	"total_tokens, duration_ms, request_status, content_bytes, ingest_status, created_at"
+	"total_tokens, cache_enabled, duration_ms, request_status, content_bytes, ingest_status, created_at"
 
-const convPlaceholders = "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+// 24 placeholders = 24 columns above (cache_enabled added for decision B).
+const convPlaceholders = "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
 
 // advanceWatermarkScanLimit bounds the per-call source_seq window (mirrors usage).
 const advanceWatermarkScanLimit = 10000
@@ -64,7 +65,7 @@ func (r *sqlRepo) InsertRecord(ctx context.Context, e *ConversationRecord, quara
 		nullStr(e.VirtualKeyID), nullStr(e.SourceID), e.SourceSeq, nullStr(e.Model), nullStr(e.ProviderCode),
 		nullStr(e.UserText), nullStr(e.AssistantText),
 		e.InputTokens, e.OutputTokens, e.CachedInputTokens, e.CacheCreationInputTokens, e.ReasoningTokens,
-		e.TotalTokens, e.DurationMs, e.RequestStatus, e.ContentBytes, ingestStatus, r.db.BindMillis(e.CreatedAt),
+		e.TotalTokens, e.CacheEnabled, e.DurationMs, e.RequestStatus, e.ContentBytes, ingestStatus, r.db.BindMillis(e.CreatedAt),
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert conversation record %s: %w", e.EventID, err)

@@ -62,6 +62,10 @@ type ConversationRecord struct {
 	CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens,omitempty"`
 	ReasoningTokens          *int64 `json:"reasoning_tokens,omitempty"`
 	TotalTokens              *int64 `json:"total_tokens,omitempty"`
+	// CacheEnabled (decision B): did the client request prompt caching this turn?
+	// 1=on / 0=off / NULL=unknown. A display switch distinct from the cache COUNTS
+	// above (which read 0 both when caching was off AND when requested-but-ineffective).
+	CacheEnabled *int64 `json:"cache_enabled,omitempty"`
 
 	DurationMs    *int64 `json:"duration_ms,omitempty"`   // request→response latency
 	RequestStatus string `json:"request_status"`          // ok | partial | error

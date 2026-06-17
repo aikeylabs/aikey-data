@@ -56,6 +56,10 @@ type ThreadTurn struct {
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 	ReasoningTokens          int64 `json:"reasoning_tokens"`
 	TotalTokens              int64 `json:"total_tokens"`
+	// CacheEnabled (decision B): 1 = the client requested prompt caching this turn,
+	// 0 = off (or not captured). The drawer renders it as an explicit caching ON/OFF
+	// switch — distinct from the cache token COUNTS, which read 0 in both cases.
+	CacheEnabled int64 `json:"cache_enabled"`
 }
 
 // ThreadDetail is the full session thread the drawer renders: the once-per-session

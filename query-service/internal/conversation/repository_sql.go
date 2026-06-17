@@ -140,7 +140,7 @@ func (r *sqlRepo) ThreadDetail(ctx context.Context, p QueryParams) (*ThreadDetai
 		       COALESCE(duration_ms, 0), request_status, COALESCE(total_tokens, 0),
 		       COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
 		       COALESCE(cached_input_tokens, 0), COALESCE(cache_creation_input_tokens, 0),
-		       COALESCE(reasoning_tokens, 0)
+		       COALESCE(reasoning_tokens, 0), COALESCE(cache_enabled, 0)
 		FROM conversation_records
 		WHERE org_id = ? AND owner_account_id = ? AND COALESCE(session_id, event_id) = ?
 		ORDER BY created_at, event_id
@@ -156,7 +156,7 @@ func (r *sqlRepo) ThreadDetail(ctx context.Context, p QueryParams) (*ThreadDetai
 		if err := rows.Scan(&t.EventID, &t.CreatedAt, &t.Model, &t.ProviderCode,
 			&t.UserText, &t.AssistantText, &t.DurationMs, &t.RequestStatus, &t.TotalTokens,
 			&t.InputTokens, &t.OutputTokens, &t.CachedInputTokens, &t.CacheCreationInputTokens,
-			&t.ReasoningTokens); err != nil {
+			&t.ReasoningTokens, &t.CacheEnabled); err != nil {
 			return nil, fmt.Errorf("scan thread turn: %w", err)
 		}
 		td.Turns = append(td.Turns, t)
@@ -216,7 +216,7 @@ func (r *sqlRepo) StreamSessionTurns(ctx context.Context, p QueryParams, fn func
 		       COALESCE(duration_ms, 0), request_status, COALESCE(total_tokens, 0),
 		       COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
 		       COALESCE(cached_input_tokens, 0), COALESCE(cache_creation_input_tokens, 0),
-		       COALESCE(reasoning_tokens, 0)
+		       COALESCE(reasoning_tokens, 0), COALESCE(cache_enabled, 0)
 		FROM conversation_records
 		WHERE org_id = ? AND owner_account_id = ? AND COALESCE(session_id, event_id) = ?
 		ORDER BY created_at, event_id`, r.db.EpochMillis("created_at"))
@@ -230,7 +230,7 @@ func (r *sqlRepo) StreamSessionTurns(ctx context.Context, p QueryParams, fn func
 		if err := rows.Scan(&t.EventID, &t.CreatedAt, &t.Model, &t.ProviderCode,
 			&t.UserText, &t.AssistantText, &t.DurationMs, &t.RequestStatus, &t.TotalTokens,
 			&t.InputTokens, &t.OutputTokens, &t.CachedInputTokens, &t.CacheCreationInputTokens,
-			&t.ReasoningTokens); err != nil {
+			&t.ReasoningTokens, &t.CacheEnabled); err != nil {
 			return fmt.Errorf("scan turn: %w", err)
 		}
 		if err := fn(&t); err != nil {
