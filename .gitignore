@@ -11,3 +11,7 @@ bin/
 
 # OS
 .DS_Store
+
+# Built service binaries (`go build ./cmd` output, e.g. collector-service/main)
+*-service/main
+__pycache__/
