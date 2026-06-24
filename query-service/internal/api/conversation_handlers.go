@@ -98,6 +98,10 @@ func parseConvParams(r *http.Request, requireOwner, requireSession bool) (conver
 		SessionID:      q.Get("session_id"),
 		StartDate:      validConvDate(q.Get("start_date")),
 		EndDate:        validConvDate(q.Get("end_date")),
+		// Sort key/dir for the clickable list headers; the repo whitelists the
+		// key (unknown → list default), so no validation needed here.
+		SortBy:  q.Get("sort"),
+		SortDir: q.Get("dir"),
 	}
 	if requireOwner && p.OwnerAccountID == "" {
 		return p, errMissing("owner_account_id")

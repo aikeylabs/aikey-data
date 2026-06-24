@@ -83,4 +83,12 @@ type QueryParams struct {
 	EndDate        string
 	Limit          int
 	Offset         int
+	// Server-side sort for the seat/session lists (clickable column headers).
+	// SortBy is a stable column key (whitelisted in repository_sql.go — never
+	// interpolated raw); SortDir is "asc"/"desc". Empty → the list's default
+	// (seats: tokens DESC; sessions: last-activity DESC). Sorting must be
+	// server-side because the lists are paginated (LIMIT/OFFSET): a client-side
+	// sort would only reorder the current page, not the whole result set.
+	SortBy  string
+	SortDir string
 }

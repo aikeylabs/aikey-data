@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/shared"
 )
@@ -28,6 +29,45 @@ func clampLimit(n, def int) int {
 		return maxListLimit
 	}
 	return n
+}
+
+// Sortable column whitelists for the clickable list headers. The key is the
+// stable API token sent by the UI; the value is the SQL ORDER BY expression.
+// SECURITY: only these mapped expressions ever reach ORDER BY — the raw client
+// key is never interpolated, so an arbitrary ?sort= cannot inject SQL. An
+// unknown/empty key falls back to the per-list default. NOTE: the "席位" (seat
+// owner) column is intentionally NOT sortable — its display label is the seat
+// alias resolved client-side (not in conversation_records), so a server-side
+// sort by owner_account_id wouldn't match the visible order (decision b,
+// 2026-06-17).
+var seatSortCols = map[string]string{
+	"sessions": "COUNT(DISTINCT COALESCE(session_id, event_id))", // 会话数
+	"turns":    "COUNT(*)",                                       // 轮数
+	"tokens":   "COALESCE(SUM(total_tokens), 0)",                 // Token
+	"activity": "MAX(created_at)",                                // 最近活动
+}
+
+var sessionSortCols = map[string]string{
+	"created":  "MIN(created_at)",               // 创建时间
+	"turns":    "COUNT(*)",                       // 轮数
+	"tokens":   "COALESCE(SUM(total_tokens), 0)", // Token
+	"activity": "MAX(created_at)",                // 最近活动
+}
+
+// orderByClause builds a safe "ORDER BY <expr> <dir>, <tiebreak>" from a column
+// whitelist. dir defaults to DESC; the tiebreak keeps pagination stable when the
+// primary key ties (same token count etc.). When sortBy is unknown/empty it uses
+// defaultExpr + DESC (the list's default sort).
+func orderByClause(cols map[string]string, sortBy, sortDir, defaultExpr, tiebreak string) string {
+	expr, ok := cols[sortBy]
+	if !ok {
+		return defaultExpr + " DESC, " + tiebreak
+	}
+	dir := "DESC"
+	if strings.EqualFold(sortDir, "asc") {
+		dir = "ASC"
+	}
+	return expr + " " + dir + ", " + tiebreak
 }
 
 // appendDateRange adds inclusive conv_date bounds (partition pruning) when set.
@@ -59,8 +99,11 @@ func (r *sqlRepo) SeatSummaries(ctx context.Context, p QueryParams) ([]SeatSumma
 		FROM conversation_records
 		WHERE %s
 		GROUP BY owner_account_id
-		ORDER BY COUNT(*) DESC, MAX(created_at) DESC
-		LIMIT ? OFFSET ?`, r.db.EpochMillis("MAX(created_at)"), where)
+		ORDER BY %s
+		LIMIT ? OFFSET ?`, r.db.EpochMillis("MAX(created_at)"), where,
+		// Default: tokens DESC (per product — the seat list ranks by spend);
+		// tiebreak by recency then id for stable pagination.
+		orderByClause(seatSortCols, p.SortBy, p.SortDir, "COALESCE(SUM(total_tokens), 0)", "MAX(created_at) DESC, owner_account_id"))
 	args = append(args, clampLimit(p.Limit, defaultListLimit), p.Offset)
 
 	rows, err := r.db.QueryContext(ctx, q, args...)
@@ -103,9 +146,12 @@ func (r *sqlRepo) SessionSummaries(ctx context.Context, p QueryParams) ([]Sessio
 		FROM conversation_records
 		WHERE %s
 		GROUP BY COALESCE(session_id, event_id)
-		ORDER BY MIN(created_at) DESC
+		ORDER BY %s
 		LIMIT ? OFFSET ?`,
-		r.db.EpochMillis("MIN(created_at)"), r.db.EpochMillis("MAX(created_at)"), where)
+		r.db.EpochMillis("MIN(created_at)"), r.db.EpochMillis("MAX(created_at)"), where,
+		// Default: last-activity DESC (per product, 2026-06-17 — was created DESC);
+		// tiebreak by created for stable pagination.
+		orderByClause(sessionSortCols, p.SortBy, p.SortDir, "MAX(created_at)", "MIN(created_at) DESC"))
 	args = append(args, clampLimit(p.Limit, defaultListLimit), p.Offset)
 
 	rows, err := r.db.QueryContext(ctx, q, args...)
