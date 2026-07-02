@@ -525,7 +525,7 @@ func (h *UsageHandler) MasterUsageExport(w http.ResponseWriter, r *http.Request)
 var masterAuditCSVHeader = []string{
 	"event_id", "event_time", "occurred_at", "usage_date", "billing_period",
 	"account_id", "seat_id", "seat_alias", "provider_code", "model", "protocol_type", "route_source",
-	"virtual_key_id", "virtual_key_hash", "credential_id", "credential_fingerprint", "real_key_hash", "binding_id",
+	"virtual_key_id", "virtual_key_hash", "credential_id", "oauth_identity", "credential_fingerprint", "real_key_hash", "binding_id",
 	"input_tokens", "output_tokens", "cached_input_tokens", "cache_creation_input_tokens", "reasoning_tokens", "total_tokens",
 	"billable_amount", "currency", "pricing_snapshot_id",
 	"quality_status", "validation_code", "anomaly_type", "completion_source",
@@ -544,7 +544,7 @@ func masterAuditCSVRecord(a *usage.MasterUsageAuditRow) []string {
 	return []string{
 		a.EventID, msToRFC3339(a.EventTimeMs), msToRFC3339(a.OccurredAtMs), a.UsageDate, a.BillingPeriod,
 		a.AccountID, a.SeatID, a.SeatAlias, a.ProviderCode, a.Model, a.ProtocolType, a.RouteSource,
-		a.VirtualKeyID, a.VirtualKeyHash, a.CredentialID, a.CredentialFingerprint, a.RealKeyHash, a.BindingID,
+		a.VirtualKeyID, a.VirtualKeyHash, a.CredentialID, a.OAuthIdentity, a.CredentialFingerprint, a.RealKeyHash, a.BindingID,
 		strconv.FormatInt(a.InputTokens, 10), strconv.FormatInt(a.OutputTokens, 10),
 		strconv.FormatInt(a.CachedInputTokens, 10), strconv.FormatInt(a.CacheCreationInputTokens, 10),
 		strconv.FormatInt(a.ReasoningTokens, 10), strconv.FormatInt(a.TotalTokens, 10),

@@ -822,7 +822,7 @@ func masterAuditSelect(db *shared.DB) string {
 		COALESCE(d.account_id,''), COALESCE(d.seat_id,''), COALESCE(s.alias,''), COALESCE(d.provider_code,''), COALESCE(d.model,''),
 		COALESCE(d.protocol_type,''), COALESCE(d.route_source,''),
 		COALESCE(d.virtual_key_id,''), COALESCE(d.virtual_key_hash,''),
-		COALESCE(d.credential_id,''), COALESCE(d.credential_fingerprint,''), COALESCE(d.real_key_hash,''), COALESCE(d.binding_id,''),
+		COALESCE(d.credential_id,''), COALESCE(d.oauth_identity,''), COALESCE(d.credential_fingerprint,''), COALESCE(d.real_key_hash,''), COALESCE(d.binding_id,''),
 		d.input_tokens, d.output_tokens, d.cached_input_tokens, d.cache_creation_input_tokens, d.reasoning_tokens, d.total_tokens,
 		d.billable_amount, COALESCE(d.currency,''), COALESCE(d.pricing_snapshot_id,''),
 		COALESCE(d.quality_status,''), COALESCE(d.validation_code,''), COALESCE(d.anomaly_type,''), COALESCE(d.completion_source,''),
@@ -847,7 +847,7 @@ func scanMasterAuditRow(rows *sql.Rows) (*MasterUsageAuditRow, error) {
 	var sourceSeq sql.NullInt64
 	if err := rows.Scan(&a.EventID, &a.EventTimeMs, &a.OccurredAtMs, &a.UsageDate, &a.BillingPeriod,
 		&a.AccountID, &a.SeatID, &a.SeatAlias, &a.ProviderCode, &a.Model, &a.ProtocolType, &a.RouteSource,
-		&a.VirtualKeyID, &a.VirtualKeyHash, &a.CredentialID, &a.CredentialFingerprint, &a.RealKeyHash, &a.BindingID,
+		&a.VirtualKeyID, &a.VirtualKeyHash, &a.CredentialID, &a.OAuthIdentity, &a.CredentialFingerprint, &a.RealKeyHash, &a.BindingID,
 		&a.InputTokens, &a.OutputTokens, &a.CachedInputTokens, &a.CacheCreationInputTokens, &a.ReasoningTokens, &a.TotalTokens,
 		&billable, &a.Currency, &a.PricingSnapshotID,
 		&a.QualityStatus, &a.ValidationCode, &a.AnomalyType, &a.CompletionSource,

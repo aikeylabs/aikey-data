@@ -294,6 +294,12 @@ type MasterUsageAuditRow struct {
 	VirtualKeyID             string  `json:"virtual_key_id"`
 	VirtualKeyHash           string  `json:"virtual_key_hash"`
 	CredentialID             string  `json:"credential_id"`
+	// OAuthIdentity: POINT-IN-TIME email of the OAuth/pool account that actually served
+	// the request, denormalized onto the event by the proxy (2026-07-01, usage-audit
+	// "selected account" display; routing changes over time so a read-time join would
+	// misattribute history). "" for api_key routes / older-proxy events — the page falls
+	// back to a client-side credential_id join.
+	OAuthIdentity            string  `json:"oauth_identity"`
 	CredentialFingerprint    string  `json:"credential_fingerprint"`
 	RealKeyHash              string  `json:"real_key_hash"`
 	BindingID                string  `json:"binding_id"`
