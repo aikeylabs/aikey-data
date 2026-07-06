@@ -49,7 +49,18 @@ func buildSummaryFrom(litellmBytes []byte) (*PriceSummary, error) {
 	}
 	models := make(map[string]UnitPrices)
 	for k, up := range m {
-		if k.provider != "anthropic" || !strings.HasPrefix(k.model, "claude") {
+		// Claude pools route anthropic-direct claude-* models; Codex pools route
+		// OpenAI gpt-5* / *codex* models. Price BOTH from the same authoritative
+		// LiteLLM table (dropping bedrock/vertex/azure re-listings and every other
+		// provider) so pooled codex usage is not silently unpriced (usd=0). Was
+		// claude-only until 2026-07-06 (codex-into-pool); the hand-added codex rows
+		// in aikey-control-master's committed summary were wiped on every regen —
+		// generator is now the single source of truth for codex prices too.
+		// Bugfix: workflow/CI/bugfix/2026-07-06-codex-pricing-summary-claude-only.md.
+		keepClaude := k.provider == "anthropic" && strings.HasPrefix(k.model, "claude")
+		keepCodex := k.provider == "openai" &&
+			(strings.HasPrefix(k.model, "gpt-5") || strings.Contains(k.model, "codex"))
+		if !keepClaude && !keepCodex {
 			continue
 		}
 		up.Source = SourceLiteLLM
