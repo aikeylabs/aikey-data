@@ -180,3 +180,45 @@ func TestIngest_NoPin_PreservesReportedOrg(t *testing.T) {
 		t.Fatalf("record org_id=%q want org-tenantA (no pin → passthrough)", gotOrg)
 	}
 }
+
+// seat_id round-trip through the REAL migration chain + IngestBatch — the
+// schema-code-coherence fence for the 2026-07-07 seat-dimension attribution
+// column (v1.0.1-alpha.4). Without it, a missing migration or a dropped
+// INSERT column would be swallowed by INSERT OR IGNORE and report "accepted"
+// while seat_id silently landed NULL.
+func TestIngest_SeatIDPersists(t *testing.T) {
+	db := newConvTestDB(t)
+	svc := NewService(NewSQLRepository(db), "")
+	ctx := context.Background()
+
+	r := rec("evt-seat-1", "o1", "s1", "vk-owner-admin", "srcS", 1, "")
+	r.SeatID = "seat-dbf603a1"
+	if resp := ingest(ctx, svc, r); resp.Accepted != 1 {
+		t.Fatalf("accepted=%d want 1", resp.Accepted)
+	}
+
+	var gotSeat, gotOwner string
+	if err := db.QueryRowContext(ctx,
+		"SELECT COALESCE(seat_id,''), COALESCE(owner_account_id,'') FROM conversation_records WHERE event_id = ?",
+		"evt-seat-1",
+	).Scan(&gotSeat, &gotOwner); err != nil {
+		t.Fatalf("select seat_id: %v", err)
+	}
+	if gotSeat != "seat-dbf603a1" || gotOwner != "vk-owner-admin" {
+		t.Fatalf("seat_id=%q owner=%q — seat dimension must persist ALONGSIDE owner, not replace it", gotSeat, gotOwner)
+	}
+
+	// Legacy shape (no seat, older proxy): still accepted, seat lands NULL/''.
+	if resp := ingest(ctx, svc, rec("evt-seat-2", "o1", "s1", "acct-7", "srcS", 2, "")); resp.Accepted != 1 {
+		t.Fatalf("legacy record rejected")
+	}
+	var legacySeat sql.NullString
+	if err := db.QueryRowContext(ctx,
+		"SELECT seat_id FROM conversation_records WHERE event_id = ?", "evt-seat-2",
+	).Scan(&legacySeat); err != nil {
+		t.Fatalf("select legacy seat: %v", err)
+	}
+	if legacySeat.Valid && legacySeat.String != "" {
+		t.Fatalf("legacy record seat_id=%q, want NULL/empty", legacySeat.String)
+	}
+}
