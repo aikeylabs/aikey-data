@@ -129,8 +129,19 @@ func (s *Service) ingestOne(ctx context.Context, e *ConversationRecord) RecordRe
 	// system_text first-wins (r3 #4 / Q1 option A): store the system prompt ONCE
 	// per session. Best-effort — the record is already stored; a session-metadata
 	// hiccup must not fail the turn.
+	//
+	// Session scope key = the SEAT key (seat_id, owner fallback), NOT raw owner
+	// (2026-07-07 seat-dimension attribution): query-service scopes system_text
+	// lookups by the same key the audit UI navigates with, and
+	// conversation_sessions has no seat column — its owner_account_id column
+	// carries whichever key scopes the session. Legacy rows (pre-seat proxies)
+	// hold owner, which is exactly what the query's COALESCE falls back to.
 	if e.SystemText != "" {
-		if err := s.repo.UpsertSession(ctx, e.OrgID, e.SessionID, e.OwnerAccountID, e.SystemText); err != nil {
+		sessionScope := e.SeatID
+		if sessionScope == "" {
+			sessionScope = e.OwnerAccountID
+		}
+		if err := s.repo.UpsertSession(ctx, e.OrgID, e.SessionID, sessionScope, e.SystemText); err != nil {
 			slog.Warn("upsert conversation session failed",
 				"event.name", "conversation.session.upsert_failed",
 				"org_id", e.OrgID, "session_id", e.SessionID, "error", err)
