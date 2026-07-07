@@ -2,6 +2,12 @@
 package main
 
 import (
+	// Embed IANA tzdata so time.LoadLocation works on Windows (no system
+	// zoneinfo). query-service buckets usage by timezone; without this it logs
+	// "unknown IANA TZ ... falling back to UTC" and mis-aggregates on Windows.
+	// Bugfix: workflow/CI/bugfix/2026-07-06-windows-server-missing-tzdata.md
+	_ "time/tzdata"
+
 	"context"
 	"fmt"
 	"log/slog"

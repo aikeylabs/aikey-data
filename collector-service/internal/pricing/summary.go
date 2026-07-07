@@ -34,11 +34,10 @@ type PriceSummary struct {
 // aikey-control-master and inlined into the quota snapshot.
 func BuildSummary() (*PriceSummary, error) { return buildSummaryFrom(litellmJSON) }
 
-// buildSummaryFrom is the testable core: it keeps every anthropic-direct
-// claude-* model (the names a Claude proxy routes), dropping bedrock/vertex
-// re-listings and all other providers. Reuses parseLiteLLM so the summary
-// applies the exact same field mapping the authoritative resolver does
-// (including reasoning := output default) — no second, drift-prone parser.
+// buildSummaryFrom is the testable core: it keeps the claude + codex set,
+// dropping everything else. Reuses parseLiteLLM so the summary applies the exact
+// same field mapping the authoritative resolver does (including reasoning :=
+// output default) — no second, drift-prone parser.
 //
 // Version is the sha256 prefix of the canonical (sorted-key) models JSON, so it
 // is deterministic and only moves when a kept model's price moves.
@@ -57,6 +56,11 @@ func buildSummaryFrom(litellmBytes []byte) (*PriceSummary, error) {
 		// in aikey-control-master's committed summary were wiped on every regen —
 		// generator is now the single source of truth for codex prices too.
 		// Bugfix: workflow/CI/bugfix/2026-07-06-codex-pricing-summary-claude-only.md.
+		//
+		// gpt-5* (not just *codex*): the live Codex CLI actually sends plain
+		// gpt-5.N-mini models, which the earlier narrow `contains "codex"` policy
+		// under-priced (usd=0). Kept broad here (supersedes summaryKeepsModel, merged
+		// 2026-07-06). Size stays well under the snapshot budget.
 		keepClaude := k.provider == "anthropic" && strings.HasPrefix(k.model, "claude")
 		keepCodex := k.provider == "openai" &&
 			(strings.HasPrefix(k.model, "gpt-5") || strings.Contains(k.model, "codex"))

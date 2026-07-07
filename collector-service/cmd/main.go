@@ -3,6 +3,10 @@
 package main
 
 import (
+	// Embed IANA tzdata so time.LoadLocation works on Windows (no system
+	// zoneinfo). Bugfix: workflow/CI/bugfix/2026-07-06-windows-server-missing-tzdata.md
+	_ "time/tzdata"
+
 	"context"
 	"fmt"
 	"log/slog"
