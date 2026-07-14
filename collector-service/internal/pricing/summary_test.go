@@ -1,22 +1,19 @@
 package pricing
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
-// fixture: a minimal LiteLLM-shaped table with anthropic claude + openai codex
-// models + noise (a bedrock re-listing, a non-codex openai model, and the spec
-// block). Only anthropic-direct claude-* AND openai *codex* entries must survive
-// (R34 codex 进池).
+// fixture: a minimal LiteLLM-shaped table with anthropic claude models (Claude
+// pools) + openai gpt-5/codex models (Codex pools) + noise (a bedrock re-listing,
+// and a non-codex openai model gpt-4o). Anthropic-direct claude-* AND openai
+// gpt-5*/*codex* entries must survive; everything else (bedrock re-listing, other
+// openai, spec block) must be dropped.
 const litellmFixture = `{
   "claude-opus-4-8": {"litellm_provider":"anthropic","input_cost_per_token":5e-6,"output_cost_per_token":2.5e-5,"cache_read_input_token_cost":5e-7,"cache_creation_input_token_cost":6.25e-6},
   "claude-haiku-4-5": {"litellm_provider":"anthropic","input_cost_per_token":1e-6,"output_cost_per_token":5e-6,"cache_read_input_token_cost":1e-7,"cache_creation_input_token_cost":1.25e-6},
-  "gpt-5-codex": {"litellm_provider":"openai","input_cost_per_token":1.25e-6,"output_cost_per_token":1e-5},
-  "codex-mini-latest": {"litellm_provider":"openai","input_cost_per_token":1.5e-6,"output_cost_per_token":6e-6},
   "anthropic.claude-3-5-haiku-20241022-v1:0": {"litellm_provider":"bedrock","input_cost_per_token":8e-7,"output_cost_per_token":4e-6},
+  "gpt-5.4-mini": {"litellm_provider":"openai","input_cost_per_token":7.5e-7,"output_cost_per_token":4.5e-6,"cache_read_input_token_cost":7.5e-8},
+  "gpt-5-codex": {"litellm_provider":"openai","input_cost_per_token":1.25e-6,"output_cost_per_token":1e-5},
   "gpt-4o-2024-08-06": {"litellm_provider":"openai","input_cost_per_token":2.5e-6,"output_cost_per_token":1e-5},
-  "gpt-5.5": {"litellm_provider":"openai","input_cost_per_token":1.25e-6,"output_cost_per_token":1e-5},
   "sample_spec": {"input_cost_per_token":1.0}
 }`
 
@@ -25,9 +22,10 @@ func TestBuildSummary_KeepsClaudeAndCodex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSummaryFrom: %v", err)
 	}
-	// 2 claude + 2 codex (gpt-5-codex, codex-mini-latest).
+	// 2 claude + gpt-5.4-mini + gpt-5-codex. NOT gpt-4o (openai but not a codex
+	// pool model), NOT the bedrock re-listing, NOT the spec block.
 	if len(s.Models) != 4 {
-		t.Fatalf("want 4 models (2 claude + 2 codex), got %d: %v", len(s.Models), keys(s.Models))
+		t.Fatalf("want 4 models (claude + codex), got %d: %v", len(s.Models), keys(s.Models))
 	}
 	op, ok := s.Models["claude-opus-4-8"]
 	if !ok {
@@ -44,17 +42,21 @@ func TestBuildSummary_KeepsClaudeAndCodex(t *testing.T) {
 	if op.Source != SourceLiteLLM {
 		t.Errorf("source must be litellm, got %q", op.Source)
 	}
-	// codex models survive with their rates (R34: codex-pool usd enforcement).
-	cx, ok := s.Models["gpt-5-codex"]
-	if !ok || cx.InputPerToken != 1.25e-6 || cx.OutputPerToken != 1e-5 {
-		t.Errorf("gpt-5-codex must survive with its rates, got ok=%v %+v", ok, cx)
+	// codex pool models must be priced too (regression guard for the 2026-07-06
+	// codex-into-pool fix — they were claude-only before, so pooled codex usage
+	// showed usd=0). gpt-5.4-mini is the model the live test account actually used.
+	cm, ok := s.Models["gpt-5.4-mini"]
+	if !ok {
+		t.Fatal("gpt-5.4-mini (codex pool model) missing — codex usage would be unpriced")
 	}
-	if _, ok := s.Models["codex-mini-latest"]; !ok {
-		t.Error("codex-mini-latest must survive")
+	if cm.InputPerToken != 7.5e-7 || cm.OutputPerToken != 4.5e-6 || cm.Source != SourceLiteLLM {
+		t.Errorf("gpt-5.4-mini rates wrong: %+v", cm)
 	}
-	// excluded: bedrock re-listing, NON-codex openai (gpt-4o + gpt-5.5 mainline),
-	// and the spec block. gpt-5.5 mainline is deliberately dropped (narrow set).
-	for _, bad := range []string{"anthropic.claude-3-5-haiku-20241022-v1:0", "gpt-4o-2024-08-06", "gpt-5.5", "sample_spec"} {
+	if _, ok := s.Models["gpt-5-codex"]; !ok {
+		t.Error("gpt-5-codex missing — codex pool model must be priced")
+	}
+	// excluded: bedrock re-listing, non-codex openai (gpt-4o), and the spec block
+	for _, bad := range []string{"anthropic.claude-3-5-haiku-20241022-v1:0", "gpt-4o-2024-08-06", "sample_spec"} {
 		if _, ok := s.Models[bad]; ok {
 			t.Errorf("must exclude %q", bad)
 		}
@@ -87,6 +89,11 @@ func TestBuildSummary_RealEmbeddedTableCoversInUseModels(t *testing.T) {
 		"claude-haiku-4-5":  1e-6,
 		"claude-sonnet-4-6": 3e-6,
 		"claude-opus-4-8":   5e-6,
+		// codex pool models the proxy routes — must be priced from the real table
+		// (regression guard for 2026-07-06 codex-into-pool). gpt-5.4-mini is what
+		// the live E2E account used; gpt-5-codex is the canonical codex model.
+		"gpt-5.4-mini": 7.5e-7,
+		"gpt-5-codex":  1.25e-6,
 	}
 	for m, in := range want {
 		got, ok := s.Models[m]
@@ -97,25 +104,6 @@ func TestBuildSummary_RealEmbeddedTableCoversInUseModels(t *testing.T) {
 		if got.InputPerToken != in {
 			t.Errorf("%q input rate: want %v got %v", m, in, got.InputPerToken)
 		}
-	}
-	// R34 codex 进池: the codex models the Codex CLI sends must be priced too, or
-	// codex-pool VKs fall to the token-floor (unpriced). Guards the "contains codex"
-	// filter against an upstream key rename. Presence-only (rates move with LiteLLM).
-	for _, m := range []string{"gpt-5-codex", "codex-mini-latest"} {
-		if _, ok := s.Models[m]; !ok {
-			t.Errorf("codex model %q missing from real summary (codex-pool usd enforcement)", m)
-		}
-	}
-	// The summary must stay SMALL (it rides the quota snapshot to every proxy). The
-	// codex set is the ~7 *codex* rows, NOT all 30+ gpt-5* — assert the narrow set.
-	codexCount := 0
-	for m := range s.Models {
-		if strings.Contains(m, "codex") {
-			codexCount++
-		}
-	}
-	if codexCount > 12 {
-		t.Errorf("codex model set too wide (%d) — the summary must stay small; only *codex* rows are kept", codexCount)
 	}
 }
 

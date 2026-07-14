@@ -36,8 +36,14 @@ type ConversationRecord struct {
 	EventID        string `json:"event_id"`         // = the turn's usage event_id; idempotency key
 	OrgID          string `json:"org_id"`           // tenant; all queries scoped by it
 	SessionID      string `json:"session_id"`       // client session id; NOT globally unique → always read with org+owner
-	OwnerAccountID string `json:"owner_account_id"` // seat — proxy-verified attribution; collector validates ∈ org, NEVER overwritten by JWT
-	VirtualKeyID   string `json:"virtual_key_id,omitempty"`
+	OwnerAccountID string `json:"owner_account_id"` // VK owner — proxy-verified attribution; collector validates ∈ org, NEVER overwritten by JWT
+	// SeatID: the org seat of the HUMAN at the terminal (route.SeatID, same
+	// field usage events carry). Added 2026-07-07 because owner_account_id is
+	// the VK OWNER — for shared-pool VKs that's the pool creator, and audit
+	// views keyed on it filed employee turns under a stranger seat. Empty for
+	// legacy proxies / personal keys; query views fall back to owner.
+	SeatID       string `json:"seat_id,omitempty"`
+	VirtualKeyID string `json:"virtual_key_id,omitempty"`
 
 	// Delivery integrity (mirrors usage): SourceSeq is a pointer so "absent"
 	// (older proxy) is distinguishable from 0. SourceID identifies the proxy/

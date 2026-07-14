@@ -34,30 +34,7 @@ type PriceSummary struct {
 // aikey-control-master and inlined into the quota snapshot.
 func BuildSummary() (*PriceSummary, error) { return buildSummaryFrom(litellmJSON) }
 
-// summaryKeepsModel decides which (provider, model) pairs ride the edge summary.
-// It keeps exactly the names an OAuth-pool deployment routes:
-//   - anthropic claude-* (the Claude pool / direct-bind path); AND
-//   - openai *codex* (R34 codex 进池, 2026-07-04) — the ~7 models the Codex CLI
-//     actually sends (gpt-5-codex, gpt-5.N-codex[-max|-mini], codex-mini-latest).
-//
-// Why "contains codex" and NOT all gpt-5*: the summary rides the quota snapshot to
-// EVERY proxy (incl. Personal), so it must stay small. The Codex CLI defaults to a
-// *-codex model, so the 7 codex-suffixed rows cover real usage at <10KB; new -codex
-// models are picked up automatically. Non-codex gpt-5 (gpt-5.5 mainline etc.) is
-// intentionally excluded — a codex user who manually selects one falls to the proxy
-// token-floor until the server reconciles the exact usd; extend here if that usage
-// materializes. bedrock/vertex re-listings and other providers are dropped.
-func summaryKeepsModel(provider, model string) bool {
-	if provider == "anthropic" && strings.HasPrefix(model, "claude") {
-		return true
-	}
-	if provider == "openai" && strings.Contains(model, "codex") {
-		return true
-	}
-	return false
-}
-
-// buildSummaryFrom is the testable core: it keeps the summaryKeepsModel set,
+// buildSummaryFrom is the testable core: it keeps the claude + codex set,
 // dropping everything else. Reuses parseLiteLLM so the summary applies the exact
 // same field mapping the authoritative resolver does (including reasoning :=
 // output default) — no second, drift-prone parser.
@@ -71,7 +48,23 @@ func buildSummaryFrom(litellmBytes []byte) (*PriceSummary, error) {
 	}
 	models := make(map[string]UnitPrices)
 	for k, up := range m {
-		if !summaryKeepsModel(k.provider, k.model) {
+		// Claude pools route anthropic-direct claude-* models; Codex pools route
+		// OpenAI gpt-5* / *codex* models. Price BOTH from the same authoritative
+		// LiteLLM table (dropping bedrock/vertex/azure re-listings and every other
+		// provider) so pooled codex usage is not silently unpriced (usd=0). Was
+		// claude-only until 2026-07-06 (codex-into-pool); the hand-added codex rows
+		// in aikey-control-master's committed summary were wiped on every regen —
+		// generator is now the single source of truth for codex prices too.
+		// Bugfix: workflow/CI/bugfix/2026-07-06-codex-pricing-summary-claude-only.md.
+		//
+		// gpt-5* (not just *codex*): the live Codex CLI actually sends plain
+		// gpt-5.N-mini models, which the earlier narrow `contains "codex"` policy
+		// under-priced (usd=0). Kept broad here (supersedes summaryKeepsModel, merged
+		// 2026-07-06). Size stays well under the snapshot budget.
+		keepClaude := k.provider == "anthropic" && strings.HasPrefix(k.model, "claude")
+		keepCodex := k.provider == "openai" &&
+			(strings.HasPrefix(k.model, "gpt-5") || strings.Contains(k.model, "codex"))
+		if !keepClaude && !keepCodex {
 			continue
 		}
 		up.Source = SourceLiteLLM

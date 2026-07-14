@@ -17,13 +17,14 @@ func NewSQLRepository(db *shared.DB) Repository { return &sqlRepo{db: db} }
 
 // Column list mirrors the conversation_records DDL (v1.0.1-alpha.2 migration).
 // system_text is NOT here — it lives once-per-session in conversation_sessions.
-const convColumns = "event_id, conv_date, org_id, session_id, owner_account_id, " +
+const convColumns = "event_id, conv_date, org_id, session_id, owner_account_id, seat_id, " +
 	"virtual_key_id, source_id, source_seq, model, provider_code, user_text, assistant_text, " +
 	"input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens, reasoning_tokens, " +
 	"total_tokens, cache_enabled, duration_ms, request_status, content_bytes, ingest_status, created_at"
 
-// 24 placeholders = 24 columns above (cache_enabled added for decision B).
-const convPlaceholders = "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+// 25 placeholders = 25 columns above (cache_enabled: decision B; seat_id:
+// 2026-07-07 seat-dimension attribution, v1.0.1-alpha.4 migration).
+const convPlaceholders = "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
 
 // advanceWatermarkScanLimit bounds the per-call source_seq window (mirrors usage).
 const advanceWatermarkScanLimit = 10000
@@ -61,7 +62,7 @@ func (r *sqlRepo) InsertRecord(ctx context.Context, e *ConversationRecord, quara
 	// partition key must be in it; SQLite's INSERT OR IGNORE ignores the target.
 	insert := r.db.InsertOrIgnoreOn("conversation_records", convColumns, convPlaceholders, "event_id, conv_date")
 	res, err := r.db.ExecContext(ctx, insert,
-		e.EventID, cd, e.OrgID, nullStr(e.SessionID), nullStr(e.OwnerAccountID),
+		e.EventID, cd, e.OrgID, nullStr(e.SessionID), nullStr(e.OwnerAccountID), nullStr(e.SeatID),
 		nullStr(e.VirtualKeyID), nullStr(e.SourceID), e.SourceSeq, nullStr(e.Model), nullStr(e.ProviderCode),
 		nullStr(e.UserText), nullStr(e.AssistantText),
 		e.InputTokens, e.OutputTokens, e.CachedInputTokens, e.CacheCreationInputTokens, e.ReasoningTokens,

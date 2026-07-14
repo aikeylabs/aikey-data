@@ -85,12 +85,23 @@ func appendDateRange(where string, args []any, p QueryParams) (string, []any) {
 	return where, args
 }
 
+// seatKeyExpr is the seat-dimension attribution key (2026-07-07, alpha.4):
+// prefer the explicit seat_id stamped by >=alpha.4 proxies (the same
+// route.SeatID usage events carry), fall back to owner_account_id for legacy
+// rows. Why: owner_account_id is the VK OWNER — for shared OAuth-pool VKs
+// that's the pool creator, and keying the audit on it filed employee turns
+// under a stranger seat row while the usage UI (seat-keyed) attributed
+// correctly. NULLIF covers both NULL and '' storage shapes. Every
+// seat-scoped query below MUST use this expression, never raw
+// owner_account_id, or the two views diverge again.
+const seatKeyExpr = "COALESCE(NULLIF(seat_id, ''), owner_account_id)"
+
 func (r *sqlRepo) SeatSummaries(ctx context.Context, p QueryParams) ([]SeatSummary, error) {
 	where := "org_id = ?"
 	args := []any{p.OrgID}
 	where, args = appendDateRange(where, args, p)
 	q := fmt.Sprintf(`
-		SELECT owner_account_id,
+		SELECT `+seatKeyExpr+`,
 		       COUNT(DISTINCT COALESCE(session_id, event_id)),
 		       COUNT(*),
 		       COALESCE(SUM(content_bytes), 0),
@@ -98,12 +109,12 @@ func (r *sqlRepo) SeatSummaries(ctx context.Context, p QueryParams) ([]SeatSumma
 		       %s
 		FROM conversation_records
 		WHERE %s
-		GROUP BY owner_account_id
+		GROUP BY `+seatKeyExpr+`
 		ORDER BY %s
 		LIMIT ? OFFSET ?`, r.db.EpochMillis("MAX(created_at)"), where,
 		// Default: tokens DESC (per product — the seat list ranks by spend);
 		// tiebreak by recency then id for stable pagination.
-		orderByClause(seatSortCols, p.SortBy, p.SortDir, "COALESCE(SUM(total_tokens), 0)", "MAX(created_at) DESC, owner_account_id"))
+		orderByClause(seatSortCols, p.SortBy, p.SortDir, "COALESCE(SUM(total_tokens), 0)", "MAX(created_at) DESC, "+seatKeyExpr))
 	args = append(args, clampLimit(p.Limit, defaultListLimit), p.Offset)
 
 	rows, err := r.db.QueryContext(ctx, q, args...)
@@ -138,7 +149,7 @@ func (r *sqlRepo) SeatSummaries(ctx context.Context, p QueryParams) ([]SeatSumma
 // threads carry no per-conversation system prompt. Bugfix:
 // 2026-06-17-conversation-audit-query-null-session-id.md
 func (r *sqlRepo) SessionSummaries(ctx context.Context, p QueryParams) ([]SessionSummary, error) {
-	where := "org_id = ? AND owner_account_id = ?"
+	where := "org_id = ? AND "+seatKeyExpr+" = ?"
 	args := []any{p.OrgID, p.OwnerAccountID}
 	where, args = appendDateRange(where, args, p)
 	q := fmt.Sprintf(`
@@ -188,7 +199,7 @@ func (r *sqlRepo) ThreadDetail(ctx context.Context, p QueryParams) (*ThreadDetai
 		       COALESCE(cached_input_tokens, 0), COALESCE(cache_creation_input_tokens, 0),
 		       COALESCE(reasoning_tokens, 0), COALESCE(cache_enabled, 0)
 		FROM conversation_records
-		WHERE org_id = ? AND owner_account_id = ? AND COALESCE(session_id, event_id) = ?
+		WHERE org_id = ? AND `+seatKeyExpr+` = ? AND COALESCE(session_id, event_id) = ?
 		ORDER BY created_at, event_id
 		LIMIT ? OFFSET ?`, r.db.EpochMillis("created_at"))
 	rows, err := r.db.QueryContext(ctx, q,
@@ -212,6 +223,13 @@ func (r *sqlRepo) ThreadDetail(ctx context.Context, p QueryParams) (*ThreadDetai
 
 // SessionSystemText returns the once-per-session system prompt (conversation_sessions,
 // first-wins), "" when no session row exists.
+//
+// conversation_sessions has NO seat_id column and keeps the raw
+// owner_account_id COLUMN NAME — but its VALUE is the seat key: the collector
+// upserts sessions with the same seat-or-owner key (see collector service.go,
+// 2026-07-07), and legacy rows carry owner, which is exactly what seatKeyExpr
+// falls back to for their records. So binding p.OwnerAccountID (= the seat key
+// the caller navigated with) matches both generations without a schema change.
 func (r *sqlRepo) SessionSystemText(ctx context.Context, p QueryParams) (string, error) {
 	var sys string
 	err := r.db.QueryRowContext(ctx,
@@ -231,7 +249,7 @@ func (r *sqlRepo) SessionSystemText(ctx context.Context, p QueryParams) (string,
 // first (so the .zip reads chronologically), honoring the conv_date range. No
 // cap — the export enumerates every session.
 func (r *sqlRepo) StreamSessionIDs(ctx context.Context, p QueryParams, fn func(string) error) error {
-	where := "org_id = ? AND owner_account_id = ?"
+	where := "org_id = ? AND "+seatKeyExpr+" = ?"
 	args := []any{p.OrgID, p.OwnerAccountID}
 	where, args = appendDateRange(where, args, p)
 	q := "SELECT COALESCE(session_id, event_id) FROM conversation_records WHERE " + where +
@@ -264,7 +282,7 @@ func (r *sqlRepo) StreamSessionTurns(ctx context.Context, p QueryParams, fn func
 		       COALESCE(cached_input_tokens, 0), COALESCE(cache_creation_input_tokens, 0),
 		       COALESCE(reasoning_tokens, 0), COALESCE(cache_enabled, 0)
 		FROM conversation_records
-		WHERE org_id = ? AND owner_account_id = ? AND COALESCE(session_id, event_id) = ?
+		WHERE org_id = ? AND `+seatKeyExpr+` = ? AND COALESCE(session_id, event_id) = ?
 		ORDER BY created_at, event_id`, r.db.EpochMillis("created_at"))
 	rows, err := r.db.QueryContext(ctx, q, p.OrgID, p.OwnerAccountID, p.SessionID)
 	if err != nil {
