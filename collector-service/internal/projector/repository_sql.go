@@ -40,7 +40,8 @@ SELECT ods_id, event_id, event_time, occurred_at,
        session_id,
        region, endpoint_url,
        oauth_identity,
-       content_hash, source_id, source_seq
+       content_hash, source_id, source_seq,
+       %s AS request_path
 FROM usage_event_ods
 WHERE ((dwd_status = 'pending')
    OR (dwd_status = 'retry' AND dwd_next_retry_at <= %s))
@@ -55,7 +56,10 @@ func (r *sqlODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord
 	// would emit datetime('now') on SQLite, and a TEXT-to-INTEGER
 	// lexicographic compare would match every retry row on every scan
 	// (hot loop). See bugfix 20260424 review finding #1.
-	query := fmt.Sprintf(fetchPendingTpl, r.db.NowMillis())
+	// request_path lives inside raw_event_json (additive wire field, no ODS
+	// column — see 20260715-非生成流量不进用量审计与统计.md). Extracted
+	// SQL-side so we don't ship the whole raw blob per row.
+	query := fmt.Sprintf(fetchPendingTpl, r.db.JSONText("raw_event_json", "request_path"), r.db.NowMillis())
 	rows, err := r.db.QueryContext(ctx, query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("fetch pending ods: %w", err)
@@ -82,6 +86,7 @@ func (r *sqlODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord
 			&rec.Region, &rec.EndpointURL,
 			&rec.OAuthIdentity,
 			&rec.ContentHash, &rec.SourceID, &rec.SourceSeq,
+			&rec.RequestPath,
 		); err != nil {
 			return nil, fmt.Errorf("scan ods row: %w", err)
 		}

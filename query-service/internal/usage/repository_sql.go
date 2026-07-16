@@ -43,6 +43,30 @@ func personalFilter(p QueryParams) (clause string, id string) {
 	return "account_id = ?", p.AccountID
 }
 
+// Usage-scope filters (2026-07-15 非生成流量不进用量审计与统计, closing the
+// gap where the 阶段2 design doc specified "默认过滤 user_usage_scope = normal"
+// for stats queries but no SQL ever implemented it). Two DELIBERATELY
+// different rules — do not merge them:
+//
+//   - scopeStatsAnd (stats/charts/rankings): normal only. Excludes both
+//     non_generation (probe/poll traffic — GET /v1/models health checks that
+//     flooded pages with 0-token rows) and excluded/abnormal
+//     (ownership-unverifiable rows, per the original 阶段2 design).
+//
+//   - scopeAuditAnd (audit + per-event detail pages): excludes ONLY
+//     non_generation. excluded/abnormal rows are exactly what an auditor
+//     needs to see (pending_review anomalies), so audit must NOT use the
+//     stats rule.
+//
+// Both are plain string literals (user_usage_scope is NOT NULL on DWD) meant
+// to be appended to a WHERE fragment. Unqualified column name — every
+// consumer either queries usage_fact_dwd directly or aliases it in a scope
+// where the name is unambiguous.
+const (
+	scopeStatsAnd = " AND user_usage_scope = 'normal'"
+	scopeAuditAnd = " AND user_usage_scope <> 'non_generation'"
+)
+
 // appSlugFilter returns an additional WHERE fragment + bind value when
 // QueryParams.AppSlug is non-empty, otherwise empty / nil so callers
 // can splice it into the WHERE clause without conditional branching:
@@ -92,6 +116,7 @@ func sessionIDFilter(p QueryParams) (frag string, arg interface{}) {
 // their morning across two rows. See bugfix 20260424 tz-local round.
 func (r *sqlRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]TimelinePoint, error) {
 	filter, id := personalFilter(p)
+	filter += scopeStatsAnd
 	startMs, endMs := p.LocalWindowMs() // [local start-day, local end-day+1) in UTC millis
 	dateExpr := r.db.DateOfLocal("event_time", p.TZOffsetMs, p.TZ)
 	appSlugFrag, appSlugArg := appSlugFilter(p)
@@ -125,6 +150,7 @@ func (r *sqlRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]Timeli
 // Empty AppSlug keeps the existing "whole vault" behavior intact.
 func (r *sqlRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]HourlyPoint, error) {
 	filter, id := personalFilter(p)
+	filter += scopeStatsAnd
 	// Local day window: [localMidnight, localMidnight+24h) converted
 	// back to UTC millis for the event_time range filter. p.StartDate
 	// is already local-midnight because QueryParams.Defaults() shifted
@@ -162,6 +188,7 @@ func (r *sqlRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]
 
 func (r *sqlRepo) PersonalByProtocolTimeline(ctx context.Context, p QueryParams) ([]ProtocolTimelinePoint, error) {
 	filter, id := personalFilter(p)
+	filter += scopeStatsAnd
 	startMs, endMs := p.LocalWindowMs()
 	dateExpr := r.db.DateOfLocal("event_time", p.TZOffsetMs, p.TZ)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
@@ -195,6 +222,7 @@ func (r *sqlRepo) PersonalByProtocolTimeline(ctx context.Context, p QueryParams)
 // ignored beyond extracting the day.
 func (r *sqlRepo) PersonalByProtocolHourly(ctx context.Context, p QueryParams) ([]ProtocolHourlyPoint, error) {
 	filter, id := personalFilter(p)
+	filter += scopeStatsAnd
 	dayStart := aikeytime.FromTime(p.StartDate)
 	dayEnd := aikeytime.FromTime(p.StartDate.AddDate(0, 0, 1))
 	hourExpr := r.db.HourBucketLocal("event_time", p.TZOffsetMs, p.TZ)
@@ -223,6 +251,7 @@ func (r *sqlRepo) PersonalByProtocolHourly(ctx context.Context, p QueryParams) (
 
 func (r *sqlRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParams) ([]ProtocolTotal, error) {
 	filter, id := personalFilter(p)
+	filter += scopeStatsAnd
 	startMs, endMs := p.LocalWindowMs()
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0),
@@ -271,6 +300,7 @@ func (r *sqlRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParams) ([
 // rows have only `protocol_type` populated (provider_code NULL).
 func (r *sqlRepo) PersonalByAppTotal(ctx context.Context, p QueryParams) ([]AppTotal, error) {
 	filter, id := personalFilter(p)
+	filter += scopeStatsAnd
 	startMs, endMs := p.LocalWindowMs()
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT COALESCE(app_slug, ''),
@@ -335,6 +365,7 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 	// for the full rationale, including why displaying ≠ aggregating
 	// was the underlying drift.
 	filter, id := personalFilter(p)
+	filter += scopeStatsAnd
 	// Optional session_id filter (2026-05-26 Performance drill-down):
 	// when set, the outer WHERE narrows to events tagged with this
 	// session. Spliced on the DWD alias `d` since session_id is a DWD
@@ -436,6 +467,7 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 // page.
 func (r *sqlRepo) PersonalByModelTotal(ctx context.Context, p QueryParams) ([]ModelTotal, error) {
 	filter, id := personalFilter(p)
+	filter += scopeStatsAnd
 	startMs, endMs := p.LocalWindowMs()
 	appSlugFrag, appSlugArg := appSlugFilter(p)
 	sessFrag, sessArg := sessionIDFilter(p)
@@ -495,6 +527,7 @@ func (r *sqlRepo) PersonalByModelTotal(ctx context.Context, p QueryParams) ([]Mo
 // §5.3 "Top N session chart self doesn't receive session filter".
 func (r *sqlRepo) PersonalBySessionTotal(ctx context.Context, p QueryParams) ([]SessionTotal, error) {
 	filter, id := personalFilter(p)
+	filter += scopeStatsAnd
 	startMs, endMs := p.LocalWindowMs()
 	startMsArg := r.db.BindMillis(startMs)
 	endMsArg := r.db.BindMillis(endMs)
@@ -630,7 +663,9 @@ func (r *sqlRepo) PersonalUsageDetail(ctx context.Context, p QueryParams) ([]Usa
 	filter, id := personalFilter(p)
 	startMs, endMs := p.LocalWindowMs()
 	args := []interface{}{id, r.db.BindMillis(startMs), r.db.BindMillis(endMs)}
-	where := filter + " AND route_source != 'canary' AND event_time >= ? AND event_time < ?"
+	// Audit rule, not stats rule: the detail page keeps excluded/abnormal rows
+	// visible (anomaly forensics) and hides only probe/poll traffic.
+	where := filter + scopeAuditAnd + " AND route_source != 'canary' AND event_time >= ? AND event_time < ?"
 	if p.Unpriced {
 		where += " AND billable_amount IS NULL"
 	}
@@ -744,7 +779,7 @@ func (r *sqlRepo) MasterUserRanking(ctx context.Context, p QueryParams) ([]UserR
 		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN request_count ELSE 0 END),0)
 		FROM usage_fact_dwd
 		WHERE org_id = ?
-		  AND event_time >= ? AND event_time < ?
+		  AND event_time >= ? AND event_time < ?`+scopeStatsAnd+`
 		GROUP BY account_id, seat_id
 		ORDER BY SUM(total_tokens) DESC
 		LIMIT ?`,
@@ -775,7 +810,7 @@ func (r *sqlRepo) MasterByProtocolTotal(ctx context.Context, p QueryParams) ([]P
 		FROM usage_fact_dwd
 		WHERE org_id = ?
 		  AND event_time >= ? AND event_time < ?
-		  AND billing_scope IN ('org_only','org_and_user')
+		  AND billing_scope IN ('org_only','org_and_user')`+scopeAuditAnd+`
 		GROUP BY COALESCE(provider_code, protocol_type)
 		ORDER BY SUM(total_tokens) DESC`,
 		p.OrgID, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
@@ -795,7 +830,7 @@ func (r *sqlRepo) MasterTimeline(ctx context.Context, p QueryParams) ([]Timeline
 		FROM usage_fact_dwd
 		WHERE org_id = ?
 		  AND event_time >= ? AND event_time < ?
-		  AND billing_scope IN ('org_only','org_and_user')
+		  AND billing_scope IN ('org_only','org_and_user')`+scopeAuditAnd+`
 		GROUP BY d
 		ORDER BY d`, dateExpr),
 		p.OrgID, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
@@ -868,7 +903,11 @@ func scanMasterAuditRow(rows *sql.Rows) (*MasterUsageAuditRow, error) {
 // the DWD partition key, so this WHERE prunes the scan to the relevant months.
 // p.StartDate/EndDate are interpreted as calendar dates (their YYYY-MM-DD part).
 func masterAuditWhere(p QueryParams) (string, []any) {
-	return "d.org_id = ? AND d.usage_date >= ? AND d.usage_date <= ?",
+	// scopeAuditAnd (2026-07-15): probe/poll traffic (non_generation) is not
+	// part of the usage audit; excluded/abnormal rows stay — they carry the
+	// pending_review anomalies auditors must see. Qualified with d. because
+	// this WHERE runs against the org_seats LEFT JOIN.
+	return "d.org_id = ? AND d.usage_date >= ? AND d.usage_date <= ? AND d.user_usage_scope <> 'non_generation'",
 		[]any{p.OrgID, p.StartDate.Format("2006-01-02"), p.EndDate.Format("2006-01-02")}
 }
 

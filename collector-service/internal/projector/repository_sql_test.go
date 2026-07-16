@@ -145,7 +145,10 @@ func newSQLiteODSTestDB(t *testing.T) *shared.DB {
 			-- Delivery-integrity columns (rc.7 on ODS; projected to DWD in v1.0.1-alpha.3)
 			content_hash TEXT,
 			source_id TEXT,
-			source_seq INTEGER
+			source_seq INTEGER,
+			-- Full wire event (real schema: NOT NULL jsonb/TEXT). FetchPending
+			-- json-extracts request_path from it (2026-07-15 非生成流量不进用量审计).
+			raw_event_json TEXT
 		);
 	`)
 	if err != nil {
@@ -390,5 +393,56 @@ func TestMarkDeadLetter_UpdatesStatusAndErrorFields(t *testing.T) {
 	}
 	if !gotErrMsg.Valid || gotErrMsg.String != "schema mismatch" {
 		t.Errorf("dwd_last_error_msg: want 'schema mismatch', got %#v — parameter binding swapped errMsg with something else", gotErrMsg)
+	}
+}
+
+// TestFetchPending_RequestPathFromRawEvent pins the 2026-07-15 非生成流量
+// contract on the read side: FetchPending must surface the wire event's
+// request_path out of raw_event_json (SQL-side json extraction — no ODS
+// column), and must scan NULL cleanly for legacy rows whose raw event
+// predates the field (or whose raw_event_json is NULL in this fixture).
+func TestFetchPending_RequestPathFromRawEvent(t *testing.T) {
+	db := newSQLiteODSTestDB(t)
+
+	// Row 1: modern event carrying request_path inside the raw wire JSON.
+	et := insertODSTestRow(t, db, 1, "pending", aikeytime.Millis(0))
+	if _, err := db.DB.Exec(
+		`UPDATE usage_event_ods SET raw_event_json = ? WHERE ods_id = 1`,
+		`{"event_id":"e-pending","request_path":"/openai/v1/models"}`,
+	); err != nil {
+		t.Fatalf("seed raw_event_json: %v", err)
+	}
+	_ = et
+	// Row 2: legacy event — raw_event_json has no request_path key.
+	insertODSTestRow(t, db, 2, "pending", aikeytime.Millis(0))
+	if _, err := db.DB.Exec(
+		`UPDATE usage_event_ods SET raw_event_json = ? WHERE ods_id = 2`,
+		`{"event_id":"e-legacy"}`,
+	); err != nil {
+		t.Fatalf("seed legacy raw_event_json: %v", err)
+	}
+
+	reader := NewSQLODSReader(db)
+	pending, err := reader.FetchPending(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("FetchPending: %v", err)
+	}
+	byID := map[int64]ODSRecord{}
+	for _, p := range pending {
+		byID[p.OdsID] = p
+	}
+	modern, ok := byID[1]
+	if !ok {
+		t.Fatal("row 1 missing from FetchPending")
+	}
+	if !modern.RequestPath.Valid || modern.RequestPath.String != "/openai/v1/models" {
+		t.Errorf("RequestPath = %+v, want valid /openai/v1/models", modern.RequestPath)
+	}
+	legacy, ok := byID[2]
+	if !ok {
+		t.Fatal("row 2 missing from FetchPending")
+	}
+	if legacy.RequestPath.Valid {
+		t.Errorf("legacy RequestPath = %+v, want NULL", legacy.RequestPath)
 	}
 }

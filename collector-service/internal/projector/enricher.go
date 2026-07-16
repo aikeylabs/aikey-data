@@ -91,6 +91,21 @@ func (e *Enricher) SetUnpricedSink(s UnpricedSink) { e.unpriced = s }
 
 // Enrich takes an ODS record, looks up the matching control event, and produces a DWD fact.
 func (e *Enricher) Enrich(ctx context.Context, rec *ODSRecord) (*DWDFact, error) {
+	fact, err := e.enrichFact(ctx, rec)
+	if err != nil {
+		return nil, err
+	}
+	// Final scope override (2026-07-15 非生成流量不进用量审计): runs AFTER every
+	// ownership branch above so probe/poll traffic is scoped non_generation
+	// regardless of how the control-event lookup went. Ownership fields
+	// (completion_source / anomaly) are preserved — see applyGenerationScope.
+	applyGenerationScope(fact, rec)
+	return fact, nil
+}
+
+// enrichFact runs the ownership/quality classification chain (the pre-2026-07
+// Enrich body, unchanged).
+func (e *Enricher) enrichFact(ctx context.Context, rec *ODSRecord) (*DWDFact, error) {
 	fact := e.buildBaseFact(rec)
 
 	// Cost is independent of ownership/anomaly classification: any event with a

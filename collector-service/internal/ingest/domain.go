@@ -107,6 +107,14 @@ type UsageEvent struct {
 	Region      string `json:"region,omitempty"`
 	EndpointURL string `json:"endpoint_url,omitempty"`
 
+	// RequestPath (2026-07-15 非生成流量不进用量审计): the inbound request's URL
+	// path as reported by the proxy. MUST be declared here even though no ODS
+	// column exists for it: raw_event_json is json.Marshal of THIS struct (not
+	// the verbatim wire bytes — see service.go), so an undeclared wire field is
+	// silently dropped before storage. The projector json-extracts it from
+	// raw_event_json to classify generation vs non-generation scope.
+	RequestPath string `json:"request_path,omitempty"`
+
 	// app — Phase 4 Connected Apps (v1.0.0-rc.5). Proxy attaches the
 	// registered app slug (e.g. "degrade-detector") to events that
 	// flowed through `/apps/<slug>/v1/...` so query-service can scope

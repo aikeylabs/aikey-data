@@ -75,7 +75,13 @@ func setupRouterDB(t *testing.T) *sql.DB {
 
 func TestRouter_CostAndAdmin_Integration(t *testing.T) {
 	raw := setupRouterDB(t)
-	ms := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC).UnixMilli()
+	// Seed timestamp is RELATIVE to now (yesterday noon UTC), not a fixed
+	// date: the personal endpoints default to a rolling last-30-days window
+	// (QueryParams.Defaults), so a hard-coded date is a time bomb — the
+	// original 2026-06-01 seed started silently failing on 2026-07-02.
+	seedDay := time.Now().UTC().AddDate(0, 0, -1)
+	ms := time.Date(seedDay.Year(), seedDay.Month(), seedDay.Day(), 12, 0, 0, 0, time.UTC).UnixMilli()
+	seedDate := seedDay.Format("2006-01-02")
 
 	// One priced anthropic event with a full audit trail.
 	if _, err := raw.Exec(`INSERT INTO usage_fact_dwd (
@@ -85,12 +91,12 @@ func TestRouter_CostAndAdmin_Integration(t *testing.T) {
 		user_usage_scope, projector_version,
 		billable_amount, currency, credential_id, region, endpoint_url,
 		billing_period, pricing_snapshot_id, unit_prices_snapshot
-	) VALUES ('evt-int', 9001, ?, ?, '2026-06-01',
+	) VALUES ('evt-int', 9001, ?, ?, ?,
 		'org1', 'seatINT', 'anthropic', 'claude-x', 1, 100,
 		'success','test','ok','user_only','normal','test',
 		0.005, 'USD', 'cred-1', '', 'https://api.anthropic.com',
-		'2026-06', 'snapINT', '{"input":0.000003,"output":0.000015,"source":"litellm"}')`,
-		ms, ms); err != nil {
+		?, 'snapINT', '{"input":0.000003,"output":0.000015,"source":"litellm"}')`,
+		ms, ms, seedDate, seedDate[:7]); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := raw.Exec(`INSERT INTO pricing_snapshots (snapshot_id, litellm_sha256, history_sha256, overrides_sha256, aikey_version, created_at, effective_from, effective_until)

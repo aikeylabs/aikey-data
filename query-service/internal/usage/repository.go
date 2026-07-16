@@ -13,6 +13,7 @@ type Repository interface {
 	// PersonalHourlyTimeline returns hourly total_tokens for a single
 	// UTC calendar date (p.StartDate). Returns 0..24 rows (hours with
 	// activity); callers pad sparse hours client-side.
+	// Filters: user_usage_scope = 'normal'
 	PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]HourlyPoint, error)
 
 	// PersonalByProtocolHourly is the intra-day counterpart of
@@ -27,9 +28,11 @@ type Repository interface {
 	PersonalByProtocolTimeline(ctx context.Context, p QueryParams) ([]ProtocolTimelinePoint, error)
 
 	// PersonalByProtocolTotal returns total_tokens per protocol (pie chart).
+	// Filters: user_usage_scope = 'normal'
 	PersonalByProtocolTotal(ctx context.Context, p QueryParams) ([]ProtocolTotal, error)
 
 	// PersonalByKeyTotal returns total_tokens per virtual_key_id.
+	// Filters: user_usage_scope = 'normal'
 	PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyTotal, error)
 
 	// PersonalByAppTotal returns total_tokens per (app_slug, provider_code)
@@ -37,6 +40,7 @@ type Repository interface {
 	// any app context (frontend remaps to friendly tool name via
 	// provider_code). Added 2026-05-25 for /user/usage-ledger "Usage By
 	// App" ranking chart.
+	// Filters: user_usage_scope = 'normal'
 	PersonalByAppTotal(ctx context.Context, p QueryParams) ([]AppTotal, error)
 
 	// PersonalBySessionTotal returns total_tokens per session_id, sorted
@@ -49,12 +53,14 @@ type Repository interface {
 	// SessionID query param on QueryParams is IGNORED here (selecting a
 	// session shouldn't shrink the session ranking to one row). Added
 	// 2026-05-26 for /user/performance "Top N sessions" chart.
+	// Filters: user_usage_scope = 'normal'
 	PersonalBySessionTotal(ctx context.Context, p QueryParams) ([]SessionTotal, error)
 
 	// PersonalByModelTotal returns per-model token & request totals,
 	// sorted by total_tokens DESC and capped at 20 rows. Powers the
 	// `/user/cost` "Usage by model" chart. NULL / empty `model` values
 	// are coalesced to "unknown" so the SUM never silently drops them.
+	// Filters: user_usage_scope = 'normal'
 	PersonalByModelTotal(ctx context.Context, p QueryParams) ([]ModelTotal, error)
 
 	// PersonalRecent returns the N most recent non-canary requests
@@ -69,6 +75,8 @@ type Repository interface {
 	// Unpriced / Model / VirtualKeyID / SessionID / AppSlug). Reads
 	// usage_event_ods (per-event source) — full token breakdown + cost +
 	// failure reason so the "未计价" rows explain themselves.
+	// Filters: user_usage_scope <> 'non_generation' (audit rule — anomalous
+	// excluded/abnormal rows stay visible; probe/poll traffic hidden).
 	PersonalUsageDetail(ctx context.Context, p QueryParams) ([]UsageDetailRow, error)
 
 	// --- Master page ---
@@ -79,10 +87,12 @@ type Repository interface {
 
 	// MasterByProtocolTotal returns total_tokens per protocol for the org.
 	// Filters: billing_scope IN ('org_only','org_and_user')
+	//          AND user_usage_scope <> 'non_generation'
 	MasterByProtocolTotal(ctx context.Context, p QueryParams) ([]ProtocolTotal, error)
 
 	// MasterTimeline returns daily total_tokens for the entire org.
 	// Filters: billing_scope IN ('org_only','org_and_user')
+	//          AND user_usage_scope <> 'non_generation'
 	MasterTimeline(ctx context.Context, p QueryParams) ([]TimelinePoint, error)
 
 	// MasterUsageDetail returns per-event audit rows for one org within
@@ -90,6 +100,8 @@ type Repository interface {
 	// key, so the scan prunes to the relevant months). Ordered event_time DESC,
 	// capped at p.Limit. Powers the enterprise usage-audit page's last-3-days
 	// table. v1.0.1-alpha.4.
+	// Filters: user_usage_scope <> 'non_generation' (2026-07-15 探测流量不进审计;
+	// excluded/abnormal anomaly rows deliberately KEPT — auditors need them).
 	MasterUsageDetail(ctx context.Context, p QueryParams) ([]MasterUsageAuditRow, error)
 
 	// StreamMasterUsageExport streams every audit row for one org within
@@ -97,6 +109,7 @@ type Repository interface {
 	// time via a DB cursor — memory stays O(1) regardless of range size so a
 	// full year exports without materialising. fn is the CSV writer; a non-nil
 	// fn error aborts the stream. The handler enforces the ≤366-day cap.
+	// Filters: user_usage_scope <> 'non_generation' (same rule as MasterUsageDetail).
 	StreamMasterUsageExport(ctx context.Context, p QueryParams, fn func(*MasterUsageAuditRow) error) error
 
 	// --- Admin (cost-pricing Stage 3) ---

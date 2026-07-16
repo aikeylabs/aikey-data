@@ -42,6 +42,14 @@ const (
 	UsageScopeNormal   UserUsageScope = "normal"
 	UsageScopeExcluded UserUsageScope = "excluded"
 	UsageScopeAbnormal UserUsageScope = "abnormal"
+	// UsageScopeNonGeneration (2026-07-15 非生成流量不进用量审计): the request
+	// was a non-generation call — health polls, model-list fetches
+	// (GET /v1/models), and similar client-side probing that produces no
+	// tokens. Deliberately a NEW value, not a reuse of "excluded": excluded
+	// means "ownership unverifiable" (pending review) and those rows MUST
+	// stay visible on the usage-audit page, while non_generation rows are
+	// filtered from audit + stats. Classified by classifyGenerationScope.
+	UsageScopeNonGeneration UserUsageScope = "non_generation"
 )
 
 // ODSRecord represents a row read from usage_event_ods for projection.
@@ -127,6 +135,13 @@ type ODSRecord struct {
 	ContentHash                sql.NullString
 	SourceID                   sql.NullString
 	SourceSeq                  sql.NullInt64
+
+	// RequestPath (2026-07-15 非生成流量不进用量审计): the inbound request's
+	// URL path, extracted from raw_event_json (additive wire field — no ODS
+	// column, no DDL). NULL for events from older proxies; the enricher then
+	// leaves classification unchanged. Feeds the generation/non-generation
+	// scope rule (see classifyGenerationScope).
+	RequestPath                sql.NullString
 }
 
 // ControlEvent is a read-only projection of managed_key_control_events.

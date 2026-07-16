@@ -156,6 +156,24 @@ func (d *DB) Greatest(a, b string) string {
 	return fmt.Sprintf("GREATEST(%s, %s)", a, b)
 }
 
+// JSONText returns a SQL expression extracting a top-level string key from a
+// JSON column as TEXT (SQL NULL when the key is absent), dialect-safe.
+// SQLite stores JSON as TEXT and uses json_extract(col,'$.key'); Postgres
+// stores JSONB and uses col->>'key'. key must be a trusted literal (compile-time
+// constant), never user input — it is interpolated, not bound.
+//
+// Why a helper (2026-07-15 非生成流量不进用量审计): the projector reads the wire
+// event's request_path out of usage_event_ods.raw_event_json instead of adding
+// an ODS column — additive wire fields then need zero DDL. A literal `->>`
+// works on PG but not SQLite; json_extract works on SQLite but not on JSONB
+// the same way — same class of dialect bug as Greatest above.
+func (d *DB) JSONText(col, key string) string {
+	if d.Dialect == DialectSQLite {
+		return fmt.Sprintf("json_extract(%s, '$.%s')", col, key)
+	}
+	return fmt.Sprintf("%s->>'%s'", col, key)
+}
+
 func (d *DB) IsSQLite() bool { return d.Dialect == DialectSQLite }
 
 // BindMillis returns the correct driver argument for an aikeytime.Millis

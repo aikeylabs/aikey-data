@@ -91,6 +91,12 @@ func setupUsageTestDB(t *testing.T) *shared.DB {
 			PRIMARY KEY (snapshot_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_pricing_snapshots_active ON pricing_snapshots (effective_until) WHERE effective_until IS NULL`,
+		// aikey-config-tool/pkg/dbmigrate/versions/v1_0_1_alpha1_oauth_identity.go
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN oauth_identity TEXT`,
+		// aikey-config-tool/pkg/dbmigrate/versions/v1_0_1_alpha1_dwd_integrity_columns.go
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN content_hash TEXT`,
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN source_id TEXT`,
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN source_seq INTEGER`,
 	}
 	for _, stmt := range postBaseline {
 		if _, err := raw.Exec(stmt); err != nil {
@@ -140,6 +146,9 @@ type dwdRow struct {
 	// tests seed mixed priced / unpriced rows without *float64 everywhere.
 	BillableAmount *float64
 	Currency       string // defaults to "USD" when BillableAmount != nil
+	// UserUsageScope defaults to "normal". Set "non_generation" / "excluded" /
+	// "abnormal" to exercise the 2026-07-15 scope filters.
+	UserUsageScope string
 }
 
 // odsIDSeq generates unique ods_id values per inserted DWD row so the
@@ -161,6 +170,9 @@ func insertDWD(t *testing.T, db *shared.DB, r dwdRow) {
 	}
 	if r.BillingScope == "" {
 		r.BillingScope = "user_only"
+	}
+	if r.UserUsageScope == "" {
+		r.UserUsageScope = "normal"
 	}
 	odsIDSeq++
 	var modelArg any = r.Model
@@ -195,7 +207,7 @@ func insertDWD(t *testing.T, db *shared.DB, r dwdRow) {
 		r.RequestCount, r.TotalTokens,
 		r.InputTokens, r.CachedInputTokens, r.CacheCreationInputTokens, r.OutputTokens,
 		"success", "test", "ok",
-		r.BillingScope, "normal", "test",
+		r.BillingScope, r.UserUsageScope, "test",
 		r.AppSlug, billableArg, currencyArg)
 	if err != nil {
 		t.Fatalf("insertDWD %q: %v", r.EventID, err)
