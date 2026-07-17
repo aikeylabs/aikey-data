@@ -192,6 +192,31 @@ func (h *UsageHandler) PersonalByAppTotal(w http.ResponseWriter, r *http.Request
 	shared.JSON(w, http.StatusOK, data)
 }
 
+// GET /v1/usage/personal/by-agent/total?seat_id=...&start_date=...&end_date=...
+// Returns usage grouped by seat_id for the caller's own seat + their Agent
+// seats (org_seats.parent_seat_id = caller's seat) — the /user/usage-ledger
+// "Usage By Agent" breakdown (2026-07-17). Authorization is server-side: the
+// caller only ever sees their own + their agents' rows (see
+// usage.PersonalByAgentTotal). seat_id here is the caller's resolved identity
+// via parsePersonalParams — NOT an arbitrary client-supplied seat.
+func (h *UsageHandler) PersonalByAgentTotal(w http.ResponseWriter, r *http.Request) {
+	p, err := parsePersonalParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	data, err := h.repo.PersonalByAgentTotal(r.Context(), p)
+	if err != nil {
+		slog.Error("PersonalByAgentTotal query failed", "error", err)
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	if data == nil {
+		data = []usage.AgentTotal{}
+	}
+	shared.JSON(w, http.StatusOK, data)
+}
+
 // GET /v1/usage/personal/by-session/total?seat_id=...&start_date=...&end_date=...&limit=10
 // (or account_id / org_id=personal)
 //

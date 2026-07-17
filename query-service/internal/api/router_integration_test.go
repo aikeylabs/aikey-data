@@ -179,6 +179,112 @@ func TestRouter_CostAndAdmin_Integration(t *testing.T) {
 	}
 }
 
+// TestRouter_ByAgent_Integration is the HTTP-level E2E for the 2026-07-17
+// "Usage By Agent" breakdown: it drives GET /v1/usage/personal/by-agent/total
+// through the REAL api.NewRouter (ServiceTokenAuth + Go 1.22 routing) against
+// the REAL baseline schema PLUS a real org_seats table, and proves the
+// authorization scope end-to-end — the caller sees their own seat + the agents
+// they own, and a STRANGER's agent never leaks. The repository unit test
+// (usage/by_agent_test.go) covers the same scope at the SQL layer; this one
+// additionally proves the route is registered, auth is enforced, seat_id flows
+// as a query param, and the JSON shape serializes.
+func TestRouter_ByAgent_Integration(t *testing.T) {
+	raw := setupRouterDB(t)
+
+	// org_seats is a control-plane table (not in the data-component baseline);
+	// seed it by hand mirroring the real DDL — seat_type (v1.0.0 / alpha.1),
+	// alias, parent_seat_id (alpha.5). Same convention as usage/by_agent_test.go.
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS org_seats (
+			seat_id       TEXT NOT NULL PRIMARY KEY,
+			org_id        TEXT NOT NULL,
+			invited_email TEXT NOT NULL,
+			seat_type     TEXT NOT NULL DEFAULT 'human',
+			alias         TEXT,
+			parent_seat_id TEXT)`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("org_seats DDL: %v", err)
+		}
+	}
+	for _, stmt := range []string{
+		`INSERT INTO org_seats (seat_id, org_id, invited_email, seat_type, alias) VALUES ('seatINT','org1','me@corp','human','Me')`,
+		`INSERT INTO org_seats (seat_id, org_id, invited_email, seat_type, alias, parent_seat_id) VALUES ('agentA','org1','a@corp','digital_employee','Agent A','seatINT')`,
+		`INSERT INTO org_seats (seat_id, org_id, invited_email, seat_type, alias, parent_seat_id) VALUES ('agentX','org1','x@corp','digital_employee','Stranger Agent','seat-other')`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("seed org_seats: %v", err)
+		}
+	}
+
+	// Seed relative to now — personal endpoints default to a rolling 30-day
+	// window, so a hard-coded date silently ages out (see the note in
+	// TestRouter_CostAndAdmin_Integration).
+	seedDay := time.Now().UTC().AddDate(0, 0, -1)
+	ms := time.Date(seedDay.Year(), seedDay.Month(), seedDay.Day(), 12, 0, 0, 0, time.UTC).UnixMilli()
+	seedDate := seedDay.Format("2006-01-02")
+	insertSeatUsage := func(eventID, seat string, tokens, reqs int64) {
+		t.Helper()
+		if _, err := raw.Exec(`INSERT INTO usage_fact_dwd (
+			event_id, ods_id, occurred_at, event_time, usage_date,
+			org_id, seat_id, provider_code, model, request_count, total_tokens,
+			request_status, completion_source, quality_status, billing_scope,
+			user_usage_scope, projector_version
+		) VALUES (?, ?, ?, ?, ?, 'org1', ?, 'anthropic', 'claude-x', ?, ?,
+			'success','test','ok','user_only','normal','test')`,
+			eventID, time.Now().UnixNano(), ms, ms, seedDate, seat, reqs, tokens); err != nil {
+			t.Fatalf("seed usage for %s: %v", seat, err)
+		}
+	}
+	insertSeatUsage("ev-me", "seatINT", 1000, 5)
+	insertSeatUsage("ev-agentA", "agentA", 300, 2)
+	insertSeatUsage("ev-agentX", "agentX", 9999, 40) // stranger's agent — must NOT surface
+
+	repo := usage.NewSQLRepository(shared.NewDB(raw, shared.DialectSQLite))
+	router := NewRouter(NewUsageHandler(repo), NewAdminHandler(repo), nil, raw, intToken)
+
+	do := func(withAuth bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/v1/usage/personal/by-agent/total?seat_id=seatINT", nil)
+		if withAuth {
+			req.Header.Set("Authorization", "Bearer "+intToken)
+		}
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+
+	// Auth enforced.
+	if w := do(false); w.Code != http.StatusUnauthorized {
+		t.Errorf("no-token want 401, got %d", w.Code)
+	}
+
+	w := do(true)
+	if w.Code != 200 {
+		t.Fatalf("by-agent/total want 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	var rows []usage.AgentTotal
+	if err := json.NewDecoder(w.Body).Decode(&rows); err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]usage.AgentTotal{}
+	for _, r := range rows {
+		byID[r.SeatID] = r
+	}
+	// The point: stranger's agent must be absent through the real HTTP path.
+	if _, leaked := byID["agentX"]; leaked {
+		t.Fatalf("SECURITY: stranger's agent leaked via HTTP by-agent endpoint: %+v", rows)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want 2 rows (self + own agent), got %d: %+v", len(rows), rows)
+	}
+	if me := byID["seatINT"]; me.IsAgent || me.SeatAlias != "Me" || me.TotalTokens != 1000 {
+		t.Errorf("own seat row wrong: %+v", me)
+	}
+	if a := byID["agentA"]; !a.IsAgent || a.ParentSeatID != "seatINT" || a.SeatAlias != "Agent A" || a.TotalTokens != 300 {
+		t.Errorf("owned agent row wrong: %+v", a)
+	}
+}
+
 func approxEqInt(a, b float64) bool {
 	d := a - b
 	if d < 0 {

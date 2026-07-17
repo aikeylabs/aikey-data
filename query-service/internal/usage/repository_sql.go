@@ -332,6 +332,60 @@ func (r *sqlRepo) PersonalByAppTotal(ctx context.Context, p QueryParams) ([]AppT
 	return out, rows.Err()
 }
 
+// PersonalByAgentTotal — usage grouped by seat_id for the caller's own seat +
+// its Agent seats (org_seats.parent_seat_id = caller). See AgentTotal /
+// repository.go for the contract + authorization rationale.
+//
+// Why seat-scoped (not personalFilter): the "by agent" breakdown must span
+// MULTIPLE seat_ids (caller + children), so it cannot use the single-seat
+// personalFilter. Scope is enforced in the WHERE by seat_id: seat_ids are
+// UUIDs (globally unique), so `d.seat_id = ? OR s.parent_seat_id = ?` returns
+// exactly the caller's own usage + their agents' usage and nothing else. The
+// LEFT JOIN keeps the caller's own row even when it lacks an org_seats entry
+// (matched via d.seat_id = ?), while agent rows are matched via s.parent_seat_id.
+func (r *sqlRepo) PersonalByAgentTotal(ctx context.Context, p QueryParams) ([]AgentTotal, error) {
+	if p.SeatID == "" {
+		// No seat → no agents (personal / BYOK users). Empty, not error.
+		return []AgentTotal{}, nil
+	}
+	startMs, endMs := p.LocalWindowMs()
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT d.seat_id,
+		       COALESCE(s.alias, ''),
+		       CASE WHEN COALESCE(s.seat_type, 'human') <> 'human' THEN 1 ELSE 0 END,
+		       COALESCE(s.parent_seat_id, ''),
+		       COALESCE(SUM(d.total_tokens), 0),
+		       COALESCE(SUM(d.request_count), 0),
+		       COALESCE(SUM(CASE WHEN d.currency='USD' THEN d.billable_amount ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN d.billable_amount IS NOT NULL THEN d.request_count ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN d.billable_amount IS NULL THEN d.request_count ELSE 0 END),0)
+		FROM usage_fact_dwd d
+		LEFT JOIN org_seats s ON s.seat_id = d.seat_id AND s.org_id = d.org_id
+		WHERE (d.seat_id = ? OR s.parent_seat_id = ?)
+		  AND d.user_usage_scope = 'normal'
+		  AND d.event_time >= ? AND d.event_time < ?
+		GROUP BY d.seat_id, s.alias, s.seat_type, s.parent_seat_id
+		ORDER BY SUM(d.total_tokens) DESC`,
+		p.SeatID, p.SeatID, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
+	if err != nil {
+		return nil, fmt.Errorf("personal by-agent total: %w", err)
+	}
+	defer rows.Close()
+	var out []AgentTotal
+	for rows.Next() {
+		var at AgentTotal
+		var isAgent int
+		if err := rows.Scan(&at.SeatID, &at.SeatAlias, &isAgent, &at.ParentSeatID,
+			&at.TotalTokens, &at.RequestCount,
+			&at.CostUSD, &at.PricedRequestCount, &at.UnpricedRequestCount); err != nil {
+			return nil, err
+		}
+		at.IsAgent = isAgent == 1
+		out = append(out, at)
+	}
+	return out, rows.Err()
+}
+
 func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyTotal, error) {
 	// Identity enrichment (2026-04-22, F2 of the usage-ledger label fix):
 	//

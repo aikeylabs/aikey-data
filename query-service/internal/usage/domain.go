@@ -150,6 +150,33 @@ type AppTotal struct {
 	UnpricedRequestCount int64   `json:"unpriced_request_count"`
 }
 
+// AgentTotal is one row of the "Usage By Agent" breakdown on
+// /user/usage-ledger (2026-07-17, requirement 2026-07-17-usage-ledger-by-agent-
+// breakdown). One row per seat_id: the calling user's OWN seat plus every seat
+// whose parent_seat_id is the caller's — i.e. their Agents (数字员工). This
+// realizes the D3 "计费按席位" model as a display dimension (每个 Agent 各算一个
+// 席位、归属父席位), WITHOUT new tables/columns — it reads usage_fact_dwd.seat_id
+// joined to org_seats for the label + agent/parent metadata.
+type AgentTotal struct {
+	SeatID string `json:"seat_id"`
+	// SeatAlias is org_seats.alias (current); "" when the seat has no org_seats
+	// row (legacy tags) or no alias set. Frontend falls back to a short seat_id.
+	SeatAlias string `json:"seat_alias"`
+	// IsAgent is true when the seat's seat_type != 'human' (a digital employee /
+	// Agent). The caller's own (human) seat row has IsAgent=false.
+	IsAgent bool `json:"is_agent"`
+	// ParentSeatID is org_seats.parent_seat_id — the owner seat. For Agent rows it
+	// equals the calling user's seat (that's the authorization scope); "" for the
+	// caller's own human row.
+	ParentSeatID string `json:"parent_seat_id"`
+	TotalTokens  int64  `json:"total_tokens"`
+	RequestCount int64  `json:"request_count"`
+	// Cost trio — same semantics as AppTotal / ProtocolTotal.
+	CostUSD              float64 `json:"cost_usd"`
+	PricedRequestCount   int64   `json:"priced_request_count"`
+	UnpricedRequestCount int64   `json:"unpriced_request_count"`
+}
+
 // SessionTotal is a single entry in the per-session usage breakdown
 // powering the Performance page's "Top N sessions" chart. Grouped by
 // the session_id column on usage_fact_dwd (proxy attaches via the

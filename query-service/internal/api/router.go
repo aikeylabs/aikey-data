@@ -50,6 +50,11 @@ func NewRouter(h *UsageHandler, admin *AdminHandler, conv *ConversationHandler, 
 	// See usage.AppTotal + repository_sql.PersonalByAppTotal for the
 	// (app_slug, provider_code) grouping rationale.
 	authed.HandleFunc("GET /v1/usage/personal/by-app/total", h.PersonalByAppTotal)
+	// 2026-07-17 — "Usage By Agent" breakdown on /user/usage-ledger. Groups by
+	// seat_id for the caller + their Agent seats (parent_seat_id). See
+	// usage.AgentTotal + repository_sql.PersonalByAgentTotal. Authorization is
+	// server-side (caller only sees own + owned agents).
+	authed.HandleFunc("GET /v1/usage/personal/by-agent/total", h.PersonalByAgentTotal)
 	// 2026-05-26 — "Top N sessions" ranked chart on /user/performance.
 	// See usage.SessionTotal + repository_sql.PersonalBySessionTotal for
 	// per-session grouping. Default N=10, override with ?limit=N.

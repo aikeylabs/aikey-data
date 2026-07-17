@@ -109,6 +109,17 @@ func (m *mockRepo) PersonalByAppTotal(_ context.Context, p usage.QueryParams) ([
 	}, nil
 }
 
+// PersonalByAgentTotal — added 2026-07-17 for the /user/usage-ledger "Usage
+// By Agent" breakdown. Returns a small fixture (the caller's own human seat +
+// one owned Agent seat) so handler tests get a non-empty payload. Real
+// authorization scoping is validated in the usage package's SQL test.
+func (m *mockRepo) PersonalByAgentTotal(_ context.Context, p usage.QueryParams) ([]usage.AgentTotal, error) {
+	return []usage.AgentTotal{
+		{SeatID: p.SeatID, SeatAlias: "Me", IsAgent: false, TotalTokens: 4300, RequestCount: 22},
+		{SeatID: "seat-agent-1", SeatAlias: "Bot One", IsAgent: true, ParentSeatID: p.SeatID, TotalTokens: 1200, RequestCount: 9},
+	}, nil
+}
+
 // PersonalBySessionTotal — added 2026-05-26 for the Performance Top N
 // sessions chart endpoint. Returns a small fixture (one identified
 // session + one "no session" bucket) so future handler tests get a

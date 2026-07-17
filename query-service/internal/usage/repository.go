@@ -43,6 +43,16 @@ type Repository interface {
 	// Filters: user_usage_scope = 'normal'
 	PersonalByAppTotal(ctx context.Context, p QueryParams) ([]AppTotal, error)
 
+	// PersonalByAgentTotal returns usage per seat_id for the calling user's
+	// OWN seat plus every seat whose parent_seat_id is the caller's — i.e.
+	// their Agents (数字员工). Realizes the D3 "按席位计费" model as a display
+	// dimension on /user/usage-ledger (2026-07-17). Authorization scope is
+	// server-side: only p.SeatID's own row + its child seats are returned;
+	// callers cannot see other users' agents. Personal/BYOK users without a
+	// seat (p.SeatID == "") have no agents → empty result.
+	// Filters: user_usage_scope = 'normal'
+	PersonalByAgentTotal(ctx context.Context, p QueryParams) ([]AgentTotal, error)
+
 	// PersonalBySessionTotal returns total_tokens per session_id, sorted
 	// by total_tokens DESC and capped at QueryParams.Limit (default 10
 	// for the Performance Top N chart). Empty session_id is coalesced to

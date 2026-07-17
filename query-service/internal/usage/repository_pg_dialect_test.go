@@ -58,6 +58,12 @@ func TestPersonalQueries_PostgresDialect(t *testing.T) {
 		EndDate:   time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC),
 		Limit:     50,
 	}
+	// by-agent short-circuits when SeatID is empty (personal/BYOK users have no
+	// agents), so a SeatID-bearing params is needed to make its JOIN + multi-
+	// column GROUP BY actually PLAN on PostgreSQL. Dummy seat, zero rows — plan-
+	// time is what we check.
+	pSeat := p
+	pSeat.SeatID = "00000000-0000-0000-0000-000000000001"
 
 	// Every personal usage query must PLAN + EXECUTE on PostgreSQL without a
 	// dialect error. Listed explicitly so a newly-added query that forgets the
@@ -68,6 +74,12 @@ func TestPersonalQueries_PostgresDialect(t *testing.T) {
 	}{
 		{"PersonalByKeyTotal", func() error { _, e := repo.PersonalByKeyTotal(ctx, p); return e }},
 		{"PersonalByAppTotal", func() error { _, e := repo.PersonalByAppTotal(ctx, p); return e }},
+		// 2026-07-17: by-agent joins the control-plane org_seats table and groups
+		// by (seat_id, alias, seat_type, parent_seat_id) — the exact multi-column
+		// GROUP BY + JOIN shape most at risk of a PG dialect slip. Uses pSeat so
+		// the query executes (see pSeat note). Requires org_seats present in the
+		// target PG (true for a full Production-stack DB).
+		{"PersonalByAgentTotal", func() error { _, e := repo.PersonalByAgentTotal(ctx, pSeat); return e }},
 		{"PersonalByProtocolTotal", func() error { _, e := repo.PersonalByProtocolTotal(ctx, p); return e }},
 		{"PersonalByModelTotal", func() error { _, e := repo.PersonalByModelTotal(ctx, p); return e }},
 		{"PersonalBySessionTotal", func() error { _, e := repo.PersonalBySessionTotal(ctx, p); return e }},
