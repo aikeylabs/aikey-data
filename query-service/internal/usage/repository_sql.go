@@ -125,9 +125,9 @@ func (r *sqlRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]Timeli
 		args = append(args, appSlugArg)
 	}
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT %s AS d, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0),
+		SELECT %s AS d, COALESCE(SUM(total_tokens),0), COALESCE(SUM(client_request_count),0),
 		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0)
-		FROM usage_fact_dwd
+		FROM usage_reporting_fact
 		WHERE %s
 		  AND event_time >= ? AND event_time < ?%s
 		GROUP BY d
@@ -163,9 +163,9 @@ func (r *sqlRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]
 	args := []interface{}{id, r.db.BindMillis(dayStart), r.db.BindMillis(dayEnd)}
 	args = appendNonNil(args, appSlugArg)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT %s AS hour, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0),
+		SELECT %s AS hour, COALESCE(SUM(total_tokens),0), COALESCE(SUM(client_request_count),0),
 		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0)
-		FROM usage_fact_dwd
+		FROM usage_reporting_fact
 		WHERE %s
 		  AND event_time >= ? AND event_time < ?%s
 		GROUP BY hour
@@ -192,8 +192,8 @@ func (r *sqlRepo) PersonalByProtocolTimeline(ctx context.Context, p QueryParams)
 	startMs, endMs := p.LocalWindowMs()
 	dateExpr := r.db.DateOfLocal("event_time", p.TZOffsetMs, p.TZ)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT %s AS d, COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
-		FROM usage_fact_dwd
+		SELECT %s AS d, COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(client_request_count),0)
+		FROM usage_reporting_fact
 		WHERE %s
 		  AND event_time >= ? AND event_time < ?
 		GROUP BY d, COALESCE(provider_code, protocol_type)
@@ -227,8 +227,8 @@ func (r *sqlRepo) PersonalByProtocolHourly(ctx context.Context, p QueryParams) (
 	dayEnd := aikeytime.FromTime(p.StartDate.AddDate(0, 0, 1))
 	hourExpr := r.db.HourBucketLocal("event_time", p.TZOffsetMs, p.TZ)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT %s AS hour, COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0)
-		FROM usage_fact_dwd
+		SELECT %s AS hour, COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(client_request_count),0)
+		FROM usage_reporting_fact
 		WHERE %s
 		  AND event_time >= ? AND event_time < ?
 		GROUP BY hour, COALESCE(provider_code, protocol_type)
@@ -254,11 +254,11 @@ func (r *sqlRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParams) ([
 	filter += scopeStatsAnd
 	startMs, endMs := p.LocalWindowMs()
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0),
+		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(client_request_count),0),
 		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0),
-		       COALESCE(SUM(CASE WHEN billable_amount IS NOT NULL THEN request_count ELSE 0 END),0),
-		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN request_count ELSE 0 END),0)
-		FROM usage_fact_dwd
+		       COALESCE(SUM(CASE WHEN billable_amount IS NOT NULL THEN client_request_count ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN client_request_count ELSE 0 END),0)
+		FROM usage_reporting_fact
 		WHERE %s
 		  AND event_time >= ? AND event_time < ?
 		GROUP BY COALESCE(provider_code, protocol_type)
@@ -306,11 +306,11 @@ func (r *sqlRepo) PersonalByAppTotal(ctx context.Context, p QueryParams) ([]AppT
 		SELECT COALESCE(app_slug, ''),
 		       COALESCE(provider_code, protocol_type, ''),
 		       COALESCE(SUM(total_tokens), 0),
-		       COALESCE(SUM(request_count), 0),
+		       COALESCE(SUM(client_request_count), 0),
 		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0),
-		       COALESCE(SUM(CASE WHEN billable_amount IS NOT NULL THEN request_count ELSE 0 END),0),
-		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN request_count ELSE 0 END),0)
-		FROM usage_fact_dwd
+		       COALESCE(SUM(CASE WHEN billable_amount IS NOT NULL THEN client_request_count ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN client_request_count ELSE 0 END),0)
+		FROM usage_reporting_fact
 		WHERE %s
 		  AND event_time >= ? AND event_time < ?
 		GROUP BY COALESCE(app_slug, ''), COALESCE(provider_code, protocol_type, '')
@@ -355,11 +355,11 @@ func (r *sqlRepo) PersonalByAgentTotal(ctx context.Context, p QueryParams) ([]Ag
 		       CASE WHEN COALESCE(s.seat_type, 'human') <> 'human' THEN 1 ELSE 0 END,
 		       COALESCE(s.parent_seat_id, ''),
 		       COALESCE(SUM(d.total_tokens), 0),
-		       COALESCE(SUM(d.request_count), 0),
+		       COALESCE(SUM(d.client_request_count), 0),
 		       COALESCE(SUM(CASE WHEN d.currency='USD' THEN d.billable_amount ELSE 0 END),0),
-		       COALESCE(SUM(CASE WHEN d.billable_amount IS NOT NULL THEN d.request_count ELSE 0 END),0),
-		       COALESCE(SUM(CASE WHEN d.billable_amount IS NULL THEN d.request_count ELSE 0 END),0)
-		FROM usage_fact_dwd d
+		       COALESCE(SUM(CASE WHEN d.billable_amount IS NOT NULL THEN d.client_request_count ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN d.billable_amount IS NULL THEN d.client_request_count ELSE 0 END),0)
+		FROM usage_reporting_fact d
 		LEFT JOIN org_seats s ON s.seat_id = d.seat_id AND s.org_id = d.org_id
 		WHERE (d.seat_id = ? OR s.parent_seat_id = ?)
 		  AND d.user_usage_scope = 'normal'
@@ -462,11 +462,11 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 		       COALESCE(SUM(d.cache_creation_input_tokens),0),
 		       COALESCE(SUM(d.output_tokens),0),
 		       COALESCE(SUM(d.total_tokens),0),
-		       COALESCE(SUM(d.request_count),0),
+		       COALESCE(SUM(d.client_request_count),0),
 		       COALESCE(SUM(CASE WHEN d.currency='USD' THEN d.billable_amount ELSE 0 END),0),
-		       COALESCE(SUM(CASE WHEN d.billable_amount IS NOT NULL THEN d.request_count ELSE 0 END),0),
-		       COALESCE(SUM(CASE WHEN d.billable_amount IS NULL THEN d.request_count ELSE 0 END),0)
-		FROM usage_fact_dwd AS d
+		       COALESCE(SUM(CASE WHEN d.billable_amount IS NOT NULL THEN d.client_request_count ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN d.billable_amount IS NULL THEN d.client_request_count ELSE 0 END),0)
+		FROM usage_reporting_fact AS d
 		LEFT JOIN (
 		    SELECT virtual_key_id, MAX(oauth_identity) AS identity
 		    FROM usage_event_ods
@@ -535,11 +535,11 @@ func (r *sqlRepo) PersonalByModelTotal(ctx context.Context, p QueryParams) ([]Mo
 		       COALESCE(SUM(cache_creation_input_tokens),0),
 		       COALESCE(SUM(output_tokens),0),
 		       COALESCE(SUM(total_tokens),0),
-		       COALESCE(SUM(request_count),0),
+		       COALESCE(SUM(client_request_count),0),
 		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0),
-		       COALESCE(SUM(CASE WHEN billable_amount IS NOT NULL THEN request_count ELSE 0 END),0),
-		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN request_count ELSE 0 END),0)
-		FROM usage_fact_dwd
+		       COALESCE(SUM(CASE WHEN billable_amount IS NOT NULL THEN client_request_count ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN client_request_count ELSE 0 END),0)
+		FROM usage_reporting_fact
 		WHERE %s
 		  AND event_time >= ? AND event_time < ?%s%s
 		GROUP BY COALESCE(NULLIF(model, ''), 'unknown')
@@ -605,8 +605,8 @@ func (r *sqlRepo) PersonalBySessionTotal(ctx context.Context, p QueryParams) ([]
 		       COALESCE(SUM(d.cache_creation_input_tokens),0),
 		       COALESCE(SUM(d.output_tokens),0),
 		       COALESCE(SUM(d.total_tokens),0),
-		       COALESCE(SUM(d.request_count),0)
-		FROM usage_fact_dwd AS d
+		       COALESCE(SUM(d.client_request_count),0)
+		FROM usage_reporting_fact AS d
 		LEFT JOIN (
 		    SELECT virtual_key_id, MAX(oauth_identity) AS identity
 		    FROM usage_event_ods
@@ -668,10 +668,19 @@ func (r *sqlRepo) PersonalRecent(ctx context.Context, p QueryParams) ([]RecentRe
 	// string is unsupported". Empty-string defaults are safer than
 	// switching to sql.NullString — the UI doesn't need to
 	// distinguish "missing" from "empty" for a recent-list card.
+	// event_time MUST be projected through EpochMillis, not selected raw.
+	// usage_event_ods.event_time is INTEGER millis on SQLite but TIMESTAMPTZ on
+	// PostgreSQL, and RecentRequest.EventTimeMs is an int64 — so a raw select
+	// scans fine on Personal/Trial and blows up on Production with
+	//   Scan error on column "event_time": converting time.Time to int64
+	// returning 500 QUERY_FAILED for the whole "recent requests" card. Same
+	// projection as PersonalDetail below (see the note above it). Found
+	// 2026-07-26 by workflow/CI/scripts/cross-app-nav-probe.mjs; the bug had been
+	// invisible because every dialect-agnostic test runs on SQLite.
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT
 			COALESCE(request_id, '') AS request_id,
-			event_time,
+			%s AS event_time,
 			COALESCE(provider_code, '') AS provider_code,
 			COALESCE(model, '') AS model,
 			COALESCE(total_tokens, 0) AS total_tokens,
@@ -682,7 +691,7 @@ func (r *sqlRepo) PersonalRecent(ctx context.Context, p QueryParams) ([]RecentRe
 		WHERE %s
 		  AND route_source != 'canary'
 		ORDER BY event_time DESC
-		LIMIT ?`, filter),
+		LIMIT ?`, r.db.EpochMillis("event_time"), filter),
 		id, limit)
 	if err != nil {
 		return nil, fmt.Errorf("personal recent: %w", err)
@@ -828,10 +837,10 @@ func (r *sqlRepo) PersonalUsageDetail(ctx context.Context, p QueryParams) ([]Usa
 func (r *sqlRepo) MasterUserRanking(ctx context.Context, p QueryParams) ([]UserRanking, error) {
 	startMs, endMs := p.LocalWindowMs()
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT account_id, seat_id, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0),
+		SELECT account_id, seat_id, COALESCE(SUM(total_tokens),0), COALESCE(SUM(client_request_count),0),
 		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0),
-		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN request_count ELSE 0 END),0)
-		FROM usage_fact_dwd
+		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN client_request_count ELSE 0 END),0)
+		FROM usage_reporting_fact
 		WHERE org_id = ?
 		  AND event_time >= ? AND event_time < ?`+scopeStatsAnd+`
 		GROUP BY account_id, seat_id
@@ -857,11 +866,11 @@ func (r *sqlRepo) MasterUserRanking(ctx context.Context, p QueryParams) ([]UserR
 func (r *sqlRepo) MasterByProtocolTotal(ctx context.Context, p QueryParams) ([]ProtocolTotal, error) {
 	startMs, endMs := p.LocalWindowMs()
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0),
+		SELECT COALESCE(provider_code, protocol_type), COALESCE(SUM(total_tokens),0), COALESCE(SUM(client_request_count),0),
 		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0),
-		       COALESCE(SUM(CASE WHEN billable_amount IS NOT NULL THEN request_count ELSE 0 END),0),
-		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN request_count ELSE 0 END),0)
-		FROM usage_fact_dwd
+		       COALESCE(SUM(CASE WHEN billable_amount IS NOT NULL THEN client_request_count ELSE 0 END),0),
+		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN client_request_count ELSE 0 END),0)
+		FROM usage_reporting_fact
 		WHERE org_id = ?
 		  AND event_time >= ? AND event_time < ?
 		  AND billing_scope IN ('org_only','org_and_user')`+scopeAuditAnd+`
@@ -879,9 +888,9 @@ func (r *sqlRepo) MasterTimeline(ctx context.Context, p QueryParams) ([]Timeline
 	startMs, endMs := p.LocalWindowMs()
 	dateExpr := r.db.DateOfLocal("event_time", p.TZOffsetMs, p.TZ)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT %s AS d, COALESCE(SUM(total_tokens),0), COALESCE(SUM(request_count),0),
+		SELECT %s AS d, COALESCE(SUM(total_tokens),0), COALESCE(SUM(client_request_count),0),
 		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0)
-		FROM usage_fact_dwd
+		FROM usage_reporting_fact
 		WHERE org_id = ?
 		  AND event_time >= ? AND event_time < ?
 		  AND billing_scope IN ('org_only','org_and_user')`+scopeAuditAnd+`
@@ -898,7 +907,7 @@ func (r *sqlRepo) MasterTimeline(ctx context.Context, p QueryParams) ([]Timeline
 // masterAuditSelect builds the dialect-correct projection for an audit row:
 // event_time/occurred_at as epoch millis, usage_date as YYYY-MM-DD text (PG DATE
 // would otherwise scan as time.Time, not string), nullable strings COALESCE'd to
-// ''. Column order must match scanMasterAuditRow.
+// ”. Column order must match scanMasterAuditRow.
 // Columns are qualified with the `d` (usage_fact_dwd) / `s` (org_seats) aliases
 // because masterAuditFrom LEFT JOINs org_seats to resolve seat_alias — org_id /
 // account_id / seat_id exist in both tables and would otherwise be ambiguous.
@@ -922,7 +931,7 @@ func masterAuditSelect(db *shared.DB) string {
 // masterAuditFrom: usage_fact_dwd LEFT JOIN org_seats to resolve the current
 // seat alias for display. seat_id is org_seats' PK so the join is 1:1 (no row
 // fan-out, LIMIT stays exact). LEFT so events whose seat_id has no org_seats row
-// (e.g. legacy / non-seat tags) still appear, with seat_alias = ''. org_seats is
+// (e.g. legacy / non-seat tags) still appear, with seat_alias = ”. org_seats is
 // a control-plane table living in the same DB as DWD in every edition that can
 // reach the master audit endpoints (Trial / Production share one DB); the
 // alternative — denormalising seat_alias into DWD — would freeze a stale alias

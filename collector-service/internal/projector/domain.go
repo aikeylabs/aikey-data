@@ -56,6 +56,7 @@ const (
 type ODSRecord struct {
 	OdsID                      int64
 	EventID                    string
+	RequestID                  sql.NullString
 	EventTime                  aikeytime.Millis
 	OccurredAt                 aikeytime.Millis
 
@@ -167,6 +168,7 @@ type ControlEvent struct {
 // DWDFact is a row to be written to usage_fact_dwd.
 type DWDFact struct {
 	EventID                    string
+	RequestID                  string
 	OdsID                      int64
 	OccurredAt                 aikeytime.Millis
 	EventTime                  aikeytime.Millis

@@ -31,6 +31,13 @@ func clampLimit(n, def int) int {
 	return n
 }
 
+// EffectiveListLimit resolves a requested ?limit= to the value the LIST queries
+// will actually use. Exported so the HTTP layer can echo the real limit in the
+// paginated response envelope instead of re-deriving the default — one source of
+// truth for "what page size is in effect". NOT valid for the thread endpoint,
+// which clamps against defaultTurnLimit (a different default).
+func EffectiveListLimit(n int) int { return clampLimit(n, defaultListLimit) }
+
 // Sortable column whitelists for the clickable list headers. The key is the
 // stable API token sent by the UI; the value is the SQL ORDER BY expression.
 // SECURITY: only these mapped expressions ever reach ORDER BY — the raw client
@@ -96,10 +103,34 @@ func appendDateRange(where string, args []any, p QueryParams) (string, []any) {
 // owner_account_id, or the two views diverge again.
 const seatKeyExpr = "COALESCE(NULLIF(seat_id, ''), owner_account_id)"
 
-func (r *sqlRepo) SeatSummaries(ctx context.Context, p QueryParams) ([]SeatSummary, error) {
+// countGroups returns how many DISTINCT groups match a list filter — i.e. the
+// list's TOTAL page-able item count. Both list views GROUP BY an expression, so
+// the total is the number of GROUPS (seats / sessions), never COUNT(*) rows.
+//
+// Why a shared helper: the count MUST use the exact same grouping expression and
+// WHERE clause as the page query, or the console shows "共 37 条" while paging
+// bottoms out at 35. Passing groupExpr in (rather than duplicating the SQL per
+// call site) keeps that invariant mechanical. COUNT(DISTINCT <expr>) is valid on
+// both PostgreSQL and SQLite, so no dialect fork is needed.
+//
+// CALLER CONTRACT: pass the args slice BEFORE limit/offset are appended.
+func (r *sqlRepo) countGroups(ctx context.Context, groupExpr, where string, args []any) (int64, error) {
+	var total int64
+	err := r.db.QueryRowContext(ctx,
+		"SELECT COUNT(DISTINCT "+groupExpr+") FROM conversation_records WHERE "+where, args...,
+	).Scan(&total)
+	return total, err
+}
+
+func (r *sqlRepo) SeatSummaries(ctx context.Context, p QueryParams) ([]SeatSummary, int64, error) {
 	where := "org_id = ?"
 	args := []any{p.OrgID}
 	where, args = appendDateRange(where, args, p)
+	// Count BEFORE limit/offset join `args` — the count query has no LIMIT binds.
+	total, err := r.countGroups(ctx, seatKeyExpr, where, args)
+	if err != nil {
+		return nil, 0, fmt.Errorf("seat summaries count: %w", err)
+	}
 	q := fmt.Sprintf(`
 		SELECT `+seatKeyExpr+`,
 		       COUNT(DISTINCT COALESCE(session_id, event_id)),
@@ -119,18 +150,18 @@ func (r *sqlRepo) SeatSummaries(ctx context.Context, p QueryParams) ([]SeatSumma
 
 	rows, err := r.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("seat summaries: %w", err)
+		return nil, 0, fmt.Errorf("seat summaries: %w", err)
 	}
 	defer rows.Close()
 	var out []SeatSummary
 	for rows.Next() {
 		var s SeatSummary
 		if err := rows.Scan(&s.OwnerAccountID, &s.SessionCount, &s.TurnCount, &s.ContentBytes, &s.TotalTokens, &s.LastActivityAt); err != nil {
-			return nil, fmt.Errorf("scan seat summary: %w", err)
+			return nil, 0, fmt.Errorf("scan seat summary: %w", err)
 		}
 		out = append(out, s)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // SessionSummaries lists a seat's sessions. session_id may be NULL — a
@@ -148,10 +179,17 @@ func (r *sqlRepo) SeatSummaries(ctx context.Context, p QueryParams) ([]SeatSumma
 // session_id; sessionless traffic collapses into the "" session row), so sessionless
 // threads carry no per-conversation system prompt. Bugfix:
 // 2026-06-17-conversation-audit-query-null-session-id.md
-func (r *sqlRepo) SessionSummaries(ctx context.Context, p QueryParams) ([]SessionSummary, error) {
+func (r *sqlRepo) SessionSummaries(ctx context.Context, p QueryParams) ([]SessionSummary, int64, error) {
 	where := "org_id = ? AND "+seatKeyExpr+" = ?"
 	args := []any{p.OrgID, p.OwnerAccountID}
 	where, args = appendDateRange(where, args, p)
+	// Same grouping key as the page query below (COALESCE(session_id, event_id)),
+	// so sessionless turns count as one pseudo-session each — exactly how they
+	// are listed. Count BEFORE limit/offset join `args`.
+	total, err := r.countGroups(ctx, "COALESCE(session_id, event_id)", where, args)
+	if err != nil {
+		return nil, 0, fmt.Errorf("session summaries count: %w", err)
+	}
 	q := fmt.Sprintf(`
 		SELECT COALESCE(session_id, event_id), %s, %s, COUNT(*), COALESCE(SUM(total_tokens), 0)
 		FROM conversation_records
@@ -167,18 +205,18 @@ func (r *sqlRepo) SessionSummaries(ctx context.Context, p QueryParams) ([]Sessio
 
 	rows, err := r.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("session summaries: %w", err)
+		return nil, 0, fmt.Errorf("session summaries: %w", err)
 	}
 	defer rows.Close()
 	var out []SessionSummary
 	for rows.Next() {
 		var s SessionSummary
 		if err := rows.Scan(&s.SessionID, &s.FirstSeenAt, &s.LastActivityAt, &s.TurnCount, &s.TotalTokens); err != nil {
-			return nil, fmt.Errorf("scan session summary: %w", err)
+			return nil, 0, fmt.Errorf("scan session summary: %w", err)
 		}
 		out = append(out, s)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 func (r *sqlRepo) ThreadDetail(ctx context.Context, p QueryParams) (*ThreadDetail, error) {

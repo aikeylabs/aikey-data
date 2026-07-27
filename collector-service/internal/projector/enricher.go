@@ -179,6 +179,7 @@ func (e *Enricher) enrichFact(ctx context.Context, rec *ODSRecord) (*DWDFact, er
 func (e *Enricher) buildBaseFact(rec *ODSRecord) *DWDFact {
 	return &DWDFact{
 		EventID:                    rec.EventID,
+		RequestID:                  rec.RequestID.String,
 		OdsID:                      rec.OdsID,
 		OccurredAt:                 rec.OccurredAt,
 		EventTime:                  rec.EventTime,

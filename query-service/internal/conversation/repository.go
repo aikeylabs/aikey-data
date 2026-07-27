@@ -6,11 +6,14 @@ import "context"
 // by QueryParams.OrgID.
 type Repository interface {
 	// SeatSummaries aggregates conversation_records per owner_account_id (the
-	// seat-list view), ordered by turn_count DESC (activity).
-	SeatSummaries(ctx context.Context, p QueryParams) ([]SeatSummary, error)
+	// seat-list view), ordered by turn_count DESC (activity). The second return
+	// is the TOTAL number of seats matching the filter (ignoring limit/offset) —
+	// the console needs it to render page numbers instead of a blind prev/next.
+	SeatSummaries(ctx context.Context, p QueryParams) ([]SeatSummary, int64, error)
 	// SessionSummaries aggregates one seat's records per session_id (the
-	// session-list view), ordered by first_seen_at DESC.
-	SessionSummaries(ctx context.Context, p QueryParams) ([]SessionSummary, error)
+	// session-list view), ordered by first_seen_at DESC. Second return is the
+	// total session count for the filter (see SeatSummaries).
+	SessionSummaries(ctx context.Context, p QueryParams) ([]SessionSummary, int64, error)
 	// ThreadDetail returns one session's system prompt (from conversation_sessions)
 	// plus every turn (from conversation_records) in (created_at, event_id) order.
 	ThreadDetail(ctx context.Context, p QueryParams) (*ThreadDetail, error)

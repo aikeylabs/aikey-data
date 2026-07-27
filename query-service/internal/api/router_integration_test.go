@@ -52,6 +52,11 @@ func setupRouterDB(t *testing.T) *sql.DB {
 		`ALTER TABLE usage_fact_dwd  ADD COLUMN pricing_snapshot_id TEXT`,
 		`ALTER TABLE usage_fact_dwd  ADD COLUMN region TEXT`,
 		`ALTER TABLE usage_fact_dwd  ADD COLUMN endpoint_url TEXT`,
+		// alpha.5 request-level reporting. The canonical failover selection SQL
+		// is exercised in usage/repository_cost_test and the config-tool migration;
+		// this router fixture only needs the resulting API-facing view shape.
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN request_id TEXT`,
+		`CREATE VIEW usage_reporting_fact AS SELECT d.*, d.request_count AS client_request_count FROM usage_fact_dwd d`,
 		`CREATE TABLE IF NOT EXISTS unpriced_models (
 			model TEXT NOT NULL, provider TEXT NOT NULL,
 			first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,

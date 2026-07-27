@@ -22,6 +22,31 @@ func NewConversationHandler(repo conversation.Repository) *ConversationHandler {
 	return &ConversationHandler{repo: repo}
 }
 
+// listResponse is the paginated wire envelope for the seat / session lists.
+//
+// WHY it exists (2026-07-26): these two endpoints used to return a BARE JSON
+// ARRAY. Without a total the console cannot know how many pages exist, so it
+// could only render a blind prev/next — and it guessed "there may be more" from
+// `len(page) >= pageSize`, which offers a dead "next" whenever the row count is
+// an exact multiple of the page size. Shipping the total lets the console render
+// real page numbers and disable next exactly when it should.
+//
+// Shape deliberately mirrors the already-shipped compliance audit-log envelope
+// (`{events,total,limit,offset}` in aikey-control-master compliance/handler_audit.go)
+// so one Pagination component drives both. `items` rather than `seats`/`sessions`
+// because two list views share this type; compliance's `events` key stays frozen.
+//
+// ⚠️ The console reads BOTH shapes (array | envelope) on purpose: query-service
+// and control-master are independent systemd units in the Cluster/Production
+// editions, so a deploy window can pair a new SPA with an old service or vice
+// versa. Do not "simplify" the client back to a single shape.
+type listResponse[T any] struct {
+	Items  []T   `json:"items"`
+	Total  int64 `json:"total"`
+	Limit  int   `json:"limit"`
+	Offset int   `json:"offset"`
+}
+
 // Seats handles GET /v1/conversation-audit/seats
 //
 //	?org_id=&start_date=&end_date=&limit=&offset=
@@ -31,7 +56,7 @@ func (h *ConversationHandler) Seats(w http.ResponseWriter, r *http.Request) {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
 	}
-	data, err := h.repo.SeatSummaries(r.Context(), p)
+	data, total, err := h.repo.SeatSummaries(r.Context(), p)
 	if err != nil {
 		slog.Error("conversation seats query failed", "event.name", "conversation.query.seats_failed", "error", err)
 		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
@@ -40,7 +65,10 @@ func (h *ConversationHandler) Seats(w http.ResponseWriter, r *http.Request) {
 	if data == nil {
 		data = []conversation.SeatSummary{}
 	}
-	shared.JSON(w, http.StatusOK, data)
+	shared.JSON(w, http.StatusOK, listResponse[conversation.SeatSummary]{
+		Items: data, Total: total,
+		Limit: conversation.EffectiveListLimit(p.Limit), Offset: p.Offset,
+	})
 }
 
 // Sessions handles GET /v1/conversation-audit/sessions
@@ -52,7 +80,7 @@ func (h *ConversationHandler) Sessions(w http.ResponseWriter, r *http.Request) {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
 	}
-	data, err := h.repo.SessionSummaries(r.Context(), p)
+	data, total, err := h.repo.SessionSummaries(r.Context(), p)
 	if err != nil {
 		slog.Error("conversation sessions query failed", "event.name", "conversation.query.sessions_failed", "error", err)
 		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
@@ -61,7 +89,10 @@ func (h *ConversationHandler) Sessions(w http.ResponseWriter, r *http.Request) {
 	if data == nil {
 		data = []conversation.SessionSummary{}
 	}
-	shared.JSON(w, http.StatusOK, data)
+	shared.JSON(w, http.StatusOK, listResponse[conversation.SessionSummary]{
+		Items: data, Total: total,
+		Limit: conversation.EffectiveListLimit(p.Limit), Offset: p.Offset,
+	})
 }
 
 // Thread handles GET /v1/conversation-audit/thread

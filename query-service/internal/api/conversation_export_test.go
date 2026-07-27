@@ -21,11 +21,11 @@ type fakeConvRepo struct {
 	sessIDs []string
 }
 
-func (f *fakeConvRepo) SeatSummaries(context.Context, conversation.QueryParams) ([]conversation.SeatSummary, error) {
-	return nil, nil
+func (f *fakeConvRepo) SeatSummaries(context.Context, conversation.QueryParams) ([]conversation.SeatSummary, int64, error) {
+	return nil, 0, nil
 }
-func (f *fakeConvRepo) SessionSummaries(context.Context, conversation.QueryParams) ([]conversation.SessionSummary, error) {
-	return nil, nil
+func (f *fakeConvRepo) SessionSummaries(context.Context, conversation.QueryParams) ([]conversation.SessionSummary, int64, error) {
+	return nil, 0, nil
 }
 func (f *fakeConvRepo) ThreadDetail(context.Context, conversation.QueryParams) (*conversation.ThreadDetail, error) {
 	return nil, nil

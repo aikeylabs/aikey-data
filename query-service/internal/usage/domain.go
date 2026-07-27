@@ -71,10 +71,10 @@ type ProtocolHourlyPoint struct {
 // Cost fields (2026-06, cost-pricing Stage 3) — same trio added to every
 // "total" breakdown:
 //   - CostUSD: Σ billable_amount over USD-priced rows (estimated).
-//   - PricedRequestCount / UnpricedRequestCount: request_count split by
-//     whether the row carried a price. They sum to RequestCount exactly
-//     (split by SUM(request_count), not row count), so the FE can render
-//     "N of M unpriced ⚠" without the totals drifting.
+//   - PricedRequestCount / UnpricedRequestCount: canonical client requests
+//     split by whether the selected attempt carried a price. They sum to
+//     RequestCount exactly, so the FE can render "N of M unpriced ⚠" without
+//     the totals drifting when one client request has multiple attempts.
 type ProtocolTotal struct {
 	ProtocolType         string  `json:"protocol_type"` // actually provider_code
 	TotalTokens          int64   `json:"total_tokens"`

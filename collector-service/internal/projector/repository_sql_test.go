@@ -95,6 +95,7 @@ func newSQLiteODSTestDB(t *testing.T) *shared.DB {
 		CREATE TABLE usage_event_ods (
 			ods_id INTEGER PRIMARY KEY,
 			event_id TEXT,
+			request_id TEXT,
 			event_time INTEGER,
 			occurred_at INTEGER,
 			org_id TEXT,
@@ -202,6 +203,7 @@ func TestInsertDWDFact_UpgradedSchemaNoSQLDefault(t *testing.T) {
 	writer := NewSQLDWDWriter(db)
 	fact := &DWDFact{
 		EventID:          "test-event-1",
+		RequestID:        "req-test-event-1",
 		OdsID:            42,
 		OccurredAt:       aikeytime.Now(),
 		EventTime:        aikeytime.Now(),
@@ -225,14 +227,18 @@ func TestInsertDWDFact_UpgradedSchemaNoSQLDefault(t *testing.T) {
 	}
 
 	var projectedAt sql.NullInt64
+	var requestID sql.NullString
 	err = db.DB.QueryRow(
-		`SELECT projected_at FROM usage_fact_dwd WHERE event_id = ?`, "test-event-1",
-	).Scan(&projectedAt)
+		`SELECT projected_at, request_id FROM usage_fact_dwd WHERE event_id = ?`, "test-event-1",
+	).Scan(&projectedAt, &requestID)
 	if err != nil {
 		t.Fatalf("read projected_at: %v", err)
 	}
 	if !projectedAt.Valid || projectedAt.Int64 == 0 {
 		t.Fatalf("projected_at must be populated from Go even when the column has no SQL DEFAULT; got Valid=%v Int64=%d", projectedAt.Valid, projectedAt.Int64)
+	}
+	if !requestID.Valid || requestID.String != "req-test-event-1" {
+		t.Fatalf("request_id must be persisted with the fact; got %#v", requestID)
 	}
 
 	// Sanity: the value should be a recent epoch-millis, not some stray int.
@@ -264,6 +270,7 @@ func newSQLiteDWDTestDB(t *testing.T, includeSQLDefaults bool) *shared.DB {
 		CREATE TABLE usage_fact_dwd (
 			dwd_id INTEGER PRIMARY KEY AUTOINCREMENT,
 			event_id TEXT NOT NULL,
+			request_id TEXT,
 			ods_id INTEGER NOT NULL,
 			occurred_at INTEGER NOT NULL,
 			event_time INTEGER NOT NULL,

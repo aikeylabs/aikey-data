@@ -125,6 +125,27 @@ func TestEnrich_SessionIDPropagatesFromODSToDWD(t *testing.T) {
 	}
 }
 
+func TestEnrich_RequestIDPropagatesFromODSToDWD(t *testing.T) {
+	enricher := NewEnricher(&mockControlReader{}, nil)
+	rec := &ODSRecord{
+		OdsID:         103,
+		EventID:       "evt-with-request-id",
+		RequestID:     sql.NullString{String: "req-b-to-a", Valid: true},
+		EventTime:     aikeytime.Now(),
+		OccurredAt:    aikeytime.Now(),
+		OrgID:         "org1",
+		RequestCount:  1,
+		RequestStatus: "success",
+	}
+	fact, err := enricher.Enrich(context.Background(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fact.RequestID != "req-b-to-a" {
+		t.Fatalf("request_id not propagated: got %q, want req-b-to-a", fact.RequestID)
+	}
+}
+
 // TestEnrich_IntegrityColumnsPropagateFromODSToDWD pins the v1.0.1-alpha.3
 // projector contract: content_hash / source_id / source_seq written on ODS
 // (since rc.7) must appear verbatim in DWD so the enterprise usage-audit

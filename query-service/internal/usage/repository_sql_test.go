@@ -97,6 +97,10 @@ func setupUsageTestDB(t *testing.T) *shared.DB {
 		`ALTER TABLE usage_fact_dwd  ADD COLUMN content_hash TEXT`,
 		`ALTER TABLE usage_fact_dwd  ADD COLUMN source_id TEXT`,
 		`ALTER TABLE usage_fact_dwd  ADD COLUMN source_seq INTEGER`,
+		// aikey-config-tool/pkg/dbmigrate/versions/v1_0_1_alpha5_dwd_request_id.go
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN request_id TEXT`,
+		`CREATE INDEX IF NOT EXISTS idx_dwd_org_request_id ON usage_fact_dwd (org_id, request_id) WHERE request_id IS NOT NULL AND request_id != ''`,
+		usageReportingViewFixtureSQL,
 	}
 	for _, stmt := range postBaseline {
 		if _, err := raw.Exec(stmt); err != nil {
@@ -105,6 +109,31 @@ func setupUsageTestDB(t *testing.T) *shared.DB {
 	}
 	return shared.NewDB(raw, shared.DialectSQLite)
 }
+
+const usageReportingViewFixtureSQL = `
+CREATE VIEW usage_reporting_fact AS
+SELECT d.*,
+       CASE
+         WHEN NULLIF(d.request_id, '') IS NULL THEN d.request_count
+         WHEN NOT EXISTS (
+           SELECT 1 FROM usage_fact_dwd peer
+            WHERE COALESCE(peer.org_id, '') = COALESCE(d.org_id, '')
+              AND COALESCE(peer.account_id, '') = COALESCE(d.account_id, '')
+              AND COALESCE(peer.seat_id, '') = COALESCE(d.seat_id, '')
+              AND peer.request_id = d.request_id
+              AND (
+                CASE WHEN peer.request_status = 'success' THEN 1 ELSE 0 END
+                  > CASE WHEN d.request_status = 'success' THEN 1 ELSE 0 END
+                OR (
+                  CASE WHEN peer.request_status = 'success' THEN 1 ELSE 0 END
+                    = CASE WHEN d.request_status = 'success' THEN 1 ELSE 0 END
+                  AND (peer.event_time > d.event_time
+                    OR (peer.event_time = d.event_time AND peer.dwd_id > d.dwd_id))
+                )
+              )
+         ) THEN 1 ELSE 0
+       END AS client_request_count
+  FROM usage_fact_dwd d`
 
 // dwdRow describes a single usage_fact_dwd row to seed via insertDWD.
 // Only fields the queries under test actually read are exposed; every
@@ -122,6 +151,7 @@ func setupUsageTestDB(t *testing.T) *shared.DB {
 // table-driven tests without resorting to *string everywhere.
 type dwdRow struct {
 	EventID                  string // required (NOT NULL UNIQUE per org_id)
+	RequestID                string
 	OrgID                    string
 	SeatID                   string
 	AccountID                string
@@ -149,6 +179,8 @@ type dwdRow struct {
 	// UserUsageScope defaults to "normal". Set "non_generation" / "excluded" /
 	// "abnormal" to exercise the 2026-07-15 scope filters.
 	UserUsageScope string
+	RequestStatus  string // defaults to "success"
+	HTTPStatusCode int
 }
 
 // odsIDSeq generates unique ods_id values per inserted DWD row so the
@@ -174,6 +206,9 @@ func insertDWD(t *testing.T, db *shared.DB, r dwdRow) {
 	if r.UserUsageScope == "" {
 		r.UserUsageScope = "normal"
 	}
+	if r.RequestStatus == "" {
+		r.RequestStatus = "success"
+	}
 	odsIDSeq++
 	var modelArg any = r.Model
 	if r.Model == "<NULL>" {
@@ -192,21 +227,21 @@ func insertDWD(t *testing.T, db *shared.DB, r dwdRow) {
 	}
 	_, err := db.DB.Exec(`
 		INSERT INTO usage_fact_dwd (
-			event_id, ods_id, occurred_at, event_time, usage_date,
+			event_id, request_id, ods_id, occurred_at, event_time, usage_date,
 			org_id, account_id, seat_id, virtual_key_id, virtual_key_alias,
 			provider_code, protocol_type, model,
 			request_count, total_tokens,
 			input_tokens, cached_input_tokens, cache_creation_input_tokens, output_tokens,
-			request_status, completion_source, quality_status,
+			request_status, http_status_code, completion_source, quality_status,
 			billing_scope, user_usage_scope, projector_version,
 			app_slug, billable_amount, currency
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.EventID, odsIDSeq, r.EventTimeMs, r.EventTimeMs, r.UsageDate,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.EventID, r.RequestID, odsIDSeq, r.EventTimeMs, r.EventTimeMs, r.UsageDate,
 		r.OrgID, r.AccountID, r.SeatID, r.VirtualKeyID, r.VirtualKeyAlias,
 		r.ProviderCode, r.ProtocolType, modelArg,
 		r.RequestCount, r.TotalTokens,
 		r.InputTokens, r.CachedInputTokens, r.CacheCreationInputTokens, r.OutputTokens,
-		"success", "test", "ok",
+		r.RequestStatus, r.HTTPStatusCode, "test", "ok",
 		r.BillingScope, r.UserUsageScope, "test",
 		r.AppSlug, billableArg, currencyArg)
 	if err != nil {

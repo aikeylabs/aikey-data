@@ -20,8 +20,9 @@ import (
 // The trio semantics under test (design + decision recap):
 //   - cost_usd            = Σ billable_amount over USD rows only (non-USD
 //     priced rows are still "priced" but excluded from the USD sum).
-//   - priced/unpriced     = SUM(request_count) split by billable_amount
-//     IS NOT NULL / IS NULL, so priced+unpriced == request_count exactly.
+//   - priced/unpriced     = canonical client requests split by billable_amount
+//     IS NOT NULL / IS NULL, so priced+unpriced == request_count exactly even
+//     when one client request has multiple upstream attempts.
 
 func costPtr(v float64) *float64 { return &v }
 
@@ -163,5 +164,61 @@ func TestPersonalTimeline_Cost(t *testing.T) {
 	}
 	if !approxEq(rows[0].CostUSD, 0.010) {
 		t.Errorf("timeline cost_usd = %v, want 0.010", rows[0].CostUSD)
+	}
+}
+
+// One client request can produce multiple attempt facts when OAuth-group
+// failover retries a different account. Attempts remain in detail/token/cost
+// accounting, but report request counts follow the request-level R50 contract.
+// The legacy row proves an online upgrade does not erase pre-request_id counts.
+func TestRequestCount_FailoverUsesCanonicalAttemptAndPreservesLegacyRows(t *testing.T) {
+	db := setupUsageTestDB(t)
+	seat := "seat-failover"
+	priced := costPtr(0.004)
+
+	insertDWD(t, db, dwdRow{
+		EventID: "attempt-b-429", RequestID: "req-b-to-a", OrgID: "org1", SeatID: seat,
+		ProviderCode: "mock", ProtocolType: "anthropic", Model: "mock-claude",
+		EventTimeMs: noonMs, UsageDate: "2026-06-01", RequestCount: 1,
+		RequestStatus: "error", HTTPStatusCode: 429,
+	})
+	insertDWD(t, db, dwdRow{
+		EventID: "attempt-a-200", RequestID: "req-b-to-a", OrgID: "org1", SeatID: seat,
+		ProviderCode: "mock", ProtocolType: "anthropic", Model: "mock-claude",
+		EventTimeMs: noonMs + 1, UsageDate: "2026-06-01", RequestCount: 1,
+		TotalTokens: 30, RequestStatus: "success", HTTPStatusCode: 200,
+		BillableAmount: priced,
+	})
+	insertDWD(t, db, dwdRow{
+		EventID: "legacy-batch", OrgID: "org1", SeatID: seat,
+		ProviderCode: "mock", ProtocolType: "anthropic", Model: "mock-claude",
+		EventTimeMs: noonMs + 2, UsageDate: "2026-06-01", RequestCount: 3,
+		TotalTokens: 90, RequestStatus: "success", HTTPStatusCode: 200,
+	})
+
+	timeline, err := NewSQLRepository(db).PersonalTimeline(context.Background(), costParams(seat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(timeline) != 1 {
+		t.Fatalf("timeline rows=%d, want 1", len(timeline))
+	}
+	if got := timeline[0]; got.RequestCount != 4 || got.TotalTokens != 120 {
+		t.Fatalf("timeline = requests %d tokens %d, want requests 4 (1 failover + 3 legacy), tokens 120", got.RequestCount, got.TotalTokens)
+	}
+
+	byProtocol, err := NewSQLRepository(db).PersonalByProtocolTotal(context.Background(), costParams(seat))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byProtocol) != 1 {
+		t.Fatalf("protocol rows=%d, want 1", len(byProtocol))
+	}
+	got := byProtocol[0]
+	if got.RequestCount != 4 || got.PricedRequestCount != 1 || got.UnpricedRequestCount != 3 {
+		t.Fatalf("protocol counts = total %d priced %d unpriced %d, want 4/1/3", got.RequestCount, got.PricedRequestCount, got.UnpricedRequestCount)
+	}
+	if got.PricedRequestCount+got.UnpricedRequestCount != got.RequestCount {
+		t.Fatalf("priced+unpriced=%d, request_count=%d", got.PricedRequestCount+got.UnpricedRequestCount, got.RequestCount)
 	}
 }

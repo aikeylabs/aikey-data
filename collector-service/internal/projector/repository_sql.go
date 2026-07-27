@@ -25,7 +25,7 @@ func NewSQLODSReader(db *shared.DB) ODSReader { return &sqlODSReader{db: db} }
 // events to MarkProjected without writing to usage_fact_dwd, so they never
 // pollute business stats. See worker.go:projectOne.
 const fetchPendingTpl = `
-SELECT ods_id, event_id, event_time, occurred_at,
+SELECT ods_id, event_id, request_id, event_time, occurred_at,
        org_id, account_id, seat_id, account_status_snapshot,
        virtual_key_id, virtual_key_revision, virtual_key_hash, virtual_key_alias,
        binding_id, credential_id, credential_revision,
@@ -70,7 +70,7 @@ func (r *sqlODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord
 	for rows.Next() {
 		var rec ODSRecord
 		if err := rows.Scan(
-			&rec.OdsID, &rec.EventID, &rec.EventTime, &rec.OccurredAt,
+			&rec.OdsID, &rec.EventID, &rec.RequestID, &rec.EventTime, &rec.OccurredAt,
 			&rec.OrgID, &rec.AccountID, &rec.SeatID, &rec.AccountStatusSnapshot,
 			&rec.VirtualKeyID, &rec.VirtualKeyRevision, &rec.VirtualKeyHash, &rec.VirtualKeyAlias,
 			&rec.BindingID, &rec.CredentialID, &rec.CredentialRevision,
@@ -216,7 +216,7 @@ func NewSQLDWDWriter(db *shared.DB) DWDWriter { return &sqlDWDWriter{db: db} }
 // historic positions stay fixed. v1.0.0-rc.5 added app_slug for Phase
 // 4 Connected Apps; v1.0.0-rc.6 adds session_id for the Performance
 // Top N sessions chart.
-const dwdColumns = `event_id, ods_id, occurred_at, event_time, usage_date,
+const dwdColumns = `event_id, request_id, ods_id, occurred_at, event_time, usage_date,
     org_id, account_id, seat_id,
     virtual_key_id, virtual_key_revision, virtual_key_alias, virtual_key_hash,
     binding_id, binding_alias,
@@ -235,7 +235,7 @@ const dwdColumns = `event_id, ods_id, occurred_at, event_time, usage_date,
     oauth_identity,
     content_hash, source_id, source_seq`
 
-const dwdPlaceholders = `?,?,?,?,?,
+const dwdPlaceholders = `?,?,?,?,?,?,
     ?,?,?,
     ?,?,?,?,
     ?,?,
@@ -274,7 +274,7 @@ func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 		// strftime-based hour bucketing (see bugfix 20260424). β-hybrid on
 		// Postgres: BindMillis returns time.Time so TIMESTAMPTZ still works.
 		// UsageDate stays as an ISO "YYYY-MM-DD" string for BETWEEN queries.
-		f.EventID, f.OdsID, w.db.BindMillis(f.OccurredAt), w.db.BindMillis(f.EventTime), f.UsageDate,
+		f.EventID, f.RequestID, f.OdsID, w.db.BindMillis(f.OccurredAt), w.db.BindMillis(f.EventTime), f.UsageDate,
 		f.OrgID, f.AccountID, f.SeatID,
 		f.VirtualKeyID, f.VirtualKeyRevision, f.VirtualKeyAlias, f.VirtualKeyHash,
 		f.BindingID, f.BindingAlias,
