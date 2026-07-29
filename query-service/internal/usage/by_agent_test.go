@@ -124,6 +124,48 @@ func TestPersonalByAgentTotal_ScopeAndGrouping(t *testing.T) {
 	if a1.SeatAlias != "Bot One" || a1.TotalTokens != 300 || a1.RequestCount != 2 {
 		t.Errorf("agent1 row wrong: %+v", a1)
 	}
+	if a1.LastAccountID != "" || a1.LastRequestAtMs != 0 {
+		t.Errorf("latest route must stay opt-in for established callers: %+v", a1)
+	}
+
+	// Latest actual-account enrichment uses ODS and keeps the SAME parent-seat
+	// authorization boundary. A newer canary must not replace the real request;
+	// a stranger Agent in the same org must never leak.
+	insertAgentODS := func(eventID, seatID, accountID, identity, routeSource string, eventTime int64) {
+		t.Helper()
+		if _, err := db.DB.Exec(`
+			INSERT INTO usage_event_ods
+				(event_id, event_time, occurred_at, org_id, account_id, seat_id,
+				 oauth_identity, route_source, request_status, raw_event_json)
+			VALUES (?, ?, ?, 'org1', ?, ?, ?, ?, 'success', '{}')`,
+			eventID, eventTime, eventTime, accountID, seatID, identity, routeSource); err != nil {
+			t.Fatalf("seed agent ODS %s: %v", eventID, err)
+		}
+	}
+	insertAgentODS("ods-agent-real", "agent1", "pool-B", "b@mock.test", "oauth_group", msAt("2026-07-20T10:00:00Z"))
+	insertAgentODS("ods-agent-canary", "agent1", "pool-Z", "z@mock.test", "canary", msAt("2026-07-20T11:00:00Z"))
+	insertAgentODS("ods-stranger", "agent2", "pool-secret", "secret@mock.test", "oauth_group", msAt("2026-07-20T12:00:00Z"))
+
+	enriched, err := repo.PersonalByAgentTotal(context.Background(), QueryParams{
+		OrgID: "org1", SeatID: "seat1", StartDate: start, EndDate: end, IncludeLastRoute: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID = map[string]AgentTotal{}
+	for _, row := range enriched {
+		byID[row.SeatID] = row
+	}
+	if _, leaked := byID["agent2"]; leaked {
+		t.Fatalf("SECURITY: stranger latest route leaked: %+v", enriched)
+	}
+	a1 = byID["agent1"]
+	if a1.LastAccountID != "pool-B" || a1.LastOAuthIdentity != "b@mock.test" || a1.LastRequestStatus != "success" {
+		t.Fatalf("latest real route = %+v, want pool-B (newer canary excluded)", a1)
+	}
+	if a1.LastRequestAtMs != msAt("2026-07-20T10:00:00Z") {
+		t.Fatalf("last_request_at_ms = %d", a1.LastRequestAtMs)
+	}
 }
 
 // A personal/BYOK caller has no seat → no agents → empty (not an error, not a

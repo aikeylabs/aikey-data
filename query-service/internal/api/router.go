@@ -52,8 +52,8 @@ func NewRouter(h *UsageHandler, admin *AdminHandler, conv *ConversationHandler, 
 	authed.HandleFunc("GET /v1/usage/personal/by-app/total", h.PersonalByAppTotal)
 	// 2026-07-17 — "Usage By Agent" breakdown on /user/usage-ledger. Groups by
 	// seat_id for the caller + their Agent seats (parent_seat_id). See
-	// usage.AgentTotal + repository_sql.PersonalByAgentTotal. Authorization is
-	// server-side (caller only sees own + owned agents).
+	// usage.AgentTotal + repository_sql.PersonalByAgentTotal. Account-identity
+	// enrichment additionally requires Control's server-owned scope marker.
 	authed.HandleFunc("GET /v1/usage/personal/by-agent/total", h.PersonalByAgentTotal)
 	// 2026-05-26 — "Top N sessions" ranked chart on /user/performance.
 	// See usage.SessionTotal + repository_sql.PersonalBySessionTotal for

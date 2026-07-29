@@ -13,6 +13,8 @@ import (
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/usage"
 )
 
+const resolvedOwnerScopeHeader = "X-Aikey-Resolved-Owner-Scope"
+
 // UsageHandler handles usage query endpoints.
 type UsageHandler struct {
 	repo usage.Repository
@@ -194,17 +196,21 @@ func (h *UsageHandler) PersonalByAppTotal(w http.ResponseWriter, r *http.Request
 
 // GET /v1/usage/personal/by-agent/total?seat_id=...&start_date=...&end_date=...
 // Returns usage grouped by seat_id for the caller's own seat + their Agent
-// seats (org_seats.parent_seat_id = caller's seat) — the /user/usage-ledger
-// "Usage By Agent" breakdown (2026-07-17). Authorization is server-side: the
-// caller only ever sees their own + their agents' rows (see
-// usage.PersonalByAgentTotal). seat_id here is the caller's resolved identity
-// via parsePersonalParams — NOT an arbitrary client-supplied seat.
+// seats (org_seats.parent_seat_id = root seat) — the /user/usage-ledger
+// "Usage By Agent" breakdown (2026-07-17). The aggregate query keeps all child
+// rows under that root. Sensitive account-identity enrichment has the stronger
+// server-owned scope gate below because seat_id is otherwise a request param.
 func (h *UsageHandler) PersonalByAgentTotal(w http.ResponseWriter, r *http.Request) {
 	p, err := parsePersonalParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
 	}
+	// Account identity is more sensitive than aggregate usage. Only Control's
+	// direct server-side reader may request it after resolving the owner seat
+	// from the authenticated account. The browser-facing facade strips this
+	// marker, so a caller cannot widen scope by editing seat_id in DevTools.
+	p.IncludeLastRoute = r.URL.Query().Get("include_last_route") == "true" && r.Header.Get(resolvedOwnerScopeHeader) == "1"
 	data, err := h.repo.PersonalByAgentTotal(r.Context(), p)
 	if err != nil {
 		slog.Error("PersonalByAgentTotal query failed", "error", err)
@@ -432,30 +438,82 @@ func (h *UsageHandler) MasterTimeline(w http.ResponseWriter, r *http.Request) {
 	shared.JSON(w, http.StatusOK, data)
 }
 
+// parseMasterAuditFilters reads the optional audit filter dimensions
+// (20260729 用量审计页自由筛选) shared by MasterUsageDetail and
+// MasterUsageExport — one parser for both entry points so the on-screen rows
+// and the exported CSV always narrow by the same rules. Param names reuse the
+// personal detail vocabulary where the column is the same (model / key /
+// protocol). Returns an error for an invalid `priced` value instead of
+// silently ignoring it (a typo must not render an unfiltered audit view).
+func parseMasterAuditFilters(p *usage.QueryParams, r *http.Request) error {
+	q := r.URL.Query()
+	p.SeatID = q.Get("seat_id")
+	p.CredentialID = q.Get("credential_id")
+	p.ProviderCode = q.Get("provider")
+	p.Model = q.Get("model")
+	p.QualityStatus = q.Get("quality")
+	p.VirtualKeyID = q.Get("key")
+	p.Protocol = q.Get("protocol")
+	p.AnomalyType = q.Get("anomaly")
+	switch b := q.Get("priced"); b {
+	case "", "priced", "unpriced":
+		p.Billing = b
+	default:
+		return fmt.Errorf("priced must be 'priced' or 'unpriced', got %q", b)
+	}
+	return nil
+}
+
 // GET /v1/usage/master/detail?org_id=...&days=3&limit=1000
+//   or ...&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD (≤31-day span)
+//   plus optional filters: seat_id / credential_id / provider / model /
+//   quality / key / protocol / anomaly / priced (see parseMasterAuditFilters).
 //
-// Per-event audit rows for the enterprise usage-audit page. Window is the last
-// `days` usage_date days (default 3 — the page deliberately shows only recent
-// detail; the full history goes through /export). usage_date is UTC (matches the
-// projector). v1.0.1-alpha.4.
+// Per-event audit rows for the enterprise usage-audit page. Window is either an
+// explicit [start_date, end_date] range (20260729 filters — the page's date
+// picker, capped at 31 days; older history goes through /export) or the last
+// `days` usage_date days (default 3, the pre-filter behaviour kept for
+// backward compatibility). usage_date is UTC (matches the projector).
 func (h *UsageHandler) MasterUsageDetail(w http.ResponseWriter, r *http.Request) {
 	p, err := parseMasterParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
 	}
-	days := 3
-	if d := r.URL.Query().Get("days"); d != "" {
-		if n, e := strconv.Atoi(d); e == nil && n > 0 {
-			days = n
+	if err := parseMasterAuditFilters(&p, r); err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	q := r.URL.Query()
+	if q.Get("start_date") != "" || q.Get("end_date") != "" {
+		// Explicit range path. parseMasterParams already parsed valid values
+		// into p.Start/EndDate; a zero value here means missing or malformed.
+		if p.StartDate.IsZero() || p.EndDate.IsZero() {
+			shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", "start_date and end_date must both be YYYY-MM-DD")
+			return
 		}
+		if p.EndDate.Before(p.StartDate) {
+			shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", "end_date must not be before start_date")
+			return
+		}
+		if p.EndDate.Sub(p.StartDate) > 31*24*time.Hour {
+			shared.Error(w, http.StatusBadRequest, "RANGE_TOO_LARGE", "detail range must not exceed 31 days; use /export for older history")
+			return
+		}
+	} else {
+		days := 3
+		if d := q.Get("days"); d != "" {
+			if n, e := strconv.Atoi(d); e == nil && n > 0 {
+				days = n
+			}
+		}
+		if days > 31 {
+			days = 31 // hard cap — the page is a "recent" view, not the export
+		}
+		now := time.Now().UTC()
+		p.EndDate = now
+		p.StartDate = now.AddDate(0, 0, -(days - 1))
 	}
-	if days > 31 {
-		days = 31 // hard cap — the page is a "recent" view, not the export
-	}
-	now := time.Now().UTC()
-	p.EndDate = now
-	p.StartDate = now.AddDate(0, 0, -(days - 1))
 	limit := 1000
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if n, e := strconv.Atoi(l); e == nil && n > 0 {
@@ -480,6 +538,7 @@ func (h *UsageHandler) MasterUsageDetail(w http.ResponseWriter, r *http.Request)
 }
 
 // GET /v1/usage/master/export?org_id=...&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
+//   plus the same optional audit filters as /detail (parseMasterAuditFilters).
 //
 // Streams the full audit column set as CSV for [start_date, end_date] (inclusive
 // by usage_date). Both dates are REQUIRED and the span is capped at 366 days so
@@ -490,6 +549,12 @@ func (h *UsageHandler) MasterUsageDetail(w http.ResponseWriter, r *http.Request)
 func (h *UsageHandler) MasterUsageExport(w http.ResponseWriter, r *http.Request) {
 	p, err := parseMasterParams(r)
 	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	// Same filter set as /detail (20260729): the CSV narrows exactly like the
+	// on-screen table, so "what I filtered is what I export" holds.
+	if err := parseMasterAuditFilters(&p, r); err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
 	}

@@ -175,6 +175,13 @@ type AgentTotal struct {
 	CostUSD              float64 `json:"cost_usd"`
 	PricedRequestCount   int64   `json:"priced_request_count"`
 	UnpricedRequestCount int64   `json:"unpriced_request_count"`
+	// Optional latest-route observation (requested with include_last_route=true).
+	// These fields are point-in-time facts from ODS, not the allocation ledger:
+	// a request may have temporarily failed over to a different pool account.
+	LastAccountID     string `json:"last_account_id,omitempty"`
+	LastOAuthIdentity string `json:"last_oauth_identity,omitempty"`
+	LastRequestAtMs   int64  `json:"last_request_at_ms,omitempty"`
+	LastRequestStatus string `json:"last_request_status,omitempty"`
 }
 
 // SessionTotal is a single entry in the per-session usage breakdown
@@ -368,6 +375,10 @@ type QueryParams struct {
 	OrgID     string
 	SeatID    string
 	AccountID string    // used when SeatID is empty (personal key users without org seat)
+	// IncludeLastRoute enriches by-agent rows with the latest non-canary ODS
+	// account that actually served each seat. Default false preserves the
+	// established usage-ledger aggregation response and query cost.
+	IncludeLastRoute bool
 	StartDate time.Time // inclusive; interpreted in the user's local TZ
 	EndDate   time.Time // inclusive; interpreted in the user's local TZ
 	Limit     int       // for ranking, default 50
@@ -396,12 +407,27 @@ type QueryParams struct {
 	SessionID string
 
 	// Usage-detail page filters (drill-down). Empty/false = no narrowing.
-	// Consumed only by PersonalUsageDetail.
+	// Consumed by PersonalUsageDetail; Model/VirtualKeyID/Protocol are shared
+	// with the master usage-audit filters below (same column semantics).
 	Model         string // narrow to one model
 	VirtualKeyID  string // narrow to one virtual key (drill-down by key)
 	Protocol      string // narrow to one protocol_type (drill-down by protocol)
 	OAuthIdentity string // narrow to one OAuth email (drill-down by identity — spans multiple vks)
 	Unpriced      bool   // only rows with NULL billable_amount (the "未计价" filter)
+
+	// Master usage-audit filters (20260729 用量审计页自由筛选). Empty = no
+	// narrowing. Consumed by MasterUsageDetail + StreamMasterUsageExport via
+	// masterAuditWhere — both entry points share the same WHERE builder so the
+	// on-screen rows and the exported CSV can never diverge in scope.
+	CredentialID string // narrow to one provider credential (which pool account served)
+	ProviderCode string // narrow to one provider (anthropic / openai / ...)
+	QualityStatus string // narrow to one quality_status (exact / partial / ...)
+	AnomalyType  string // narrow to one anomaly_type
+	// Billing is a three-state pricing filter: "" (all) | "priced"
+	// (billable_amount IS NOT NULL) | "unpriced" (IS NULL). A string enum, not
+	// two bools, so a single field decides the switch. The personal-page
+	// Unpriced bool above predates this and stays untouched (frozen surface).
+	Billing string
 
 	// TZ is the IANA name (e.g. "Asia/Shanghai") of the caller's
 	// local time zone. Empty = UTC. Used to bucket per-day / per-hour

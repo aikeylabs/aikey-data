@@ -332,6 +332,79 @@ func (r *sqlRepo) PersonalByAppTotal(ctx context.Context, p QueryParams) ([]AppT
 	return out, rows.Err()
 }
 
+type latestAgentRoute struct {
+	SeatID        string
+	SeatAlias     string
+	IsAgent       bool
+	ParentSeatID  string
+	AccountID     string
+	OAuthIdentity string
+	RequestAtMs   int64
+	RequestStatus string
+}
+
+func applyLatestAgentRoute(dst *AgentTotal, src latestAgentRoute) {
+	dst.LastAccountID = src.AccountID
+	dst.LastOAuthIdentity = src.OAuthIdentity
+	dst.LastRequestAtMs = src.RequestAtMs
+	dst.LastRequestStatus = src.RequestStatus
+}
+
+// latestAgentRoutes returns at most one ODS row for the owner seat and each
+// Agent it owns. The handler enables this only for Control's server-resolved
+// owner scope; this repository still applies the same parent-seat predicate as
+// PersonalByAgentTotal. ROW_NUMBER is supported by both shipped SQLite and
+// PostgreSQL versions and avoids an unbounded scan/merge in Go.
+func (r *sqlRepo) latestAgentRoutes(ctx context.Context, parentSeatID string) ([]latestAgentRoute, error) {
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
+		WITH scoped_seats AS (
+			SELECT seat_id, org_id, COALESCE(alias, '') AS seat_alias,
+			       CASE WHEN COALESCE(seat_type, 'human') <> 'human' THEN 1 ELSE 0 END AS is_agent,
+			       COALESCE(parent_seat_id, '') AS parent_seat_id
+			  FROM org_seats
+			 WHERE seat_id = ? OR parent_seat_id = ?
+		)
+		SELECT seat_id, seat_alias, is_agent, parent_seat_id,
+		       account_id, oauth_identity, event_time_ms, request_status
+		  FROM (
+			SELECT o.seat_id,
+			       s.seat_alias,
+			       s.is_agent,
+			       s.parent_seat_id,
+			       COALESCE(o.account_id, '') AS account_id,
+			       COALESCE(o.oauth_identity, '') AS oauth_identity,
+			       %s AS event_time_ms,
+			       COALESCE(o.request_status, '') AS request_status,
+			       ROW_NUMBER() OVER (PARTITION BY o.seat_id ORDER BY o.event_time DESC, o.ods_id DESC) AS rn
+			  FROM usage_event_ods o
+			  JOIN scoped_seats s ON s.seat_id = o.seat_id AND s.org_id = o.org_id
+			 WHERE COALESCE(o.account_id, '') <> ''
+			   AND COALESCE(o.route_source, '') <> 'canary'
+		  ) ranked
+		 WHERE rn = 1`, r.db.EpochMillis("o.event_time")), parentSeatID, parentSeatID)
+	if err != nil {
+		return nil, fmt.Errorf("personal latest agent routes: %w", err)
+	}
+	defer rows.Close()
+	out := []latestAgentRoute{}
+	for rows.Next() {
+		var route latestAgentRoute
+		var isAgent int
+		if err := rows.Scan(
+			&route.SeatID, &route.SeatAlias, &isAgent, &route.ParentSeatID,
+			&route.AccountID, &route.OAuthIdentity, &route.RequestAtMs, &route.RequestStatus,
+		); err != nil {
+			return nil, err
+		}
+		route.IsAgent = isAgent == 1
+		out = append(out, route)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PersonalByAgentTotal — usage grouped by seat_id for the caller's own seat +
 // its Agent seats (org_seats.parent_seat_id = caller). See AgentTotal /
 // repository.go for the contract + authorization rationale.
@@ -383,7 +456,40 @@ func (r *sqlRepo) PersonalByAgentTotal(ctx context.Context, p QueryParams) ([]Ag
 		at.IsAgent = isAgent == 1
 		out = append(out, at)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if !p.IncludeLastRoute {
+		return out, nil
+	}
+	latest, err := r.latestAgentRoutes(ctx, p.SeatID)
+	if err != nil {
+		return nil, err
+	}
+	bySeat := make(map[string]int, len(out))
+	for i := range out {
+		bySeat[out[i].SeatID] = i
+	}
+	for _, route := range latest {
+		if i, ok := bySeat[route.SeatID]; ok {
+			applyLatestAgentRoute(&out[i], route)
+			continue
+		}
+		// The latest request may predate the requested usage window. Include a
+		// zero-usage row only when enrichment was explicitly requested so the
+		// Agents page can still show the most recent actual account; established
+		// usage-ledger callers (flag absent) keep byte-for-byte row semantics.
+		row := AgentTotal{
+			SeatID: route.SeatID, SeatAlias: route.SeatAlias, IsAgent: route.IsAgent,
+			ParentSeatID: route.ParentSeatID,
+		}
+		applyLatestAgentRoute(&row, route)
+		out = append(out, row)
+	}
+	return out, nil
 }
 
 func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyTotal, error) {
@@ -965,13 +1071,48 @@ func scanMasterAuditRow(rows *sql.Rows) (*MasterUsageAuditRow, error) {
 // masterAuditWhere filters by org + usage_date range (inclusive). usage_date is
 // the DWD partition key, so this WHERE prunes the scan to the relevant months.
 // p.StartDate/EndDate are interpreted as calendar dates (their YYYY-MM-DD part).
+// masterAuditFilterColumns is the audit filter dimension registry (20260729
+// 用量审计页自由筛选): each row maps one optional QueryParams field to its
+// exact-match DWD column. Adding a filter dimension = adding one row here (+
+// handler param + FE config row) — no ad-hoc WHERE branches. All clauses run
+// AFTER the usage_date partition pruning, so the scan stays bounded by the
+// page's ≤31-day window and needs no new index.
+var masterAuditFilterColumns = []struct {
+	value  func(QueryParams) string
+	clause string
+}{
+	{func(p QueryParams) string { return p.SeatID }, "d.seat_id = ?"},
+	{func(p QueryParams) string { return p.CredentialID }, "d.credential_id = ?"},
+	{func(p QueryParams) string { return p.ProviderCode }, "d.provider_code = ?"},
+	{func(p QueryParams) string { return p.Model }, "d.model = ?"},
+	{func(p QueryParams) string { return p.QualityStatus }, "d.quality_status = ?"},
+	{func(p QueryParams) string { return p.VirtualKeyID }, "d.virtual_key_id = ?"},
+	{func(p QueryParams) string { return p.Protocol }, "d.protocol_type = ?"},
+	{func(p QueryParams) string { return p.AnomalyType }, "d.anomaly_type = ?"},
+}
+
 func masterAuditWhere(p QueryParams) (string, []any) {
 	// scopeAuditAnd (2026-07-15): probe/poll traffic (non_generation) is not
 	// part of the usage audit; excluded/abnormal rows stay — they carry the
 	// pending_review anomalies auditors must see. Qualified with d. because
 	// this WHERE runs against the org_seats LEFT JOIN.
-	return "d.org_id = ? AND d.usage_date >= ? AND d.usage_date <= ? AND d.user_usage_scope <> 'non_generation'",
-		[]any{p.OrgID, p.StartDate.Format("2006-01-02"), p.EndDate.Format("2006-01-02")}
+	where := "d.org_id = ? AND d.usage_date >= ? AND d.usage_date <= ? AND d.user_usage_scope <> 'non_generation'"
+	args := []any{p.OrgID, p.StartDate.Format("2006-01-02"), p.EndDate.Format("2006-01-02")}
+	for _, f := range masterAuditFilterColumns {
+		if v := f.value(p); v != "" {
+			where += " AND " + f.clause
+			args = append(args, v)
+		}
+	}
+	// Three-state pricing filter (NULL semantics, so not an equality column
+	// above). "unpriced" = no pricing snapshot matched, NOT zero cost.
+	switch p.Billing {
+	case "priced":
+		where += " AND d.billable_amount IS NOT NULL"
+	case "unpriced":
+		where += " AND d.billable_amount IS NULL"
+	}
+	return where, args
 }
 
 func (r *sqlRepo) MasterUsageDetail(ctx context.Context, p QueryParams) ([]MasterUsageAuditRow, error) {

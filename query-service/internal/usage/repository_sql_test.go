@@ -181,6 +181,12 @@ type dwdRow struct {
 	UserUsageScope string
 	RequestStatus  string // defaults to "success"
 	HTTPStatusCode int
+	// Audit filter dimensions (20260729 用量审计页自由筛选 fence tests).
+	// Defaults preserve the pre-filter fixture behaviour: quality_status "ok",
+	// credential_id / anomaly_type NULL.
+	CredentialID  string // empty → NULL
+	QualityStatus string // empty → "ok" (the long-standing fixture default)
+	AnomalyType   string // empty → NULL
 }
 
 // odsIDSeq generates unique ods_id values per inserted DWD row so the
@@ -214,6 +220,16 @@ func insertDWD(t *testing.T, db *shared.DB, r dwdRow) {
 	if r.Model == "<NULL>" {
 		modelArg = nil
 	}
+	if r.QualityStatus == "" {
+		r.QualityStatus = "ok"
+	}
+	var credentialArg, anomalyArg any
+	if r.CredentialID != "" {
+		credentialArg = r.CredentialID
+	}
+	if r.AnomalyType != "" {
+		anomalyArg = r.AnomalyType
+	}
 	// Priced row → store billable_amount + currency; unpriced row (nil)
 	// → NULL both, matching what the projector writes on a price miss.
 	var billableArg, currencyArg any
@@ -234,16 +250,18 @@ func insertDWD(t *testing.T, db *shared.DB, r dwdRow) {
 			input_tokens, cached_input_tokens, cache_creation_input_tokens, output_tokens,
 			request_status, http_status_code, completion_source, quality_status,
 			billing_scope, user_usage_scope, projector_version,
-			app_slug, billable_amount, currency
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			app_slug, billable_amount, currency,
+			credential_id, anomaly_type
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.EventID, r.RequestID, odsIDSeq, r.EventTimeMs, r.EventTimeMs, r.UsageDate,
 		r.OrgID, r.AccountID, r.SeatID, r.VirtualKeyID, r.VirtualKeyAlias,
 		r.ProviderCode, r.ProtocolType, modelArg,
 		r.RequestCount, r.TotalTokens,
 		r.InputTokens, r.CachedInputTokens, r.CacheCreationInputTokens, r.OutputTokens,
-		r.RequestStatus, r.HTTPStatusCode, "test", "ok",
+		r.RequestStatus, r.HTTPStatusCode, "test", r.QualityStatus,
 		r.BillingScope, r.UserUsageScope, "test",
-		r.AppSlug, billableArg, currencyArg)
+		r.AppSlug, billableArg, currencyArg,
+		credentialArg, anomalyArg)
 	if err != nil {
 		t.Fatalf("insertDWD %q: %v", r.EventID, err)
 	}
