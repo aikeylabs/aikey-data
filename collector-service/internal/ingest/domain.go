@@ -99,6 +99,24 @@ type UsageEvent struct {
 	ProviderCode string `json:"provider_code,omitempty"`
 	ProtocolType string `json:"protocol_type,omitempty"`
 	RouteSource    string `json:"route_source,omitempty"`
+	// Upstream fallback attribution (openspec `aliyun-aigw-p0-upstream-fallback`,
+	// tasks 3.2 / 3.7). FallbackReason is the frozen error code that caused the
+	// switch TO this hop; FallbackAttempt is the 1-based index of the hop that
+	// produced this row.
+	//
+	// 🔴 They MUST be declared here even before a column exists for them, for the
+	// reason spelled out under RequestPath below: raw_event_json is a re-marshal
+	// of THIS struct, not the verbatim wire bytes, so an undeclared wire field is
+	// dropped on the floor before anything is stored. The proxy has been sending
+	// both since P3; without these two lines they were being discarded here, which
+	// is why 3.7 was recorded as only half done rather than "the collector has not
+	// projected them yet".
+	//
+	// 🔴 FallbackAttempt is a POINTER: 1 is a measured value ("the primary served
+	// it"), and a plain int cannot tell it apart from "the sender said nothing".
+	// The two mean different things to every count built on this column.
+	FallbackReason  string `json:"fallback_reason,omitempty"`
+	FallbackAttempt *int   `json:"fallback_attempt,omitempty"`
 	OAuthIdentity  string `json:"oauth_identity,omitempty"` // Email/display name for OAuth accounts
 
 	// Cost-pricing audit (v1.0.0-rc.8): upstream region + endpoint reported by

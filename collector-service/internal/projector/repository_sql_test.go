@@ -147,6 +147,11 @@ func newSQLiteODSTestDB(t *testing.T) *shared.DB {
 			content_hash TEXT,
 			source_id TEXT,
 			source_seq INTEGER,
+			-- Upstream fallback attribution (Order 11065). fallback_attempt is
+			-- nullable on purpose: a measured 1 ("the primary served it") and
+			-- "written before this field existed" are different facts.
+			fallback_reason TEXT,
+			fallback_attempt INTEGER,
 			-- Full wire event (real schema: NOT NULL jsonb/TEXT). FetchPending
 			-- json-extracts request_path from it (2026-07-15 非生成流量不进用量审计).
 			raw_event_json TEXT
@@ -335,6 +340,9 @@ func newSQLiteDWDTestDB(t *testing.T, includeSQLDefaults bool) *shared.DB {
 			content_hash TEXT,
 			source_id TEXT,
 			source_seq INTEGER,
+			-- Upstream fallback attribution (Order 11065), carried verbatim ODS→DWD.
+			fallback_reason TEXT,
+			fallback_attempt INTEGER,
 			UNIQUE (org_id, event_id)
 		);
 	`)
@@ -451,5 +459,56 @@ func TestFetchPending_RequestPathFromRawEvent(t *testing.T) {
 	}
 	if legacy.RequestPath.Valid {
 		t.Errorf("legacy RequestPath = %+v, want NULL", legacy.RequestPath)
+	}
+}
+
+// 🔴 The two upstream-fallback fields must survive ODS → DWD (openspec change
+// `aliyun-aigw-p0-upstream-fallback`, tasks 3.7 / 4.5b / P6.1 L3).
+//
+// Why this is worth its own test: the console is FORBIDDEN from seeing the live
+// cooldown table — it never leaves the developer's machine (I23) — so an
+// aggregate over these projected rows is the only thing it may be shown. If they
+// silently stop propagating, the console shows "never stepped around" for an
+// upstream that is being stepped around constantly, and nothing else notices.
+func TestFetchPending_CarriesFallbackAttributionAndKeepsUnrecordedNull(t *testing.T) {
+	db := newSQLiteODSTestDB(t)
+
+	insertODSTestRow(t, db, 1, "pending", aikeytime.Millis(0))
+	if _, err := db.DB.Exec(
+		`UPDATE usage_event_ods SET fallback_reason = ?, fallback_attempt = ? WHERE ods_id = 1`,
+		"UPSTREAM_5XX", 2,
+	); err != nil {
+		t.Fatalf("seed fallback attribution: %v", err)
+	}
+	// Row 2 is a legacy event: written before the fields existed.
+	insertODSTestRow(t, db, 2, "pending", aikeytime.Millis(0))
+
+	pending, err := NewSQLODSReader(db).FetchPending(context.Background(), 100)
+	if err != nil {
+		t.Fatalf("FetchPending: %v", err)
+	}
+	byID := map[int64]ODSRecord{}
+	for _, p := range pending {
+		byID[p.OdsID] = p
+	}
+	switched := byID[1]
+	if !switched.FallbackReason.Valid || switched.FallbackReason.String != "UPSTREAM_5XX" {
+		t.Errorf("FallbackReason = %+v, want UPSTREAM_5XX", switched.FallbackReason)
+	}
+	if !switched.FallbackAttempt.Valid || switched.FallbackAttempt.Int64 != 2 {
+		t.Errorf("FallbackAttempt = %+v, want 2", switched.FallbackAttempt)
+	}
+
+	// 🔴 The load-bearing half. A legacy row must stay NULL, never become 1:
+	// backfilling it to 1 would assert that traffic from a period when the
+	// runtime COULD NOT fall back was measured as primary-served, and after that
+	// no query can tell the two apart again.
+	legacy := byID[2]
+	if legacy.FallbackAttempt.Valid {
+		t.Errorf("legacy FallbackAttempt = %+v, want NULL — 'not recorded' is not 'the primary served it'",
+			legacy.FallbackAttempt)
+	}
+	if legacy.FallbackReason.Valid && legacy.FallbackReason.String != "" {
+		t.Errorf("legacy FallbackReason = %+v, want empty/NULL", legacy.FallbackReason)
 	}
 }

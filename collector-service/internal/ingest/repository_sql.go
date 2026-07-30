@@ -57,7 +57,8 @@ const odsColumns = `event_id, request_id, trace_id, proxy_instance_id, device_id
     source_id, source_seq,
     region, endpoint_url,
     virtual_key_alias,
-    content_hash, ingest_status, dwd_status`
+    content_hash, ingest_status, dwd_status,
+    fallback_reason, fallback_attempt`
 
 const odsPlaceholders = `?,?,?,?,?,
     ?,?,?,?,
@@ -78,7 +79,8 @@ const odsPlaceholders = `?,?,?,?,?,
     ?,?,
     ?,?,
     ?,
-    ?,?,?`
+    ?,?,?,
+    ?,?`
 
 // InsertEvent persists one event. quarantined drives the disposition columns:
 // false → ingest_status='accepted', dwd_status='pending' (normal flow, projector
@@ -135,6 +137,11 @@ func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte,
 		nullStr(e.Region), nullStr(e.EndpointURL), // cost-pricing audit (v1.0.0-rc.8)
 		nullStr(e.KeyLabel),                            // virtual_key_alias (v1.0.0-rc.11) — display label, carried into DWD by projector
 		nullStr(e.ContentHash), ingestStatus, dwdStatus, // stage C: content fingerprint + disposition
+		// 🔴 Upstream fallback attribution. `e.FallbackAttempt` is bound as the
+		// pointer it is: a nil reaches the column as NULL ("the sender said
+		// nothing"), which every count over this column has to tell apart from a
+		// measured 1 ("the primary served it").
+		nullStr(e.FallbackReason), e.FallbackAttempt,
 	)
 	if err != nil {
 		return false, false, fmt.Errorf("insert ods event %s: %w", e.EventID, err)

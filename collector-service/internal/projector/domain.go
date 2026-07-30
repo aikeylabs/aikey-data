@@ -143,6 +143,20 @@ type ODSRecord struct {
 	// leaves classification unchanged. Feeds the generation/non-generation
 	// scope rule (see classifyGenerationScope).
 	RequestPath                sql.NullString
+
+	// Upstream fallback attribution (openspec `aliyun-aigw-p0-upstream-fallback`,
+	// tasks 3.7 / 4.5b). Carried verbatim into DWD so the console can answer "how
+	// often has this hop been stepped around lately, and why" from the read model
+	// alone — the live cooldown table never leaves the developer's machine (I23),
+	// so an AGGREGATE over these rows is the only thing the console may show.
+	//
+	// 🔴 FallbackAttempt is nullable. 1 is a measured value ("the primary served
+	// it"); NULL is "written before this field existed". Backfilling NULL to 1
+	// would assert that traffic from a period when the runtime COULD NOT fall back
+	// was measured as primary-served, and after that the two are indistinguishable
+	// forever.
+	FallbackReason             sql.NullString
+	FallbackAttempt            sql.NullInt64
 }
 
 // ControlEvent is a read-only projection of managed_key_control_events.
@@ -256,4 +270,10 @@ type DWDFact struct {
 	ContentHash        string
 	SourceID           string
 	SourceSeq          *int64
+
+	// Upstream fallback attribution, verbatim from ODS. FallbackAttempt is
+	// *int64 for the same reason SourceSeq is a pointer: "not recorded" and a
+	// measured 1 are different facts and every count built on it needs them apart.
+	FallbackReason     string
+	FallbackAttempt    *int64
 }

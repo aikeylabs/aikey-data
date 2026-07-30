@@ -255,6 +255,13 @@ func (e *Enricher) buildBaseFact(rec *ODSRecord) *DWDFact {
 		ContentHash:                rec.ContentHash.String,
 		SourceID:                   rec.SourceID.String,
 		SourceSeq:                  nullInt64Ptr(rec.SourceSeq),
+
+		// Upstream fallback attribution, verbatim. 🔴 NOT defaulted to 1 when
+		// absent: "the primary served it" is a measurement, "written before this
+		// field existed" is not, and once they are the same value nothing can tell
+		// them apart again.
+		FallbackReason:             rec.FallbackReason.String,
+		FallbackAttempt:            nullInt64Ptr(rec.FallbackAttempt),
 	}
 }
 
