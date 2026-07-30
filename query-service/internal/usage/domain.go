@@ -556,3 +556,36 @@ func (q QueryParams) LocalWindowMs() (startMs, endMs aikeytime.Millis) {
 	endMs = aikeytime.FromTime(q.EndDate.AddDate(0, 0, 1))
 	return
 }
+
+// UpstreamLatency is the response-time distribution an organization actually
+// sees from its upstreams (openspec change `aliyun-aigw-p0-upstream-fallback`,
+// task 5.7).
+//
+// # 🔴 What it exists to prevent
+//
+// The single-attempt wait limit became configurable in P1b. An administrator can
+// now set it to five seconds — and a normal long-context completion can take
+// forty. The chain would then treat a healthy upstream that is merely SLOW as a
+// failure: switch away, cool it down, and step around a working vendor for
+// minutes. Nothing errors; the bill just moves and the answers get worse.
+//
+// # 🔴 We report, we do not decide
+//
+// A customer may genuinely want aggressive fast-failure. So this is a WARNING
+// with the numbers attached, never a block: "5% of your requests took longer
+// than 32s in the last 7 days; a 5s limit would treat those as upstream
+// failures." 🚫 Refusing the save would substitute our judgement for theirs on a
+// trade-off only they can price.
+type UpstreamLatency struct {
+	// P95Ms is the 95th percentile of observed upstream latency, in
+	// milliseconds. 🔴 Zero means "no data", which is NOT "fast" — see Samples.
+	P95Ms int64 `json:"p95_ms"`
+	// Samples is how many rows the percentile was computed from. 🔴 The console
+	// must not warn off a handful of requests: a P95 over nine samples is the
+	// second-slowest of nine, and presenting that as a distribution invites an
+	// operator to act on noise.
+	Samples int64 `json:"samples"`
+	// WindowDays is the span the figure covers, so the sentence on screen can
+	// say it rather than leaving the reader to assume.
+	WindowDays int `json:"window_days"`
+}

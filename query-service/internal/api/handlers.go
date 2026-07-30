@@ -419,6 +419,31 @@ func (h *UsageHandler) MasterByProtocolTotal(w http.ResponseWriter, r *http.Requ
 	shared.JSON(w, http.StatusOK, data)
 }
 
+// MasterUpstreamLatency handles
+// GET /v1/usage/master/upstream-latency?org_id=...&start_date=...&end_date=...
+//
+// 🔴 It answers a question the console asks BEFORE a save, not during a request
+// (P5.4): the single-attempt wait limit is about to be set, and the operator
+// should know what their upstreams actually do before choosing a number.
+func (h *UsageHandler) MasterUpstreamLatency(w http.ResponseWriter, r *http.Request) {
+	p, err := parseMasterParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	data, err := h.repo.MasterUpstreamLatency(r.Context(), p)
+	if err != nil {
+		slog.Error("MasterUpstreamLatency query failed", "error", err)
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	// 🔴 Always 200 with `samples`. An org with no traffic yet is a normal state,
+	// and a 404 would make the threshold page render an error for a healthy new
+	// customer. The caller decides what to do with zero samples; it is not the
+	// same as a fast P95 and must not be reported as one.
+	shared.JSON(w, http.StatusOK, data)
+}
+
 // MasterUpstreamStepArounds handles
 // GET /v1/usage/master/upstream-step-arounds?org_id=...&start_date=...&end_date=...
 //

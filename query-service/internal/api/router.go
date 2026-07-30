@@ -69,6 +69,7 @@ func NewRouter(h *UsageHandler, admin *AdminHandler, conv *ConversationHandler, 
 	authed.HandleFunc("GET /v1/usage/master/by-protocol/total", h.MasterByProtocolTotal)
 	// "Which upstreams did we switch to lately, and why" (task 4.5b).
 	authed.HandleFunc("GET /v1/usage/master/upstream-step-arounds", h.MasterUpstreamStepArounds)
+	authed.HandleFunc("GET /v1/usage/master/upstream-latency", h.MasterUpstreamLatency)
 	authed.HandleFunc("GET /v1/usage/master/timeline", h.MasterTimeline)
 	// Enterprise usage-audit (v1.0.1-alpha.4): recent per-event detail + full
 	// CSV export. detail = last N days (default 3) on usage_date; export streams
