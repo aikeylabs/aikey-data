@@ -75,6 +75,34 @@ type ProtocolHourlyPoint struct {
 //     split by whether the selected attempt carried a price. They sum to
 //     RequestCount exactly, so the FE can render "N of M unpriced ⚠" without
 //     the totals drifting when one client request has multiple attempts.
+// UpstreamStepAround is how often traffic was switched AWAY from an upstream
+// and onto the next one, per (provider, reason) (openspec change
+// `aliyun-aigw-p0-upstream-fallback`, task 4.5b).
+//
+// # 🔴 Why the console gets a COUNT and not a countdown
+//
+// Task 4.5b was written asking for "cooling · 4m12s remaining". That number is
+// LIVE state on a developer's machine, and I23 forbids live state from reaching
+// the control plane at all — derived numbers may travel, living state may not.
+// The two requirements were both accepted and they are incompatible.
+//
+// A count of past switches is the derived form, it is allowed, and it answers
+// what 4.5b actually needed: an administrator seeing the bill move to the backup
+// vendor should be able to see WHY without concluding they misconfigured
+// something. What it does not do is tell them how long the step-around lasts —
+// and that limitation is stated on the page rather than papered over.
+type UpstreamStepAround struct {
+	// ProviderCode is the upstream that SERVED the request after the switch.
+	ProviderCode string `json:"provider_code"`
+	// Reason is the frozen error code that caused it. Empty = recorded without
+	// one (an older proxy), which is not the same as "no reason".
+	Reason string `json:"reason"`
+	// Switches is how many requests reached this upstream by switching.
+	Switches int64 `json:"switches"`
+	// LastAt is the most recent one, unix millis; 0 when unknown.
+	LastAt int64 `json:"last_at"`
+}
+
 type ProtocolTotal struct {
 	ProtocolType         string  `json:"protocol_type"` // actually provider_code
 	TotalTokens          int64   `json:"total_tokens"`

@@ -419,6 +419,34 @@ func (h *UsageHandler) MasterByProtocolTotal(w http.ResponseWriter, r *http.Requ
 	shared.JSON(w, http.StatusOK, data)
 }
 
+// MasterUpstreamStepArounds handles
+// GET /v1/usage/master/upstream-step-arounds?org_id=...&start_date=...&end_date=...
+//
+// 🔴 It returns a COUNT of past switches, never a countdown. The live cooldown
+// table stays on the developer's machine (I23) — derived numbers may travel,
+// living state may not — so "stepped around 12 times in this window, reason
+// UPSTREAM_5XX" is the strongest honest form of task 4.5b's question.
+func (h *UsageHandler) MasterUpstreamStepArounds(w http.ResponseWriter, r *http.Request) {
+	p, err := parseMasterParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	data, err := h.repo.MasterUpstreamStepArounds(r.Context(), p)
+	if err != nil {
+		slog.Error("MasterUpstreamStepArounds query failed", "error", err)
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	if data == nil {
+		// 🔴 An empty list, never 404 or null. "No switches in this window" is a
+		// real and common answer — the healthy one — and the console renders it as
+		// such; a 404 would make the page show an error for a healthy fleet.
+		data = []usage.UpstreamStepAround{}
+	}
+	shared.JSON(w, http.StatusOK, data)
+}
+
 // GET /v1/usage/master/timeline?org_id=...&start_date=...&end_date=...
 func (h *UsageHandler) MasterTimeline(w http.ResponseWriter, r *http.Request) {
 	p, err := parseMasterParams(r)

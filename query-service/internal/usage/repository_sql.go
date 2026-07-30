@@ -1185,3 +1185,46 @@ func scanProtocolTotal(rows *sql.Rows) ([]ProtocolTotal, error) {
 	}
 	return result, rows.Err()
 }
+
+// MasterUpstreamStepArounds answers "which upstreams did we switch to lately, and
+// why" (openspec change `aliyun-aigw-p0-upstream-fallback`, task 4.5b).
+//
+// # 🔴 `fallback_attempt > 1`, and why NULL must not be swept in
+//
+// A row with NULL was written before the field existed. Treating NULL as 1 would
+// silently classify all historical traffic as primary-served — accidentally right
+// today and permanently unrecoverable — while treating it as a switch would
+// invent switches that never happened. It is neither, so it is excluded, and the
+// count is honestly "switches we have a record of".
+//
+// # 🔴 Reads usage_fact_dwd, not usage_reporting_fact
+//
+// The reporting view collapses a failover chain to ONE client request (Order
+// 11060), which is exactly right for billing and exactly wrong here: this
+// question is about upstream attempts, and the view's whole job is to hide them.
+func (r *sqlRepo) MasterUpstreamStepArounds(ctx context.Context, p QueryParams) ([]UpstreamStepAround, error) {
+	startMs, endMs := p.LocalWindowMs()
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT COALESCE(provider_code, ''), COALESCE(fallback_reason, ''),
+		       COUNT(*), COALESCE(MAX(event_time), 0)
+		FROM usage_fact_dwd
+		WHERE org_id = ?
+		  AND event_time >= ? AND event_time < ?
+		  AND fallback_attempt IS NOT NULL AND fallback_attempt > 1
+		GROUP BY COALESCE(provider_code, ''), COALESCE(fallback_reason, '')
+		ORDER BY COUNT(*) DESC`,
+		p.OrgID, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
+	if err != nil {
+		return nil, fmt.Errorf("master upstream step-arounds: %w", err)
+	}
+	defer rows.Close()
+	var out []UpstreamStepAround
+	for rows.Next() {
+		var s UpstreamStepAround
+		if err := rows.Scan(&s.ProviderCode, &s.Reason, &s.Switches, &s.LastAt); err != nil {
+			return nil, fmt.Errorf("scan upstream step-around: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}

@@ -59,6 +59,12 @@ func (m *mockRepo) MasterUserRanking(_ context.Context, p usage.QueryParams) ([]
 	}, nil
 }
 
+func (m *mockRepo) MasterUpstreamStepArounds(_ context.Context, _ usage.QueryParams) ([]usage.UpstreamStepAround, error) {
+	return []usage.UpstreamStepAround{
+		{ProviderCode: "zhipu", Reason: "UPSTREAM_5XX", Switches: 12, LastAt: 1_700_000_000_000},
+	}, nil
+}
+
 func (m *mockRepo) MasterByProtocolTotal(_ context.Context, p usage.QueryParams) ([]usage.ProtocolTotal, error) {
 	return []usage.ProtocolTotal{
 		{ProtocolType: "openai", TotalTokens: 15000, RequestCount: 75},
