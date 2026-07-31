@@ -501,6 +501,7 @@ func (h *UsageHandler) MasterTimeline(w http.ResponseWriter, r *http.Request) {
 func parseMasterAuditFilters(p *usage.QueryParams, r *http.Request) error {
 	q := r.URL.Query()
 	p.SeatID = q.Get("seat_id")
+	p.OAuthIdentity = q.Get("identity") // param name mirrors the personal detail API
 	p.CredentialID = q.Get("credential_id")
 	p.ProviderCode = q.Get("provider")
 	p.Model = q.Get("model")

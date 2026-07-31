@@ -91,4 +91,25 @@ type QueryParams struct {
 	// sort would only reorder the current page, not the whole result set.
 	SortBy  string
 	SortDir string
+	// Seat-list search filter (2026-07-31). Two inputs, OR'd together, because a
+	// seat row's DISPLAY LABEL has two possible origins and the search must match
+	// whichever the admin actually sees ("what you see is what you can search"):
+	//
+	//   SeatKeys    — exact seat keys the master facade resolved from a human name
+	//                 (alias / invited email) in ITS org_seats directory. Names
+	//                 never reach query-service; the alias truth source lives in
+	//                 control-master. Both ids of a matched seat are passed so
+	//                 seat_id rows (>=alpha.4) and legacy owner rows both match.
+	//   SeatKeyLike — the RAW search term, matched as a case-insensitive substring
+	//                 of seatKeyExpr itself. Required because conversation_records
+	//                 can carry a seat key that has NO org_seats row at all (demo
+	//                 /imported/decommissioned seats): the console then renders the
+	//                 raw key as the label, so directory-only matching would make a
+	//                 visible row unsearchable — the exact bug reported 2026-07-31.
+	//
+	// SeatFilterSet distinguishes "no search at all" from "searched and matched
+	// nothing" — collapsing them would turn a failed search into the full list.
+	SeatKeys      []string
+	SeatKeyLike   string
+	SeatFilterSet bool
 }

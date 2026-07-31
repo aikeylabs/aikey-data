@@ -1,9 +1,11 @@
 package api
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/conversation"
@@ -47,14 +49,53 @@ type listResponse[T any] struct {
 	Offset int   `json:"offset"`
 }
 
+// maxSeatKeys caps the seat_keys filter fan-out so a malformed/hostile request
+// cannot bind thousands of IN() placeholders. The facade resolves a seat-name
+// search against ONE org's seat directory (hundreds of seats this period), so a
+// legitimate request never comes close; exceeding the cap is a caller bug and is
+// rejected loudly (400), not silently truncated (no-silent-caps principle).
+const maxSeatKeys = 1000
+
+// splitSeatKeys parses the comma-separated ?seat_keys= value. Blank segments are
+// dropped, so "" (present-but-empty = resolved to nothing) yields an empty slice.
+func splitSeatKeys(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, k := range parts {
+		if k = strings.TrimSpace(k); k != "" {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 // Seats handles GET /v1/conversation-audit/seats
 //
-//	?org_id=&start_date=&end_date=&limit=&offset=
+//	?org_id=&start_date=&end_date=&limit=&offset=&sort=&dir=&seat_keys=&seat_key_like=
+//
+// The two optional search params are OR'd (see conversation.QueryParams):
+// seat_keys = exact keys the master facade resolved from a human seat-name
+// search (?q=) via its org_seats directory; seat_key_like = that same raw term,
+// matched as a substring of the seat key itself so rows whose key has no
+// directory entry (displayed by their raw key) stay searchable. Either param
+// PRESENT but both yielding nothing = "searched, matched nothing" → empty page,
+// never the unfiltered list.
 func (h *ConversationHandler) Seats(w http.ResponseWriter, r *http.Request) {
 	p, err := parseConvParams(r, false, false)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
+	}
+	q := r.URL.Query()
+	if q.Has("seat_keys") || q.Has("seat_key_like") {
+		p.SeatFilterSet = true
+		p.SeatKeys = splitSeatKeys(q.Get("seat_keys"))
+		p.SeatKeyLike = strings.TrimSpace(q.Get("seat_key_like"))
+		if len(p.SeatKeys) > maxSeatKeys {
+			shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS",
+				fmt.Sprintf("seat_keys accepts at most %d keys (got %d); narrow the search", maxSeatKeys, len(p.SeatKeys)))
+			return
+		}
 	}
 	data, total, err := h.repo.SeatSummaries(r.Context(), p)
 	if err != nil {

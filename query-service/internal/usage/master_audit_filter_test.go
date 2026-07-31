@@ -36,6 +36,7 @@ func TestMasterAuditFilters(t *testing.T) {
 		EventID: "ev-a", OrgID: "org1", SeatID: "seat1", CredentialID: "credA",
 		ProviderCode: "anthropic", ProtocolType: "anthropic_native",
 		Model: "claude-x", VirtualKeyID: "vk1", QualityStatus: "exact",
+		OAuthIdentity:  "alice@pool.example",
 		BillableAmount: &priced,
 		EventTimeMs:    ts, UsageDate: day, TotalTokens: 100,
 	})
@@ -71,6 +72,9 @@ func TestMasterAuditFilters(t *testing.T) {
 	}{
 		{"no filters (backward compat)", func(p *QueryParams) {}, []string{"ev-a", "ev-b", "ev-c"}},
 		{"seat", func(p *QueryParams) { p.SeatID = "seat1" }, []string{"ev-a", "ev-c"}},
+		// oauth_identity narrows to the one row carrying that pool-account
+		// email; rows with NULL identity (ev-b/ev-c) must not match.
+		{"oauth identity", func(p *QueryParams) { p.OAuthIdentity = "alice@pool.example" }, []string{"ev-a"}},
 		{"credential", func(p *QueryParams) { p.CredentialID = "credB" }, []string{"ev-b", "ev-c"}},
 		{"provider", func(p *QueryParams) { p.ProviderCode = "openai" }, []string{"ev-b"}},
 		{"model", func(p *QueryParams) { p.Model = "claude-x" }, []string{"ev-a", "ev-c"}},

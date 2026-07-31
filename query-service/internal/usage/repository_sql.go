@@ -1082,6 +1082,11 @@ var masterAuditFilterColumns = []struct {
 	clause string
 }{
 	{func(p QueryParams) string { return p.SeatID }, "d.seat_id = ?"},
+	// OAuth identity (20260729 follow-up): the audit table's "OAuth Account"
+	// column shows oauth_identity (pool-account email denormalized at event
+	// time) — filtering by credential alone can't answer "show me this pool
+	// account's calls" because one credential serves many identities.
+	{func(p QueryParams) string { return p.OAuthIdentity }, "d.oauth_identity = ?"},
 	{func(p QueryParams) string { return p.CredentialID }, "d.credential_id = ?"},
 	{func(p QueryParams) string { return p.ProviderCode }, "d.provider_code = ?"},
 	{func(p QueryParams) string { return p.Model }, "d.model = ?"},

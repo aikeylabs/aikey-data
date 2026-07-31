@@ -92,6 +92,42 @@ func appendDateRange(where string, args []any, p QueryParams) (string, []any) {
 	return where, args
 }
 
+// likeEscaper neutralises LIKE metacharacters so a literal '%' or '_' typed in
+// the search box matches itself instead of acting as a wildcard. Paired with
+// ESCAPE '\' below — valid on both PostgreSQL and SQLite.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// appendSeatFilter adds the seat-list search predicate: an exact-key IN list
+// (names the master facade resolved via its org_seats directory) OR'd with a
+// case-insensitive substring match on the seat key itself (rows whose key has no
+// directory entry are displayed by their raw key, so they must be searchable by
+// it — see QueryParams.SeatKeyLike). Both bind against seatKeyExpr, so seat_id
+// rows and legacy owner-only rows match alike.
+//
+// LOWER() on both sides rather than ILIKE: PostgreSQL LIKE is case-sensitive
+// while SQLite LIKE is not, so folding explicitly is the only way the two
+// dialects answer the same search identically.
+//
+// The "searched but nothing to match on" case never reaches SQL — SeatSummaries
+// returns the empty page before building the query.
+func appendSeatFilter(where string, args []any, p QueryParams) (string, []any) {
+	var terms []string
+	if n := len(p.SeatKeys); n > 0 {
+		terms = append(terms, seatKeyExpr+" IN (?"+strings.Repeat(",?", n-1)+")")
+		for _, k := range p.SeatKeys {
+			args = append(args, k)
+		}
+	}
+	if p.SeatKeyLike != "" {
+		terms = append(terms, "LOWER("+seatKeyExpr+") LIKE ? ESCAPE '\\'")
+		args = append(args, "%"+likeEscaper.Replace(strings.ToLower(p.SeatKeyLike))+"%")
+	}
+	if len(terms) == 0 {
+		return where, args
+	}
+	return where + " AND (" + strings.Join(terms, " OR ") + ")", args
+}
+
 // seatKeyExpr is the seat-dimension attribution key (2026-07-07, alpha.4):
 // prefer the explicit seat_id stamped by >=alpha.4 proxies (the same
 // route.SeatID usage events carry), fall back to owner_account_id for legacy
@@ -123,9 +159,15 @@ func (r *sqlRepo) countGroups(ctx context.Context, groupExpr, where string, args
 }
 
 func (r *sqlRepo) SeatSummaries(ctx context.Context, p QueryParams) ([]SeatSummary, int64, error) {
+	// Searched, but with nothing left to match on (no resolved key AND no term):
+	// definitively empty, no SQL. SeatFilterSet false = no search at all.
+	if p.SeatFilterSet && len(p.SeatKeys) == 0 && p.SeatKeyLike == "" {
+		return []SeatSummary{}, 0, nil
+	}
 	where := "org_id = ?"
 	args := []any{p.OrgID}
 	where, args = appendDateRange(where, args, p)
+	where, args = appendSeatFilter(where, args, p)
 	// Count BEFORE limit/offset join `args` — the count query has no LIMIT binds.
 	total, err := r.countGroups(ctx, seatKeyExpr, where, args)
 	if err != nil {

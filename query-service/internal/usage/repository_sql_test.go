@@ -191,6 +191,7 @@ type dwdRow struct {
 	CredentialID  string // empty → NULL
 	QualityStatus string // empty → "ok" (the long-standing fixture default)
 	AnomalyType   string // empty → NULL
+	OAuthIdentity string // empty → NULL
 }
 
 // odsIDSeq generates unique ods_id values per inserted DWD row so the
@@ -227,12 +228,15 @@ func insertDWD(t *testing.T, db *shared.DB, r dwdRow) {
 	if r.QualityStatus == "" {
 		r.QualityStatus = "ok"
 	}
-	var credentialArg, anomalyArg any
+	var credentialArg, anomalyArg, identityArg any
 	if r.CredentialID != "" {
 		credentialArg = r.CredentialID
 	}
 	if r.AnomalyType != "" {
 		anomalyArg = r.AnomalyType
+	}
+	if r.OAuthIdentity != "" {
+		identityArg = r.OAuthIdentity
 	}
 	// Priced row → store billable_amount + currency; unpriced row (nil)
 	// → NULL both, matching what the projector writes on a price miss.
@@ -255,8 +259,8 @@ func insertDWD(t *testing.T, db *shared.DB, r dwdRow) {
 			request_status, http_status_code, completion_source, quality_status,
 			billing_scope, user_usage_scope, projector_version,
 			app_slug, billable_amount, currency,
-			credential_id, anomaly_type
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			credential_id, anomaly_type, oauth_identity
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.EventID, r.RequestID, odsIDSeq, r.EventTimeMs, r.EventTimeMs, r.UsageDate,
 		r.OrgID, r.AccountID, r.SeatID, r.VirtualKeyID, r.VirtualKeyAlias,
 		r.ProviderCode, r.ProtocolType, modelArg,
@@ -265,7 +269,7 @@ func insertDWD(t *testing.T, db *shared.DB, r dwdRow) {
 		r.RequestStatus, r.HTTPStatusCode, "test", r.QualityStatus,
 		r.BillingScope, r.UserUsageScope, "test",
 		r.AppSlug, billableArg, currencyArg,
-		credentialArg, anomalyArg)
+		credentialArg, anomalyArg, identityArg)
 	if err != nil {
 		t.Fatalf("insertDWD %q: %v", r.EventID, err)
 	}

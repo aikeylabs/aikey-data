@@ -234,6 +234,109 @@ func TestListTotalsAreTenantScoped(t *testing.T) {
 	}
 }
 
+// Fences for the seat-list search filter (2026-07-31). The facade resolves
+// ?q=<name> against its org_seats directory and sends BOTH the resolved keys and
+// the RAW term, OR'd here. Invariants:
+//
+//	(1) a resolved key matches via seatKeyExpr — seat_id rows and legacy
+//	    owner-only rows alike;
+//	(2) the raw term matches the seat KEY as a case-insensitive substring, which
+//	    is what makes a seat with NO directory entry searchable by the very label
+//	    the console shows for it (regression: "demo-alice" visible in the list but
+//	    unfindable, reported 2026-07-31);
+//	(3) total moves WITH the filter (count and page share the where clause);
+//	(4) searched-but-nothing-to-match-on is an EMPTY page, not the unfiltered list;
+//	(5) LIKE metacharacters in the term are literal text, not wildcards.
+func TestSeatSummariesSeatSearchFilter(t *testing.T) {
+	db := newConvTestDB(t)
+	repo := NewSQLRepository(db)
+	ctx := context.Background()
+
+	// seat-b is a >=alpha.4 shape (seat_id set, owner = pool creator); the rest
+	// are legacy owner-only rows. demo-alice stands for a key with NO org_seats
+	// row — the console renders it by its raw key.
+	insertTurn(t, db, "k1", "2026-07-20", testOrg, "s1", "", "seat-a", 10, 1000)
+	insertTurn(t, db, "k2", "2026-07-20", testOrg, "s2", "seat-b", "pool-creator", 20, 2000)
+	insertTurn(t, db, "k3", "2026-07-20", testOrg, "s3", "", "demo-alice", 30, 3000)
+	insertTurn(t, db, "k4", "2026-07-20", testOrg, "s4", "", "demo-bob", 40, 4000)
+
+	search := func(t *testing.T, p QueryParams) ([]SeatSummary, int64) {
+		t.Helper()
+		p.OrgID, p.Limit = testOrg, 100
+		items, total, err := repo.SeatSummaries(ctx, p)
+		if err != nil {
+			t.Fatalf("SeatSummaries: %v", err)
+		}
+		if int64(len(items)) != total {
+			t.Errorf("len(items)=%d but total=%d — count and page disagree", len(items), total)
+		}
+		return items, total
+	}
+
+	t.Run("resolved keys match both row generations", func(t *testing.T) {
+		items, total := search(t, QueryParams{SeatKeys: []string{"seat-a", "seat-b"}, SeatFilterSet: true})
+		if total != 2 {
+			t.Fatalf("total = %d, want 2", total)
+		}
+		for _, it := range items {
+			if it.OwnerAccountID != "seat-a" && it.OwnerAccountID != "seat-b" {
+				t.Errorf("unexpected seat %q", it.OwnerAccountID)
+			}
+		}
+	})
+
+	t.Run("owner id of a seat_id row does not match", func(t *testing.T) {
+		// seatKeyExpr prefers seat_id, so the pool creator's id owns no seat here.
+		if _, total := search(t, QueryParams{SeatKeys: []string{"pool-creator"}, SeatFilterSet: true}); total != 0 {
+			t.Errorf("total = %d, want 0", total)
+		}
+	})
+
+	t.Run("raw term finds a directory-less seat by its displayed key", func(t *testing.T) {
+		// THE REGRESSION: no org_seats row → facade resolves zero keys → only the
+		// raw term can match. Case-insensitive, substring.
+		items, total := search(t, QueryParams{SeatKeyLike: "DEMO-ALICE", SeatFilterSet: true})
+		if total != 1 || items[0].OwnerAccountID != "demo-alice" {
+			t.Fatalf("total=%d items=%v, want exactly demo-alice", total, items)
+		}
+		// A shared prefix matches every such seat — substring, not equality.
+		if _, total := search(t, QueryParams{SeatKeyLike: "demo-", SeatFilterSet: true}); total != 2 {
+			t.Errorf("prefix search total = %d, want 2 (demo-alice + demo-bob)", total)
+		}
+	})
+
+	t.Run("resolved keys OR raw term", func(t *testing.T) {
+		// An alias hit (seat-a) and a raw-key hit (demo-alice) surface together —
+		// the admin searched one word and both label origins answered.
+		if _, total := search(t, QueryParams{
+			SeatKeys: []string{"seat-a"}, SeatKeyLike: "demo-alice", SeatFilterSet: true,
+		}); total != 2 {
+			t.Errorf("union total = %d, want 2", total)
+		}
+	})
+
+	t.Run("LIKE metacharacters are literal", func(t *testing.T) {
+		if _, total := search(t, QueryParams{SeatKeyLike: "%", SeatFilterSet: true}); total != 0 {
+			t.Errorf("%% matched %d seats, want 0 (escaped, not a wildcard)", total)
+		}
+		if _, total := search(t, QueryParams{SeatKeyLike: "demo_alice", SeatFilterSet: true}); total != 0 {
+			t.Errorf("_ matched %d seats, want 0 (escaped, not any-char)", total)
+		}
+	})
+
+	t.Run("searched with nothing to match on is empty, not everyone", func(t *testing.T) {
+		if _, total := search(t, QueryParams{SeatFilterSet: true}); total != 0 {
+			t.Errorf("total = %d, want 0 (NOT the unfiltered list)", total)
+		}
+	})
+
+	t.Run("no search stays the full list", func(t *testing.T) {
+		if _, total := search(t, QueryParams{}); total != 4 {
+			t.Errorf("unfiltered total = %d, want 4", total)
+		}
+	})
+}
+
 func TestEffectiveListLimit(t *testing.T) {
 	// The HTTP envelope echoes this as the page size in effect, so the console and
 	// the server must agree on what an unset/absurd ?limit= resolves to.
