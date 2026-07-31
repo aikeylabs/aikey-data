@@ -99,6 +99,15 @@ type Repository interface {
 	// Filters: billing_scope IN ('org_only','org_and_user')
 	//          AND user_usage_scope <> 'non_generation'
 	MasterByProtocolTotal(ctx context.Context, p QueryParams) ([]ProtocolTotal, error)
+	// MasterUpstreamStepArounds counts requests that reached an upstream by
+	// switching to it, grouped by (provider, reason). Feeds the console's
+	// "recently stepped around" line (task 4.5b).
+	MasterUpstreamStepArounds(ctx context.Context, p QueryParams) ([]UpstreamStepAround, error)
+
+	// MasterUpstreamLatency reports the org's observed upstream response-time
+	// P95, so the console can warn when a configured single-attempt limit would
+	// classify normal slowness as upstream failure (task 5.7).
+	MasterUpstreamLatency(ctx context.Context, p QueryParams) (UpstreamLatency, error)
 
 	// MasterTimeline returns daily total_tokens for the entire org.
 	// Filters: billing_scope IN ('org_only','org_and_user')

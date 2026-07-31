@@ -3,6 +3,8 @@ package ingest
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/AiKeyLabs/aikey-config-tool/pkg/dbmigrate"
@@ -199,5 +201,57 @@ func TestContentHash_ConflictOnDuplicate(t *testing.T) {
 	_, _, ch := disposition(t, db, "h-dup")
 	if !ch.Valid || ch.String != h1 {
 		t.Fatalf("stored hash=%v, want the FIRST %s (never silently pick the second)", ch, h1)
+	}
+}
+
+// 🔴 The two upstream-fallback fields must be DECLARED on UsageEvent, not merely
+// present on the wire (openspec `aliyun-aigw-p0-upstream-fallback`, task 3.7).
+//
+// raw_event_json is a re-marshal of the UsageEvent struct, NOT the verbatim wire
+// bytes — so a field the struct does not declare is dropped before anything
+// touches disk. The proxy has been sending both since P3; until they were
+// declared they were being discarded here, silently, which is the difference
+// between "the collector has not projected them yet" and "the data never
+// existed". A wire round-trip is the only check that can tell those apart.
+func TestUsageEventKeepsFallbackAttributionThroughAWireRoundTrip(t *testing.T) {
+	const wire = `{"event_id":"e1","org_id":"o1","fallback_reason":"UPSTREAM_5XX","fallback_attempt":2}`
+
+	var e UsageEvent
+	if err := json.Unmarshal([]byte(wire), &e); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if e.FallbackReason != "UPSTREAM_5XX" {
+		t.Errorf("FallbackReason = %q, want UPSTREAM_5XX — an undeclared field is dropped here", e.FallbackReason)
+	}
+	if e.FallbackAttempt == nil || *e.FallbackAttempt != 2 {
+		t.Fatalf("FallbackAttempt = %v, want 2", e.FallbackAttempt)
+	}
+
+	// And back out again, because raw_event_json is produced by marshalling this
+	// struct: a field that survives Unmarshal but is not emitted is still lost.
+	out, err := json.Marshal(&e)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"fallback_reason":"UPSTREAM_5XX"`, `"fallback_attempt":2`} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("re-marshalled event is missing %s\ngot: %s", want, out)
+		}
+	}
+
+	// 🔴 An event with no attempt number must emit NOTHING for it, so the column
+	// receives NULL. Emitting 0 or 1 would turn "the sender said nothing" into a
+	// measurement, and every count over that column would then be wrong in a way
+	// no query could detect.
+	var silent UsageEvent
+	if err := json.Unmarshal([]byte(`{"event_id":"e2"}`), &silent); err != nil {
+		t.Fatalf("unmarshal silent: %v", err)
+	}
+	if silent.FallbackAttempt != nil {
+		t.Errorf("FallbackAttempt = %v for an event that carried none; want nil", silent.FallbackAttempt)
+	}
+	quiet, _ := json.Marshal(&silent)
+	if strings.Contains(string(quiet), "fallback_attempt") {
+		t.Errorf("an event with no attempt number still emits the field: %s", quiet)
 	}
 }

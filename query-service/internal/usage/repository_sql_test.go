@@ -100,6 +100,10 @@ func setupUsageTestDB(t *testing.T) *shared.DB {
 		// aikey-config-tool/pkg/dbmigrate/versions/v1_0_1_alpha5_dwd_request_id.go
 		`ALTER TABLE usage_fact_dwd  ADD COLUMN request_id TEXT`,
 		`CREATE INDEX IF NOT EXISTS idx_dwd_org_request_id ON usage_fact_dwd (org_id, request_id) WHERE request_id IS NOT NULL AND request_id != ''`,
+		// aikey-config-tool/pkg/dbmigrate/versions/v1_0_1_alpha5_dwd_fallback_attribution.go
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN fallback_reason TEXT`,
+		`ALTER TABLE usage_fact_dwd  ADD COLUMN fallback_attempt INTEGER`,
+		`CREATE INDEX IF NOT EXISTS idx_dwd_fallback_recent ON usage_fact_dwd (org_id, occurred_at, provider_code) WHERE fallback_attempt IS NOT NULL AND fallback_attempt > 1`,
 		usageReportingViewFixtureSQL,
 	}
 	for _, stmt := range postBaseline {
@@ -1400,5 +1404,75 @@ func TestPersonalByModelTotal_FiltersBySession(t *testing.T) {
 	// Both events use Model "claude-3-7", so filter narrows to one model row of 500 tokens.
 	if len(rows) != 1 || rows[0].TotalTokens != 500 {
 		t.Fatalf("SessionID filter leak: want 1 row of 500 tokens, got %+v", rows)
+	}
+}
+
+// 🔴 "Which upstreams did we switch to lately, and why" (openspec change
+// `aliyun-aigw-p0-upstream-fallback`, task 4.5b).
+//
+// The console is forbidden from seeing the live cooldown table — it never leaves
+// the developer's machine (I23) — so this aggregate is the only form the question
+// can take. Two things have to be right or it misleads in opposite directions:
+// a row with NULL attempt must NOT be counted as a switch (it predates the
+// field), and a row with attempt=1 must NOT be counted either (the primary served
+// it, which is the healthy case and by far the most common).
+func TestMasterUpstreamStepArounds(t *testing.T) {
+	db := setupUsageTestDB(t)
+	day, _ := time.Parse("2006-01-02", "2026-07-20")
+	base, _ := time.Parse(time.RFC3339, "2026-07-20T10:00:00Z")
+	baseMs := base.UnixMilli()
+
+	seed := func(id, provider string, attempt any, reason any, offsetMin int64) {
+		insertDWD(t, db, dwdRow{
+			EventID: id, OrgID: "org1", SeatID: "seat1",
+			EventTimeMs: baseMs + offsetMin*60_000, UsageDate: "2026-07-20",
+			ProviderCode: provider, ProtocolType: "anthropic", Model: "claude",
+			RequestCount: 1, TotalTokens: 10, BillingScope: "org_only", UserUsageScope: "none",
+		})
+		if _, err := db.DB.Exec(
+			`UPDATE usage_fact_dwd SET fallback_attempt = ?, fallback_reason = ? WHERE event_id = ?`,
+			attempt, reason, id); err != nil {
+			t.Fatalf("stamp %s: %v", id, err)
+		}
+	}
+
+	seed("e-primary", "anthropic", 1, nil, 0)         // primary served it — not a switch
+	seed("e-legacy", "anthropic", nil, nil, 1)        // written before the field existed
+	seed("e-switch-1", "zhipu", 2, "UPSTREAM_5XX", 2) // switched
+	seed("e-switch-2", "zhipu", 2, "UPSTREAM_5XX", 3)
+	seed("e-switch-3", "zhipu", 3, "UPSTREAM_TIMEOUT", 4)
+
+	repo := NewSQLRepository(db)
+	got, err := repo.MasterUpstreamStepArounds(context.Background(), QueryParams{
+		OrgID: "org1", StartDate: day, EndDate: day,
+	})
+	if err != nil {
+		t.Fatalf("MasterUpstreamStepArounds: %v", err)
+	}
+
+	total := int64(0)
+	for _, s := range got {
+		total += s.Switches
+		if s.ProviderCode == "anthropic" {
+			t.Errorf("the primary-served and legacy rows were counted as switches: %+v", s)
+		}
+	}
+	if total != 3 {
+		t.Fatalf("counted %d switches across %+v, want 3", total, got)
+	}
+
+	byReason := map[string]int64{}
+	var last int64
+	for _, s := range got {
+		byReason[s.Reason] = s.Switches
+		if s.LastAt > last {
+			last = s.LastAt
+		}
+	}
+	if byReason["UPSTREAM_5XX"] != 2 || byReason["UPSTREAM_TIMEOUT"] != 1 {
+		t.Errorf("per-reason counts = %v, want 5XX:2 TIMEOUT:1", byReason)
+	}
+	if last != baseMs+4*60_000 {
+		t.Errorf("last_at = %d, want the most recent switch (%d)", last, baseMs+4*60_000)
 	}
 }

@@ -41,6 +41,7 @@ SELECT ods_id, event_id, request_id, event_time, occurred_at,
        region, endpoint_url,
        oauth_identity,
        content_hash, source_id, source_seq,
+       fallback_reason, fallback_attempt,
        %s AS request_path
 FROM usage_event_ods
 WHERE ((dwd_status = 'pending')
@@ -86,6 +87,7 @@ func (r *sqlODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord
 			&rec.Region, &rec.EndpointURL,
 			&rec.OAuthIdentity,
 			&rec.ContentHash, &rec.SourceID, &rec.SourceSeq,
+			&rec.FallbackReason, &rec.FallbackAttempt,
 			&rec.RequestPath,
 		); err != nil {
 			return nil, fmt.Errorf("scan ods row: %w", err)
@@ -233,7 +235,8 @@ const dwdColumns = `event_id, request_id, ods_id, occurred_at, event_time, usage
     app_slug, session_id,
     region, endpoint_url, billing_period, unit_prices_snapshot, pricing_snapshot_id,
     oauth_identity,
-    content_hash, source_id, source_seq`
+    content_hash, source_id, source_seq,
+    fallback_reason, fallback_attempt`
 
 const dwdPlaceholders = `?,?,?,?,?,?,
     ?,?,?,
@@ -252,7 +255,8 @@ const dwdPlaceholders = `?,?,?,?,?,?,
     ?,?,
     ?,?,?,?,?,
     ?,
-    ?,?,?`
+    ?,?,?,
+    ?,?`
 
 func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 	// Dialect-aware conflict target: PostgreSQL's usage_fact_dwd is partitioned
@@ -310,6 +314,13 @@ func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 		// source_seq carried ODS→DWD for the usage-audit export's tamper/gap
 		// evidence. SourceSeq is *int64 → binds SQL NULL for old-proxy events.
 		f.ContentHash, f.SourceID, f.SourceSeq,
+		// Upstream fallback attribution: which hop served this row, and what sent
+		// us to it. Carried verbatim ODS→DWD so the console can aggregate over the
+		// read model — the LIVE cooldown table never leaves the developer's
+		// machine (I23), so a count of past switches is the only thing the console
+		// may be shown. FallbackAttempt is *int64 → binds SQL NULL for rows
+		// written before the field existed.
+		f.FallbackReason, f.FallbackAttempt,
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert dwd fact %s: %w", f.EventID, err)

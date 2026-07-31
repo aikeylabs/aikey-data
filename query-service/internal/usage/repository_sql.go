@@ -1185,3 +1185,107 @@ func scanProtocolTotal(rows *sql.Rows) ([]ProtocolTotal, error) {
 	}
 	return result, rows.Err()
 }
+
+// MasterUpstreamStepArounds answers "which upstreams did we switch to lately, and
+// why" (openspec change `aliyun-aigw-p0-upstream-fallback`, task 4.5b).
+//
+// # 🔴 `fallback_attempt > 1`, and why NULL must not be swept in
+//
+// A row with NULL was written before the field existed. Treating NULL as 1 would
+// silently classify all historical traffic as primary-served — accidentally right
+// today and permanently unrecoverable — while treating it as a switch would
+// invent switches that never happened. It is neither, so it is excluded, and the
+// count is honestly "switches we have a record of".
+//
+// # 🔴 Reads usage_fact_dwd, not usage_reporting_fact
+//
+// The reporting view collapses a failover chain to ONE client request (Order
+// 11060), which is exactly right for billing and exactly wrong here: this
+// question is about upstream attempts, and the view's whole job is to hide them.
+func (r *sqlRepo) MasterUpstreamStepArounds(ctx context.Context, p QueryParams) ([]UpstreamStepAround, error) {
+	startMs, endMs := p.LocalWindowMs()
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT COALESCE(provider_code, ''), COALESCE(fallback_reason, ''),
+		       COUNT(*), COALESCE(MAX(event_time), 0)
+		FROM usage_fact_dwd
+		WHERE org_id = ?
+		  AND event_time >= ? AND event_time < ?
+		  AND fallback_attempt IS NOT NULL AND fallback_attempt > 1
+		GROUP BY COALESCE(provider_code, ''), COALESCE(fallback_reason, '')
+		ORDER BY COUNT(*) DESC`,
+		p.OrgID, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
+	if err != nil {
+		return nil, fmt.Errorf("master upstream step-arounds: %w", err)
+	}
+	defer rows.Close()
+	var out []UpstreamStepAround
+	for rows.Next() {
+		var s UpstreamStepAround
+		if err := rows.Scan(&s.ProviderCode, &s.Reason, &s.Switches, &s.LastAt); err != nil {
+			return nil, fmt.Errorf("scan upstream step-around: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// MasterUpstreamLatency computes the org's observed upstream response-time P95
+// (openspec change `aliyun-aigw-p0-upstream-fallback`, task 5.7).
+//
+// # 🔴 Two queries, not `percentile_cont`
+//
+// The aggregate exists on Postgres and not on SQLite, and this repository serves
+// both dialects from one code path. Branching would give the two editions
+// different arithmetic for a number an administrator is about to set a threshold
+// from — and the disagreement would surface as "the warning says something
+// different on my laptop", which is the hardest kind of report to act on.
+//
+// Counting first and then taking one row at an OFFSET is exact, identical on
+// both dialects, and bounded: the OFFSET is resolved server-side, so nothing
+// proportional to the window is transferred.
+//
+// # 🔴 Only rows that reached an upstream
+//
+// A request rejected before dial has no upstream latency; including its zero
+// would drag the percentile toward zero and produce the most dangerous possible
+// advice — "your upstreams are fast, a short limit is fine".
+func (r *sqlRepo) MasterUpstreamLatency(ctx context.Context, p QueryParams) (UpstreamLatency, error) {
+	startMs, endMs := p.LocalWindowMs()
+	latency := r.db.LatencyMillis("started_at", "finished_at")
+	const windowDays = 7
+
+	where := fmt.Sprintf(`
+		FROM usage_fact_ods
+		WHERE org_id = ?
+		  AND event_time >= ? AND event_time < ?
+		  AND started_at IS NOT NULL AND finished_at IS NOT NULL
+		  AND %s > 0`, latency)
+	args := []any{p.OrgID, r.db.BindMillis(startMs), r.db.BindMillis(endMs)}
+
+	var n int64
+	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) "+where, args...).Scan(&n); err != nil {
+		return UpstreamLatency{}, fmt.Errorf("master upstream latency count: %w", err)
+	}
+	if n == 0 {
+		// 🔴 Zero samples, zero P95 — and the caller must read those together.
+		// "P95 = 0" alone says "instant", which is the opposite of "we do not
+		// know", and it is the reading that would suppress the warning entirely.
+		return UpstreamLatency{Samples: 0, WindowDays: windowDays}, nil
+	}
+
+	// Index of the 95th percentile in ascending order, clamped into range. For
+	// small n this lands on the slowest sample, which is the honest answer for a
+	// distribution that small — and `Samples` travels alongside so the console
+	// can decline to draw a conclusion from it.
+	idx := (n * 95) / 100
+	if idx >= n {
+		idx = n - 1
+	}
+
+	var p95 int64
+	q := fmt.Sprintf("SELECT %s AS lat %s ORDER BY lat ASC LIMIT 1 OFFSET ?", latency, where)
+	if err := r.db.QueryRowContext(ctx, q, append(args, idx)...).Scan(&p95); err != nil {
+		return UpstreamLatency{}, fmt.Errorf("master upstream latency p95: %w", err)
+	}
+	return UpstreamLatency{P95Ms: p95, Samples: n, WindowDays: windowDays}, nil
+}

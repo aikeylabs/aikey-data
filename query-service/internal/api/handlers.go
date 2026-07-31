@@ -419,6 +419,59 @@ func (h *UsageHandler) MasterByProtocolTotal(w http.ResponseWriter, r *http.Requ
 	shared.JSON(w, http.StatusOK, data)
 }
 
+// MasterUpstreamLatency handles
+// GET /v1/usage/master/upstream-latency?org_id=...&start_date=...&end_date=...
+//
+// 🔴 It answers a question the console asks BEFORE a save, not during a request
+// (P5.4): the single-attempt wait limit is about to be set, and the operator
+// should know what their upstreams actually do before choosing a number.
+func (h *UsageHandler) MasterUpstreamLatency(w http.ResponseWriter, r *http.Request) {
+	p, err := parseMasterParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	data, err := h.repo.MasterUpstreamLatency(r.Context(), p)
+	if err != nil {
+		slog.Error("MasterUpstreamLatency query failed", "error", err)
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	// 🔴 Always 200 with `samples`. An org with no traffic yet is a normal state,
+	// and a 404 would make the threshold page render an error for a healthy new
+	// customer. The caller decides what to do with zero samples; it is not the
+	// same as a fast P95 and must not be reported as one.
+	shared.JSON(w, http.StatusOK, data)
+}
+
+// MasterUpstreamStepArounds handles
+// GET /v1/usage/master/upstream-step-arounds?org_id=...&start_date=...&end_date=...
+//
+// 🔴 It returns a COUNT of past switches, never a countdown. The live cooldown
+// table stays on the developer's machine (I23) — derived numbers may travel,
+// living state may not — so "stepped around 12 times in this window, reason
+// UPSTREAM_5XX" is the strongest honest form of task 4.5b's question.
+func (h *UsageHandler) MasterUpstreamStepArounds(w http.ResponseWriter, r *http.Request) {
+	p, err := parseMasterParams(r)
+	if err != nil {
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
+		return
+	}
+	data, err := h.repo.MasterUpstreamStepArounds(r.Context(), p)
+	if err != nil {
+		slog.Error("MasterUpstreamStepArounds query failed", "error", err)
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	if data == nil {
+		// 🔴 An empty list, never 404 or null. "No switches in this window" is a
+		// real and common answer — the healthy one — and the console renders it as
+		// such; a 404 would make the page show an error for a healthy fleet.
+		data = []usage.UpstreamStepAround{}
+	}
+	shared.JSON(w, http.StatusOK, data)
+}
+
 // GET /v1/usage/master/timeline?org_id=...&start_date=...&end_date=...
 func (h *UsageHandler) MasterTimeline(w http.ResponseWriter, r *http.Request) {
 	p, err := parseMasterParams(r)
