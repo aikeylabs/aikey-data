@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/shared"
 	"github.com/AiKeyLabs/pkg/aikeytime"
@@ -1117,14 +1118,32 @@ func masterAuditWhere(p QueryParams) (string, []any) {
 	case "unpriced":
 		where += " AND d.billable_amount IS NULL"
 	}
+	// Keyword fuzzy filter (20260729 查询分页): case-insensitive substring
+	// across the columns the audit table RENDERS. LOWER(..) LIKE works on both
+	// dialects. Escape LIKE metacharacters so a literal '%'/'_' in the query
+	// matches itself instead of widening the match.
+	if p.Keyword != "" {
+		kw := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(strings.ToLower(p.Keyword))
+		pat := "%" + kw + "%"
+		where += ` AND (LOWER(COALESCE(d.oauth_identity,'')) LIKE ? ESCAPE '\'
+			OR LOWER(COALESCE(d.provider_code,'')) LIKE ? ESCAPE '\'
+			OR LOWER(COALESCE(d.model,'')) LIKE ? ESCAPE '\'
+			OR LOWER(COALESCE(d.quality_status,'')) LIKE ? ESCAPE '\'
+			OR LOWER(COALESCE(s.alias,'')) LIKE ? ESCAPE '\'
+			OR LOWER(COALESCE(s.invited_email,'')) LIKE ? ESCAPE '\')`
+		args = append(args, pat, pat, pat, pat, pat, pat)
+	}
 	return where, args
 }
 
 func (r *sqlRepo) MasterUsageDetail(ctx context.Context, p QueryParams) ([]MasterUsageAuditRow, error) {
 	where, args := masterAuditWhere(p)
-	args = append(args, p.Limit)
+	// True server pagination (20260729 查询分页): LIMIT+OFFSET with a stable
+	// ORDER BY. Offset-style is fine here — the window is capped at 31 days
+	// and partition-pruned, so deep offsets stay bounded.
+	args = append(args, p.Limit, p.Offset)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(
-		`SELECT %s FROM %s WHERE %s ORDER BY d.event_time DESC LIMIT ?`,
+		`SELECT %s FROM %s WHERE %s ORDER BY d.event_time DESC, d.event_id DESC LIMIT ? OFFSET ?`,
 		masterAuditSelect(r.db), masterAuditFrom, where), args...)
 	if err != nil {
 		return nil, fmt.Errorf("master usage detail: %w", err)
@@ -1139,6 +1158,92 @@ func (r *sqlRepo) MasterUsageDetail(ctx context.Context, p QueryParams) ([]Maste
 		result = append(result, *a)
 	}
 	return result, rows.Err()
+}
+
+// MasterUsageDetailTotal returns the full match count for the SAME scope as
+// MasterUsageDetail (shared masterAuditWhere) — the real total behind the
+// paginated window, so the page shows an honest count instead of a truncation
+// banner.
+func (r *sqlRepo) MasterUsageDetailTotal(ctx context.Context, p QueryParams) (int64, error) {
+	where, args := masterAuditWhere(p)
+	var total int64
+	if err := r.db.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT COUNT(*) FROM %s WHERE %s`, masterAuditFrom, where), args...).Scan(&total); err != nil {
+		return 0, fmt.Errorf("master usage detail total: %w", err)
+	}
+	return total, nil
+}
+
+// masterAuditFacetColumns: the row-derived filter dimensions whose option
+// lists the FE can no longer compute client-side once TRUE pagination ships
+// (the browser only holds one page). Keys match the FE dimension keys.
+var masterAuditFacetColumns = []struct {
+	Key    string
+	Column string
+}{
+	{"identity", "d.oauth_identity"},
+	{"model", "d.model"},
+	{"vk", "d.virtual_key_id"},
+	{"protocol", "d.protocol_type"},
+	{"anomaly", "d.anomaly_type"},
+}
+
+const masterAuditFacetLimit = 200 // bound each facet payload; freeText covers the tail
+
+// facetParamsExcluding clears the facet dimension's OWN filter — the standard
+// faceted-search rule: a dimension's option list must show the ALTERNATIVES to
+// the current pick under the OTHER conditions, not just the pick itself.
+// Without this, applying e.g. an identity token collapsed the identity facet
+// to that one value and the chip-click "adjust in place" flow had nothing to
+// offer (user report 2026-07-29). Other dimensions keep narrowing normally.
+func facetParamsExcluding(p QueryParams, key string) QueryParams {
+	switch key {
+	case "identity":
+		p.OAuthIdentity = ""
+	case "model":
+		p.Model = ""
+	case "vk":
+		p.VirtualKeyID = ""
+	case "protocol":
+		p.Protocol = ""
+	case "anomaly":
+		p.AnomalyType = ""
+	}
+	return p
+}
+
+// MasterUsageDetailFacets returns distinct values per row-derived dimension.
+// Each facet's scope = the full filter set MINUS that dimension's own filter
+// (see facetParamsExcluding). Requested only when the filter set changes (not
+// per page flip).
+func (r *sqlRepo) MasterUsageDetailFacets(ctx context.Context, p QueryParams) (map[string][]string, error) {
+	out := make(map[string][]string, len(masterAuditFacetColumns))
+	for _, f := range masterAuditFacetColumns {
+		where, args := masterAuditWhere(facetParamsExcluding(p, f.Key))
+		args = append(args, masterAuditFacetLimit)
+		rows, err := r.db.QueryContext(ctx, fmt.Sprintf(
+			`SELECT DISTINCT %s FROM %s WHERE %s AND %s IS NOT NULL AND %s <> '' ORDER BY %s LIMIT ?`,
+			f.Column, masterAuditFrom, where, f.Column, f.Column, f.Column), args...)
+		if err != nil {
+			return nil, fmt.Errorf("master usage facet %s: %w", f.Key, err)
+		}
+		vals := []string{}
+		for rows.Next() {
+			var v string
+			if err := rows.Scan(&v); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			vals = append(vals, v)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+		out[f.Key] = vals
+	}
+	return out, nil
 }
 
 func (r *sqlRepo) StreamMasterUsageExport(ctx context.Context, p QueryParams, fn func(*MasterUsageAuditRow) error) error {

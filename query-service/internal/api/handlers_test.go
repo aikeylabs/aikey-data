@@ -87,6 +87,14 @@ func (m *mockRepo) MasterUsageDetail(_ context.Context, p usage.QueryParams) ([]
 	}, nil
 }
 
+func (m *mockRepo) MasterUsageDetailTotal(_ context.Context, p usage.QueryParams) (int64, error) {
+	return 1, nil
+}
+
+func (m *mockRepo) MasterUsageDetailFacets(_ context.Context, p usage.QueryParams) (map[string][]string, error) {
+	return map[string][]string{"model": {"claude-sonnet-4-6"}}, nil
+}
+
 func (m *mockRepo) StreamMasterUsageExport(_ context.Context, p usage.QueryParams, fn func(*usage.MasterUsageAuditRow) error) error {
 	return fn(&usage.MasterUsageAuditRow{EventID: "evt-1", SeatID: "seat-1", ProviderCode: "anthropic", TotalTokens: 1200, UsageDate: "2026-06-08"})
 }

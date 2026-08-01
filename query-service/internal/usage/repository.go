@@ -123,6 +123,14 @@ type Repository interface {
 	// excluded/abnormal anomaly rows deliberately KEPT — auditors need them).
 	MasterUsageDetail(ctx context.Context, p QueryParams) ([]MasterUsageAuditRow, error)
 
+	// MasterUsageDetailTotal / MasterUsageDetailFacets (20260729 查询分页):
+	// total = COUNT(*) for the same scope (honest pagination total); facets =
+	// distinct values per row-derived dimension for the FE option lists (the
+	// browser only holds one page under true pagination). All three share
+	// masterAuditWhere so their scopes can never diverge.
+	MasterUsageDetailTotal(ctx context.Context, p QueryParams) (int64, error)
+	MasterUsageDetailFacets(ctx context.Context, p QueryParams) (map[string][]string, error)
+
 	// StreamMasterUsageExport streams every audit row for one org within
 	// [p.StartDate, p.EndDate] (inclusive, by usage_date) to fn, one row at a
 	// time via a DB cursor — memory stays O(1) regardless of range size so a

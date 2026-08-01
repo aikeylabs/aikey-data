@@ -456,6 +456,17 @@ type QueryParams struct {
 	// two bools, so a single field decides the switch. The personal-page
 	// Unpriced bool above predates this and stays untouched (frozen surface).
 	Billing string
+	// Keyword (20260729 查询分页): free-text fuzzy filter — case-insensitive
+	// substring across oauth_identity / provider_code / model / quality_status
+	// / seat alias. Server-side because the audit page uses TRUE server
+	// pagination: a client-side fuzzy pass over one 20-row page would be
+	// meaningless. Shared by detail and export via masterAuditWhere.
+	Keyword string
+	// Offset for server pagination of MasterUsageDetail (LIMIT p.Limit OFFSET
+	// p.Offset). Offset-style (not keyset) because the page window is capped
+	// at 31 days + partition pruning bounds the scan, and the UI needs
+	// numbered pages + a real total.
+	Offset int
 
 	// TZ is the IANA name (e.g. "Asia/Shanghai") of the caller's
 	// local time zone. Empty = UTC. Used to bucket per-day / per-hour

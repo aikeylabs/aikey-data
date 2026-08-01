@@ -509,6 +509,7 @@ func parseMasterAuditFilters(p *usage.QueryParams, r *http.Request) error {
 	p.VirtualKeyID = q.Get("key")
 	p.Protocol = q.Get("protocol")
 	p.AnomalyType = q.Get("anomaly")
+	p.Keyword = q.Get("q") // fuzzy keyword — shared by detail AND export
 	switch b := q.Get("priced"); b {
 	case "", "priced", "unpriced":
 		p.Billing = b
@@ -569,7 +570,7 @@ func (h *UsageHandler) MasterUsageDetail(w http.ResponseWriter, r *http.Request)
 		p.StartDate = now.AddDate(0, 0, -(days - 1))
 	}
 	limit := 1000
-	if l := r.URL.Query().Get("limit"); l != "" {
+	if l := q.Get("limit"); l != "" {
 		if n, e := strconv.Atoi(l); e == nil && n > 0 {
 			limit = n
 		}
@@ -578,6 +579,13 @@ func (h *UsageHandler) MasterUsageDetail(w http.ResponseWriter, r *http.Request)
 		limit = 5000
 	}
 	p.Limit = limit
+	// True server pagination (20260729 查询分页): offset defaults to 0 so a
+	// pre-pagination client keeps its exact old behaviour (first `limit` rows).
+	if o := q.Get("offset"); o != "" {
+		if n, e := strconv.Atoi(o); e == nil && n >= 0 {
+			p.Offset = n
+		}
+	}
 
 	data, err := h.repo.MasterUsageDetail(r.Context(), p)
 	if err != nil {
@@ -588,7 +596,25 @@ func (h *UsageHandler) MasterUsageDetail(w http.ResponseWriter, r *http.Request)
 	if data == nil {
 		data = []usage.MasterUsageAuditRow{}
 	}
-	shared.JSON(w, http.StatusOK, map[string]any{"rows": data})
+	total, err := h.repo.MasterUsageDetailTotal(r.Context(), p)
+	if err != nil {
+		slog.Error("MasterUsageDetailTotal query failed", "error", err)
+		shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+		return
+	}
+	resp := map[string]any{"rows": data, "total": total}
+	// Facets are requested only when the FE's filter set changes (page 1
+	// loads), not on every page flip — 5 bounded DISTINCT queries.
+	if q.Get("include_facets") == "1" {
+		facets, err := h.repo.MasterUsageDetailFacets(r.Context(), p)
+		if err != nil {
+			slog.Error("MasterUsageDetailFacets query failed", "error", err)
+			shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
+			return
+		}
+		resp["facets"] = facets
+	}
+	shared.JSON(w, http.StatusOK, resp)
 }
 
 // GET /v1/usage/master/export?org_id=...&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
