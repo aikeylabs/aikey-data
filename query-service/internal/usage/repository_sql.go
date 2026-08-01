@@ -1136,6 +1136,46 @@ func masterAuditWhere(p QueryParams) (string, []any) {
 	return where, args
 }
 
+// masterAuditSortColumns whitelists the sortable columns (20260801 排序): the
+// key the FE sends → the SQL expression. A map lookup, NEVER interpolation of
+// caller input, so ORDER BY stays injection-proof. Expressions COALESCE
+// nullable columns so both dialects order deterministically (cost: unpriced
+// rows coalesce to -1 — below every real amount, so asc leads with unpriced
+// and desc ends with them).
+var masterAuditSortColumns = map[string]string{
+	"time":     "d.event_time",
+	"seat":     "COALESCE(s.alias, s.invited_email, d.seat_id)",
+	"identity": "COALESCE(d.oauth_identity,'')",
+	"provider": "COALESCE(d.provider_code,'')",
+	"model":    "COALESCE(d.model,'')",
+	"tokens":   "d.total_tokens",
+	"cost":     "COALESCE(d.billable_amount, -1)",
+	"quality":  "COALESCE(d.quality_status,'')",
+}
+
+// ValidMasterAuditSortKey reports whether the FE-supplied sort key is in the
+// whitelist — the handler rejects unknown keys loudly instead of silently
+// falling back.
+func ValidMasterAuditSortKey(k string) bool {
+	_, ok := masterAuditSortColumns[k]
+	return ok
+}
+
+// masterAuditOrderBy resolves the ORDER BY clause. The event_time/event_id
+// tail keeps pagination stable (no row can straddle two pages) even when the
+// primary sort expression has ties.
+func masterAuditOrderBy(p QueryParams) string {
+	expr, ok := masterAuditSortColumns[p.SortBy]
+	if !ok {
+		return "d.event_time DESC, d.event_id DESC"
+	}
+	dir := "DESC"
+	if p.SortDir == "asc" {
+		dir = "ASC"
+	}
+	return fmt.Sprintf("%s %s, d.event_time DESC, d.event_id DESC", expr, dir)
+}
+
 func (r *sqlRepo) MasterUsageDetail(ctx context.Context, p QueryParams) ([]MasterUsageAuditRow, error) {
 	where, args := masterAuditWhere(p)
 	// True server pagination (20260729 查询分页): LIMIT+OFFSET with a stable
@@ -1143,8 +1183,8 @@ func (r *sqlRepo) MasterUsageDetail(ctx context.Context, p QueryParams) ([]Maste
 	// and partition-pruned, so deep offsets stay bounded.
 	args = append(args, p.Limit, p.Offset)
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(
-		`SELECT %s FROM %s WHERE %s ORDER BY d.event_time DESC, d.event_id DESC LIMIT ? OFFSET ?`,
-		masterAuditSelect(r.db), masterAuditFrom, where), args...)
+		`SELECT %s FROM %s WHERE %s ORDER BY %s LIMIT ? OFFSET ?`,
+		masterAuditSelect(r.db), masterAuditFrom, where, masterAuditOrderBy(p)), args...)
 	if err != nil {
 		return nil, fmt.Errorf("master usage detail: %w", err)
 	}

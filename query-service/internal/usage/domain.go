@@ -467,6 +467,13 @@ type QueryParams struct {
 	// at 31 days + partition pruning bounds the scan, and the UI needs
 	// numbered pages + a real total.
 	Offset int
+	// SortBy / SortDir (20260801 排序): server-side sort for the paginated
+	// audit table — sorting one 20-row page client-side would order only the
+	// visible slice. SortBy is a WHITELISTED key (see masterAuditSortColumns),
+	// never raw SQL; SortDir is "asc" | "desc". Empty = the default
+	// event_time DESC.
+	SortBy  string
+	SortDir string
 
 	// TZ is the IANA name (e.g. "Asia/Shanghai") of the caller's
 	// local time zone. Empty = UTC. Used to bucket per-day / per-hour

@@ -192,6 +192,54 @@ func TestMasterAuditPagination(t *testing.T) {
 		t.Fatalf("keyword %% must match literally: total=%d err=%v, want 0", n, err)
 	}
 
+	// Server-side sort (20260801): whitelist keys order the FULL scope, ties
+	// break on the stable event_time/event_id tail so pages never overlap.
+	srt := base
+	srt.Limit, srt.SortBy, srt.SortDir = 100, "tokens", "asc"
+	rowsAsc, err := repo.MasterUsageDetail(context.Background(), srt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < len(rowsAsc); i++ {
+		if rowsAsc[i-1].TotalTokens > rowsAsc[i].TotalTokens {
+			t.Fatalf("tokens asc out of order: %d before %d", rowsAsc[i-1].TotalTokens, rowsAsc[i].TotalTokens)
+		}
+	}
+	srt.SortDir = "desc"
+	rowsDesc, err := repo.MasterUsageDetail(context.Background(), srt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rowsDesc) == 0 || rowsDesc[0].TotalTokens < rowsDesc[len(rowsDesc)-1].TotalTokens {
+		t.Fatalf("tokens desc not descending")
+	}
+	// Sorted pagination stays gap/overlap-free: walk pages of 2 under a sort
+	// with ALL-TIED keys (every row has identical tokens=100 in this fixture's
+	// first 5 events → the stable tiebreaker is doing the work).
+	srt2 := base
+	srt2.SortBy, srt2.SortDir = "tokens", "asc"
+	seenSorted := map[string]bool{}
+	for off := 0; off < 6; off += 2 {
+		p := srt2
+		p.Limit, p.Offset = 2, off
+		pg, err := repo.MasterUsageDetail(context.Background(), p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range pg {
+			if seenSorted[r.EventID] {
+				t.Fatalf("sorted page walk: duplicate %s at offset %d", r.EventID, off)
+			}
+			seenSorted[r.EventID] = true
+		}
+	}
+	if len(seenSorted) != 5 {
+		t.Fatalf("sorted page walk covered %d rows, want 5", len(seenSorted))
+	}
+	if !ValidMasterAuditSortKey("model") || ValidMasterAuditSortKey("evil; DROP") {
+		t.Fatal("sort-key whitelist broken")
+	}
+
 	// Facets: distinct row-derived dimension values under the same scope.
 	facets, err := repo.MasterUsageDetailFacets(context.Background(), base)
 	if err != nil {

@@ -586,6 +586,23 @@ func (h *UsageHandler) MasterUsageDetail(w http.ResponseWriter, r *http.Request)
 			p.Offset = n
 		}
 	}
+	// Server-side sort (20260801). Whitelist-validated loudly — a typo'd
+	// sort_by silently falling back to time-desc would look like a broken
+	// sort, not a broken request.
+	if sb := q.Get("sort_by"); sb != "" {
+		if !usage.ValidMasterAuditSortKey(sb) {
+			shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", fmt.Sprintf("sort_by %q is not a sortable column", sb))
+			return
+		}
+		p.SortBy = sb
+	}
+	switch d := q.Get("sort_dir"); d {
+	case "", "asc", "desc":
+		p.SortDir = d
+	default:
+		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", "sort_dir must be 'asc' or 'desc'")
+		return
+	}
 
 	data, err := h.repo.MasterUsageDetail(r.Context(), p)
 	if err != nil {
