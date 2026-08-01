@@ -1312,17 +1312,33 @@ func scanProtocolTotal(rows *sql.Rows) ([]ProtocolTotal, error) {
 // The reporting view collapses a failover chain to ONE client request (Order
 // 11060), which is exactly right for billing and exactly wrong here: this
 // question is about upstream attempts, and the view's whole job is to hide them.
+// # 🔴 `MAX(event_time)` must be projected to millis BEFORE the COALESCE
+//
+// `COALESCE(MAX(event_time), 0)` reads fine and is a hard error on Postgres:
+// event_time is INTEGER millis on SQLite but TIMESTAMPTZ there, and
+// `COALESCE(timestamptz, 0)` cannot be typed —
+//
+//	pq: COALESCE types timestamp with time zone and integer cannot be matched (42804)
+//
+// so this endpoint returned 500 on EVERY Postgres deployment, which is every
+// production one. Found 2026-07-31 on the first real-PG run of the acceptance
+// suite; the unit tests are SQLite-only, where the same SQL is valid and green.
+// Same shape as the 0b.7c view defect: one statement, two dialects, and the
+// dialect that is exercised in CI is the one that cannot fail.
+//
+// 🚫 Do not "fix" it by dropping the COALESCE — MAX over an empty group is still
+// NULL and the caller scans into int64. Project first, then COALESCE.
 func (r *sqlRepo) MasterUpstreamStepArounds(ctx context.Context, p QueryParams) ([]UpstreamStepAround, error) {
 	startMs, endMs := p.LocalWindowMs()
-	rows, err := r.db.QueryContext(ctx, `
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT COALESCE(provider_code, ''), COALESCE(fallback_reason, ''),
-		       COUNT(*), COALESCE(MAX(event_time), 0)
+		       COUNT(*), COALESCE(MAX(%s), 0)
 		FROM usage_fact_dwd
 		WHERE org_id = ?
 		  AND event_time >= ? AND event_time < ?
 		  AND fallback_attempt IS NOT NULL AND fallback_attempt > 1
 		GROUP BY COALESCE(provider_code, ''), COALESCE(fallback_reason, '')
-		ORDER BY COUNT(*) DESC`,
+		ORDER BY COUNT(*) DESC`, r.db.EpochMillis("event_time")),
 		p.OrgID, r.db.BindMillis(startMs), r.db.BindMillis(endMs))
 	if err != nil {
 		return nil, fmt.Errorf("master upstream step-arounds: %w", err)
