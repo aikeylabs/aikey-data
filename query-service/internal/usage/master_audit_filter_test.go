@@ -327,3 +327,59 @@ func seedOrgSeatsFixture(t *testing.T, db *shared.DB) {
 		t.Fatalf("seed org_seats: %v", err)
 	}
 }
+
+// TestMasterAuditSortKeys_MatchTheColumnsTheTableOffers pins the whitelist as a
+// SET, not by spot-checking one member.
+//
+// The console's table header carries the comment "keys mirror the backend sort
+// whitelist" and nothing enforces it across the two repos. The failure is
+// asymmetric and worth naming: a key the FE offers but the backend rejects is a
+// loud 400 someone fixes that afternoon, while a key the backend accepts and the
+// FE never sends is dead code that reads as coverage. Listing the set here means
+// adding a sortable column is a decision recorded in both places, and dropping
+// one cannot happen silently on either side.
+func TestMasterAuditSortKeys_MatchTheColumnsTheTableOffers(t *testing.T) {
+	want := map[string]bool{
+		"time": true, "seat": true, "identity": true, "provider": true,
+		"model": true, "tokens": true, "cost": true, "quality": true,
+		// 2026-08-04: the upstream-failover column. An admin sorts this to pull
+		// every stepped-around request together; without it the column is the
+		// only unsortable header on the page.
+		"failover": true,
+	}
+	for k := range want {
+		if !ValidMasterAuditSortKey(k) {
+			t.Errorf("the table offers a %q header but the backend rejects that sort key — "+
+				"the request 400s the moment a user clicks it", k)
+		}
+	}
+	for k := range masterAuditSortColumns {
+		if !want[k] {
+			t.Errorf("the backend accepts sort key %q that no table header offers — "+
+				"either add the column or drop the entry; an unreachable branch reads as coverage", k)
+		}
+	}
+	if ValidMasterAuditSortKey("evil; DROP") {
+		t.Fatal("the whitelist must reject anything not listed — it is the injection boundary")
+	}
+}
+
+// NULL and 0 may be collapsed for ORDERING and nowhere else.
+//
+// `failover` maps to COALESCE(d.fallback_attempt, 0) so "no chain" ranks below
+// "the primary served it" and a DESC sort surfaces the deepest fallbacks first.
+// That is a statement about row order. Every rendering path — the drawer, the
+// CSV, the table cell — must still tell the two apart, because one means "no hop
+// number was ever measured" and the other is a measurement.
+func TestMasterAuditSort_FailoverExpressionOrdersNullBelowPrimary(t *testing.T) {
+	expr, ok := masterAuditSortColumns["failover"]
+	if !ok {
+		t.Fatal("failover is not a sortable column")
+	}
+	if expr != "COALESCE(d.fallback_attempt, 0)" {
+		t.Fatalf("failover sorts on %q.\n"+
+			"Sorting on the bare column pushes NULLs to one end in a dialect-dependent way "+
+			"(Postgres puts them last on ASC, SQLite first), so the page would order "+
+			"differently on Trial and Production for the same data", expr)
+	}
+}
