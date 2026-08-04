@@ -381,6 +381,22 @@ type MasterUsageAuditRow struct {
 	ContentHash              string  `json:"content_hash"`
 	SourceID                 string  `json:"source_id"`
 	SourceSeq                *int64  `json:"source_seq"`
+	// FallbackAttempt is the 1-based hop of the upstream chain that produced this
+	// event: 1 = the primary served it, 2+ = a fallback did. Added 2026-08-04.
+	//
+	// 🔴 A POINTER, and never COALESCEd to 0 in SQL. NULL is a third state the
+	// producer deliberately emits (aikey-proxy internal/events/reportable.go): a
+	// request on a key with no chain at all is single-shot and carries no hop
+	// number. Folding that to 0 — or to 1 — would make "this key has no failover
+	// configured" indistinguishable from "the primary served it", which is the
+	// precise distinction an admin opens this page to make. The aggregate
+	// step-around view already depends on it (`fallback_attempt IS NOT NULL AND
+	// > 1`); the drill-down must not disagree with the roll-up.
+	FallbackAttempt *int64 `json:"fallback_attempt"`
+	// FallbackReason is the typed cause of the switch (UPSTREAM_SERVER_ERROR,
+	// UPSTREAM_UNAUTHORIZED, …), present only on a hop that followed a failure.
+	// "" on a primary-served or single-shot row.
+	FallbackReason string `json:"fallback_reason"`
 }
 
 // UserRanking is a single entry in the per-user ranking.
