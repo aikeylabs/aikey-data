@@ -1160,6 +1160,15 @@ var masterAuditSortColumns = map[string]string{
 	"tokens":   "d.total_tokens",
 	"cost":     "COALESCE(d.billable_amount, -1)",
 	"quality":  "COALESCE(d.quality_status,'')",
+	// 🔴 NULL sorts as 0 — BELOW a primary-served 1 — so descending puts the
+	// deepest fallbacks first, which is the reason anyone sorts this column.
+	//
+	// Collapsing NULL and 0 is safe HERE and only here: sorting asks "which rows
+	// first", not "what happened". Every rendering path must keep them apart —
+	// NULL means the key has no chain and no hop number was ever measured, while
+	// 1 means the primary served it. The drawer, the CSV and the table cell all
+	// carry that distinction; an ORDER BY has nowhere to put it.
+	"failover": "COALESCE(d.fallback_attempt, 0)",
 }
 
 // ValidMasterAuditSortKey reports whether the FE-supplied sort key is in the
