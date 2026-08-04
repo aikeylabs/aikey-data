@@ -1031,7 +1031,8 @@ func masterAuditSelect(db *shared.DB) string {
 		d.input_tokens, d.output_tokens, d.cached_input_tokens, d.cache_creation_input_tokens, d.reasoning_tokens, d.total_tokens,
 		d.billable_amount, COALESCE(d.currency,''), COALESCE(d.pricing_snapshot_id,''),
 		COALESCE(d.quality_status,''), COALESCE(d.validation_code,''), COALESCE(d.anomaly_type,''), COALESCE(d.completion_source,''),
-		COALESCE(d.content_hash,''), COALESCE(d.source_id,''), d.source_seq`,
+		COALESCE(d.content_hash,''), COALESCE(d.source_id,''), d.source_seq,
+		d.fallback_attempt, COALESCE(d.fallback_reason,'')`,
 		db.EpochMillis("d.event_time"), db.EpochMillis("d.occurred_at"), usageDate)
 }
 
@@ -1050,13 +1051,17 @@ func scanMasterAuditRow(rows *sql.Rows) (*MasterUsageAuditRow, error) {
 	var a MasterUsageAuditRow
 	var billable sql.NullString
 	var sourceSeq sql.NullInt64
+	// NullInt64, not int64: NULL means "no chain / pre-feature" and must survive
+	// to JSON as null. See MasterUsageAuditRow.FallbackAttempt.
+	var fallbackAttempt sql.NullInt64
 	if err := rows.Scan(&a.EventID, &a.EventTimeMs, &a.OccurredAtMs, &a.UsageDate, &a.BillingPeriod,
 		&a.AccountID, &a.SeatID, &a.SeatAlias, &a.ProviderCode, &a.Model, &a.ProtocolType, &a.RouteSource,
 		&a.VirtualKeyID, &a.VirtualKeyHash, &a.CredentialID, &a.OAuthIdentity, &a.CredentialFingerprint, &a.RealKeyHash, &a.BindingID,
 		&a.InputTokens, &a.OutputTokens, &a.CachedInputTokens, &a.CacheCreationInputTokens, &a.ReasoningTokens, &a.TotalTokens,
 		&billable, &a.Currency, &a.PricingSnapshotID,
 		&a.QualityStatus, &a.ValidationCode, &a.AnomalyType, &a.CompletionSource,
-		&a.ContentHash, &a.SourceID, &sourceSeq); err != nil {
+		&a.ContentHash, &a.SourceID, &sourceSeq,
+		&fallbackAttempt, &a.FallbackReason); err != nil {
 		return nil, err
 	}
 	if billable.Valid {
@@ -1065,6 +1070,10 @@ func scanMasterAuditRow(rows *sql.Rows) (*MasterUsageAuditRow, error) {
 	if sourceSeq.Valid {
 		v := sourceSeq.Int64
 		a.SourceSeq = &v
+	}
+	if fallbackAttempt.Valid {
+		v := fallbackAttempt.Int64
+		a.FallbackAttempt = &v
 	}
 	return &a, nil
 }
