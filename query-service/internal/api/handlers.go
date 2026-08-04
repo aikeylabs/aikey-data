@@ -717,6 +717,11 @@ var masterAuditCSVHeader = []string{
 	"billable_amount", "currency", "pricing_snapshot_id",
 	"quality_status", "validation_code", "anomaly_type", "completion_source",
 	"content_hash", "source_id", "source_seq",
+	// 🔴 Appended, never inserted (2026-08-04). Existing importers address these
+	// columns positionally; adding in the middle silently re-labels every column
+	// after the insertion point in whatever spreadsheet the finance team already
+	// has. New columns go on the end, always.
+	"fallback_attempt", "fallback_reason",
 }
 
 func masterAuditCSVRecord(a *usage.MasterUsageAuditRow) []string {
@@ -728,6 +733,14 @@ func masterAuditCSVRecord(a *usage.MasterUsageAuditRow) []string {
 	if a.SourceSeq != nil {
 		sourceSeq = strconv.FormatInt(*a.SourceSeq, 10)
 	}
+	// 🔴 NULL renders as "", not "0" and not "1". FallbackAttempt is a pointer
+	// precisely because NULL is a third state — "this key has no chain at all" —
+	// and an export is the one artifact that outlives the person who read it. A
+	// zero here would be read as a measurement.
+	fallbackAttempt := ""
+	if a.FallbackAttempt != nil {
+		fallbackAttempt = strconv.FormatInt(*a.FallbackAttempt, 10)
+	}
 	return []string{
 		a.EventID, msToRFC3339(a.EventTimeMs), msToRFC3339(a.OccurredAtMs), a.UsageDate, a.BillingPeriod,
 		a.AccountID, a.SeatID, a.SeatAlias, a.ProviderCode, a.Model, a.ProtocolType, a.RouteSource,
@@ -738,6 +751,7 @@ func masterAuditCSVRecord(a *usage.MasterUsageAuditRow) []string {
 		billable, a.Currency, a.PricingSnapshotID,
 		a.QualityStatus, a.ValidationCode, a.AnomalyType, a.CompletionSource,
 		a.ContentHash, a.SourceID, sourceSeq,
+		fallbackAttempt, a.FallbackReason,
 	}
 }
 
