@@ -6,10 +6,28 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
 )
+
+// TestQueryAssembliesPassDialectAwareDB prevents the SQLite-only false green
+// that originally left PostgreSQL canary checks using an unreplaced `?`.
+func TestQueryAssembliesPassDialectAwareDB(t *testing.T) {
+	for _, relative := range []string{"../../cmd/main.go", "../../appkit/appkit.go"} {
+		path := filepath.Clean(relative)
+		source, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(source), "api.NewRouter(handler, admin, convH, ddb, cfg.ServiceToken)") {
+			t.Fatalf("%s must pass dialect-aware ddb to api.NewRouter", path)
+		}
+	}
+}
 
 func setupCanaryTestDB(t *testing.T) *sql.DB {
 	t.Helper()

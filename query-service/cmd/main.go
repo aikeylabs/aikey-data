@@ -55,7 +55,10 @@ func main() {
 	handler := api.NewUsageHandler(repo)
 	admin := api.NewAdminHandler(repo)
 	convH := api.NewConversationHandler(conversation.NewSQLRepository(ddb))
-	router := api.NewRouter(handler, admin, convH, db, cfg.ServiceToken)
+	// Pass the dialect-aware DB to every read surface, including the canary
+	// endpoint. Passing raw db here leaves `WHERE event_id = ?` unchanged and
+	// makes PostgreSQL report a permanently false Query health signal.
+	router := api.NewRouter(handler, admin, convH, ddb, cfg.ServiceToken)
 
 	srv := &http.Server{
 		Addr:         cfg.ListenAddr,

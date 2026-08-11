@@ -1,7 +1,6 @@
 package api
 
 import (
-	"database/sql"
 	"net/http"
 
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/shared"
@@ -10,9 +9,11 @@ import (
 
 // NewRouter builds the query-service HTTP handler.
 //
-// db is used only for the /internal/canary-check liveness endpoint. Nil is
-// tolerated for tests that don't exercise that path.
-func NewRouter(h *UsageHandler, admin *AdminHandler, conv *ConversationHandler, db *sql.DB, serviceToken string) http.Handler {
+// db is used only for the /internal/canary-check liveness endpoint. Production
+// callers MUST pass the dialect-aware *shared.DB so the handler's `?`
+// placeholder is rewritten for PostgreSQL. A raw *sql.DB is still accepted by
+// the narrow interface for SQLite unit tests. Nil disables the endpoint.
+func NewRouter(h *UsageHandler, admin *AdminHandler, conv *ConversationHandler, db queryDB, serviceToken string) http.Handler {
 	mux := http.NewServeMux()
 
 	// Health check

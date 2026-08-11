@@ -31,5 +31,7 @@ func NewHandler(db *sql.DB, cfg Config) http.Handler {
 	handler := api.NewUsageHandler(repo)
 	admin := api.NewAdminHandler(repo)
 	convH := api.NewConversationHandler(conversation.NewSQLRepository(ddb))
-	return api.NewRouter(handler, admin, convH, db, cfg.ServiceToken)
+	// Keep embedded Trial/Personal and standalone Production/Cluster on the
+	// same dialect-aware query path; SQLite accepts `?`, PostgreSQL needs $N.
+	return api.NewRouter(handler, admin, convH, ddb, cfg.ServiceToken)
 }
