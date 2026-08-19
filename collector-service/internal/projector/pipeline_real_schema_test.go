@@ -246,6 +246,66 @@ func TestPipeline_Conservation_ClientOkEqualsODSEqualsDWD(t *testing.T) {
 	}
 }
 
+// TestDrainOnce_ClearsBacklogBeyondOneBatchPerTick pins the P0-4 second fix:
+// one tick must clear MORE than one batchSize of backlog (the old
+// one-scan-per-tick behavior capped throughput at batchSize/interval = 20
+// events/sec and the 2026-08-19 ladder measured DWD diverging at exactly that
+// rate). Seeds 2.5× batchSize and asserts a single drainOnce empties it.
+func TestDrainOnce_ClearsBacklogBeyondOneBatchPerTick(t *testing.T) {
+	db := newPipelineDB(t, false)
+	svc := ingest.NewService(ingest.NewSQLODSRepository(db))
+	w := newPipelineWorker(t, db)
+	w.batchSize = 4
+	ctx := context.Background()
+
+	const n = 10 // 2.5 × batchSize
+	for i := 1; i <= n; i++ {
+		seedUsageEvent(t, svc, "orgDR", "seatDR", fmt.Sprintf("dr-e%d", i), int64(i), 10, 5)
+	}
+
+	w.drainOnce(ctx)
+
+	var projected, dwd int
+	db.QueryRowContext(ctx, "SELECT COUNT(*) FROM usage_event_ods WHERE dwd_status='projected'").Scan(&projected)
+	db.QueryRowContext(ctx, "SELECT COUNT(*) FROM usage_fact_dwd WHERE org_id='orgDR'").Scan(&dwd)
+	if projected != n || dwd != n {
+		t.Fatalf("one drainOnce: projected=%d dwd=%d want %d/%d (old one-scan-per-tick would leave %d pending)",
+			projected, dwd, n, n, n-w.batchSize)
+	}
+}
+
+// TestDrainOnce_RoundCapStopsPathologicalSpin: rows that STAY pending after a
+// failed scan (their retry-mark also failed) must not spin the drain loop
+// forever — the round cap bounds work per tick and the loop exits.
+func TestDrainOnce_RoundCapStopsPathologicalSpin(t *testing.T) {
+	db := newPipelineDB(t, false)
+	svc := ingest.NewService(ingest.NewSQLODSRepository(db))
+	w := newPipelineWorker(t, db)
+	w.batchSize = 1
+	ctx := context.Background()
+
+	seedUsageEvent(t, svc, "orgSpin", "seatSpin", "spin-e1", 1, 10, 5)
+	// Make BOTH the DWD insert and every ODS mark fail: the row can neither
+	// project nor be re-classified, so it stays 'pending' — the refetch-forever
+	// shape the cap exists for.
+	for _, trg := range []string{
+		`CREATE TRIGGER spin_dwd BEFORE INSERT ON usage_fact_dwd BEGIN SELECT RAISE(ABORT, 'spin'); END;`,
+		`CREATE TRIGGER spin_mark BEFORE UPDATE OF dwd_status ON usage_event_ods BEGIN SELECT RAISE(ABORT, 'spin'); END;`,
+	} {
+		if _, err := db.ExecContext(ctx, trg); err != nil {
+			t.Fatalf("install trigger: %v", err)
+		}
+	}
+
+	done := make(chan struct{})
+	go func() { w.drainOnce(ctx); close(done) }()
+	select {
+	case <-done: // exited via the round cap — bounded work, no spin
+	case <-time.After(30 * time.Second):
+		t.Fatalf("drainOnce did not terminate — round cap failed to stop the pathological spin")
+	}
+}
+
 // TestBacklogSnapshot_RedWhenStalledGreenWhenDrained is the 能红 fence for the
 // P0-4 backlog gauges: with the projector stalled the gauges MUST show the
 // backlog (depth + a positive oldest age); after draining they return to zero.

@@ -207,7 +207,7 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 
 	// Run once immediately on start
-	w.scanOnce(ctx)
+	w.drainOnce(ctx)
 
 	for {
 		select {
@@ -215,11 +215,45 @@ func (w *Worker) Run(ctx context.Context) {
 			slog.Info("projector worker stopping")
 			return
 		case <-ticker.C:
-			w.scanOnce(ctx)
+			w.drainOnce(ctx)
 		case <-gapC:
 			w.detectGaps(ctx)
 		}
 	}
+}
+
+// drainMaxRoundsPerTick bounds how many back-to-back scans one tick may run.
+// Why a cap (not unbounded): a row that stays 'pending' after a failed scan
+// (its retry-mark ALSO failed — e.g. the DB is erroring) would otherwise be
+// re-fetched in a hot loop. The cap turns that pathology into bounded work per
+// tick while still allowing 400×batchSize events of catch-up per tick — far
+// above the measured per-scan throughput, so it never binds in healthy
+// operation.
+const drainMaxRoundsPerTick = 400
+
+// drainOnce scans until the backlog is below one full batch (or the round cap
+// / ctx stops it). P0-4 second finding: the 5s ticker × batchSize=100 imposed
+// a hard 20 events/sec projection ceiling REGARDLESS of per-scan cost — the
+// 2026-08-19 elevated capacity ladder measured DWD falling behind at exactly
+// that rate while ingest ran ~300 events/sec. Batching (one tx per scan) made
+// scans cheap; this loop makes throughput scale with scan cost instead of
+// ticker cadence: a full fetch means more backlog is waiting, so scan again
+// immediately.
+func (w *Worker) drainOnce(ctx context.Context) {
+	for i := 0; i < drainMaxRoundsPerTick; i++ {
+		n := w.scanOnce(ctx)
+		if n < w.batchSize {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+	}
+	slog.Warn("projector drain hit per-tick round cap with backlog remaining",
+		"event.name", "projector.drain.round_cap",
+		"rounds", drainMaxRoundsPerTick, "batch_size", w.batchSize)
 }
 
 // detectGaps is the periodic ACTIVE surface: scan, WARN-log gaps, promote stale
@@ -321,15 +355,18 @@ func (w *Worker) promoteKnownLoss(ctx context.Context, f *integrity.SourceComple
 	)
 }
 
-func (w *Worker) scanOnce(ctx context.Context) {
+// scanOnce runs one scan and returns the number of records fetched (the
+// drain loop keeps scanning while this equals batchSize — a full fetch means
+// more backlog is waiting).
+func (w *Worker) scanOnce(ctx context.Context) int {
 	w.metrics.ScanCount.Add(1)
 	records, err := w.odsReader.FetchPending(ctx, w.batchSize)
 	if err != nil {
 		slog.Error("projector fetch pending", "error", err)
-		return
+		return 0
 	}
 	if len(records) == 0 {
-		return
+		return 0
 	}
 
 	slog.Debug("projector batch", "count", len(records))
@@ -339,9 +376,10 @@ func (w *Worker) scanOnce(ctx context.Context) {
 	// attempt fails at the SQL level it is rolled back (nothing durable) and
 	// the batch replays on the classic per-event path below.
 	if w.batchDB != nil && w.projectBatchTx(ctx, records) {
-		return
+		return len(records)
 	}
 	w.projectPerEvent(ctx, records)
+	return len(records)
 }
 
 // projectPerEvent is the classic per-event autocommit path — the pre-batch
