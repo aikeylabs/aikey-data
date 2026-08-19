@@ -33,25 +33,79 @@ func NewService(repo Repository, pinnedOrgID string) *Service {
 // independently (a bad record doesn't block the rest); the per-source contiguous
 // watermark is advanced once after the batch and returned so the proxy can prune
 // its content WAL.
+//
+// P0-4 batch rewrite: when the repository supports it the whole batch runs in
+// ONE transaction (one commit + WAL fsync per batch — conversation rows carry
+// large text fields, so the per-record commit tax was the heaviest here). An
+// infra SQL failure rolls the attempt back (nothing durable) and the batch
+// replays on the classic per-record path, preserving per-record independence.
 func (s *Service) IngestBatch(ctx context.Context, req *ConversationBatchRequest) (*ConversationBatchResponse, []RecordResult) {
-	resp := &ConversationBatchResponse{}
-	results := make([]RecordResult, 0, len(req.Records))
-
-	type srcKey struct{ org, src string }
-	touched := make(map[srcKey]struct{})
-
-	for i := range req.Records {
-		e := &req.Records[i]
-		// Single-tenant cluster: pin org to the fixed delivery org BEFORE validate,
-		// seq-owner keying, and watermark accounting — so the whole pipeline is
-		// consistent on the one org (the proxy-reported org, e.g. a form-① seat's
-		// phantom home org, is overridden). No-op when unpinned (multi-tenant).
-		if s.pinnedOrgID != "" {
-			e.OrgID = s.pinnedOrgID
+	// Single-tenant cluster: pin org BEFORE validate, seq-owner keying, and
+	// watermark accounting (no-op when unpinned). Done once up front so both the
+	// batch attempt and a per-record replay see identical records.
+	if s.pinnedOrgID != "" {
+		for i := range req.Records {
+			req.Records[i].OrgID = s.pinnedOrgID
 		}
-		r := s.ingestOne(ctx, e)
-		results = append(results, r)
-		switch r.Status {
+	}
+	if bc, ok := s.repo.(BatchCapableRepository); ok {
+		if resp, results, ok := s.ingestBatchTx(ctx, req, bc); ok {
+			return resp, results
+		}
+	}
+	return s.ingestPerRecord(ctx, req)
+}
+
+// ingestBatchTx attempts the whole batch in one transaction; ok=false means it
+// was rolled back and the caller must replay per-record.
+func (s *Service) ingestBatchTx(ctx context.Context, req *ConversationBatchRequest, bc BatchCapableRepository) (*ConversationBatchResponse, []RecordResult, bool) {
+	bw, err := bc.BeginBatch(ctx)
+	if err != nil {
+		slog.Warn("conversation batch tx begin failed; falling back to per-record",
+			"event.name", "conversation.batch_tx.begin_failed", "error", err)
+		return nil, nil, false
+	}
+	results := make([]RecordResult, 0, len(req.Records))
+	for i := range req.Records {
+		results = append(results, s.ingestOne(ctx, &req.Records[i], bw))
+		if bw.Failed() {
+			_ = bw.Rollback()
+			slog.Warn("conversation batch tx failed; replaying per-record",
+				"event.name", "conversation.batch_tx.replay", "records", len(req.Records))
+			return nil, nil, false
+		}
+	}
+	if err := bw.Commit(); err != nil {
+		_ = bw.Rollback()
+		slog.Warn("conversation batch tx commit failed; replaying per-record",
+			"event.name", "conversation.batch_tx.commit_failed", "error", err)
+		return nil, nil, false
+	}
+	resp, touched := s.tallyResults(req, results)
+	s.advanceWatermarks(ctx, req, resp, touched)
+	return resp, results, true
+}
+
+// ingestPerRecord is the classic per-record autocommit path (fallback + non-
+// batch-capable repositories).
+func (s *Service) ingestPerRecord(ctx context.Context, req *ConversationBatchRequest) (*ConversationBatchResponse, []RecordResult) {
+	results := make([]RecordResult, 0, len(req.Records))
+	for i := range req.Records {
+		results = append(results, s.ingestOne(ctx, &req.Records[i], s.repo))
+	}
+	resp, touched := s.tallyResults(req, results)
+	s.advanceWatermarks(ctx, req, resp, touched)
+	return resp, results
+}
+
+type convSrcKey struct{ org, src string }
+
+func (s *Service) tallyResults(req *ConversationBatchRequest, results []RecordResult) (*ConversationBatchResponse, map[convSrcKey]struct{}) {
+	resp := &ConversationBatchResponse{}
+	touched := make(map[convSrcKey]struct{})
+	for i := range results {
+		e := &req.Records[i]
+		switch results[i].Status {
 		case "accepted":
 			resp.Accepted++
 		case "quarantined":
@@ -66,13 +120,17 @@ func (s *Service) IngestBatch(ctx context.Context, req *ConversationBatchRequest
 		// so they count toward the watermark. v1/older proxy (no source identity)
 		// skips gap tracking entirely.
 		if e.SourceID != "" && e.SourceSeq != nil {
-			touched[srcKey{org: e.OrgID, src: e.SourceID}] = struct{}{}
+			touched[convSrcKey{org: e.OrgID, src: e.SourceID}] = struct{}{}
 		}
 	}
+	return resp, touched
+}
 
-	// Advance the contiguous high-water per source and return it. A failure here
-	// must NOT fail the batch (records ARE stored) — log + omit that source from
-	// the map; the proxy then conserves (doesn't prune) and the next batch retries.
+// advanceWatermarks runs the single post-batch watermark advance per touched
+// source (outside any batch tx). A failure must NOT fail the batch (records
+// ARE stored) — log + omit that source; the proxy conserves and the next batch
+// retries.
+func (s *Service) advanceWatermarks(ctx context.Context, req *ConversationBatchRequest, resp *ConversationBatchResponse, touched map[convSrcKey]struct{}) {
 	var clientAllocated int64
 	if req.AllocatedSeq != nil {
 		clientAllocated = *req.AllocatedSeq
@@ -90,10 +148,17 @@ func (s *Service) IngestBatch(ctx context.Context, req *ConversationBatchRequest
 		}
 		resp.ContiguousSeq[k.src] = contiguous
 	}
-	return resp, results
 }
 
-func (s *Service) ingestOne(ctx context.Context, e *ConversationRecord) RecordResult {
+// recordWriter is the write surface ingestOne needs — satisfied by both the
+// plain Repository (autocommit) and a BatchRecordWriter (one tx per batch).
+type recordWriter interface {
+	SeqOwner(ctx context.Context, orgID, sourceID string, seq int64) (string, bool, error)
+	InsertRecord(ctx context.Context, e *ConversationRecord, quarantined bool) (bool, error)
+	UpsertSession(ctx context.Context, orgID, sessionID, ownerAccountID, systemText string) error
+}
+
+func (s *Service) ingestOne(ctx context.Context, e *ConversationRecord, w recordWriter) RecordResult {
 	if err := validate(e); err != nil {
 		slog.Warn("conversation record rejected", "event_id", e.EventID, "reason", err)
 		return RecordResult{EventID: e.EventID, Status: "rejected", Reason: err.Error()}
@@ -104,7 +169,7 @@ func (s *Service) ingestOne(ctx context.Context, e *ConversationRecord) RecordRe
 	// A retransmit of the SAME event keeps the same owner → not a conflict.
 	quarantined := false
 	if e.SourceID != "" && e.SourceSeq != nil {
-		owner, found, err := s.repo.SeqOwner(ctx, e.OrgID, e.SourceID, *e.SourceSeq)
+		owner, found, err := w.SeqOwner(ctx, e.OrgID, e.SourceID, *e.SourceSeq)
 		if err != nil {
 			slog.Error("conversation seq-owner check failed",
 				"event.name", "conversation.seq_owner.failed", "event_id", e.EventID, "error", err)
@@ -120,7 +185,7 @@ func (s *Service) ingestOne(ctx context.Context, e *ConversationRecord) RecordRe
 		}
 	}
 
-	inserted, err := s.repo.InsertRecord(ctx, e, quarantined)
+	inserted, err := w.InsertRecord(ctx, e, quarantined)
 	if err != nil {
 		slog.Error("insert conversation record failed", "event_id", e.EventID, "error", err)
 		return RecordResult{EventID: e.EventID, Status: "rejected", Reason: "internal error"}
@@ -141,7 +206,7 @@ func (s *Service) ingestOne(ctx context.Context, e *ConversationRecord) RecordRe
 		if sessionScope == "" {
 			sessionScope = e.OwnerAccountID
 		}
-		if err := s.repo.UpsertSession(ctx, e.OrgID, e.SessionID, sessionScope, e.SystemText); err != nil {
+		if err := w.UpsertSession(ctx, e.OrgID, e.SessionID, sessionScope, e.SystemText); err != nil {
 			slog.Warn("upsert conversation session failed",
 				"event.name", "conversation.session.upsert_failed",
 				"org_id", e.OrgID, "session_id", e.SessionID, "error", err)

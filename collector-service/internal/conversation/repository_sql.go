@@ -38,21 +38,38 @@ func convDate(e *ConversationRecord) string {
 }
 
 func (r *sqlRepo) SeqOwner(ctx context.Context, orgID, sourceID string, seq int64) (string, bool, error) {
+	owner, found, _, err := seqOwnerOn(ctx, r.db, orgID, sourceID, seq)
+	return owner, found, err
+}
+
+// seqOwnerOn executes through db or a batch tx. Inside the tx it sees the
+// batch's own uncommitted rows (read-your-own-writes), which is what keeps the
+// intra-batch seq-conflict check exact. infra flags a scan failure (as opposed
+// to a clean no-rows miss).
+func seqOwnerOn(ctx context.Context, ex shared.Execer, orgID, sourceID string, seq int64) (string, bool, bool, error) {
 	var eventID string
-	err := r.db.QueryRowContext(ctx,
+	err := ex.QueryRowContext(ctx,
 		"SELECT event_id FROM conversation_records WHERE org_id = ? AND source_id = ? AND source_seq = ? LIMIT 1",
 		orgID, sourceID, seq,
 	).Scan(&eventID)
 	if err == sql.ErrNoRows {
-		return "", false, nil
+		return "", false, false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("seq owner org=%s source=%s seq=%d: %w", orgID, sourceID, seq, err)
+		return "", false, true, fmt.Errorf("seq owner org=%s source=%s seq=%d: %w", orgID, sourceID, seq, err)
 	}
-	return eventID, true, nil
+	return eventID, true, false, nil
 }
 
 func (r *sqlRepo) InsertRecord(ctx context.Context, e *ConversationRecord, quarantined bool) (bool, error) {
+	inserted, _, err := insertRecordOn(ctx, r.db, r.db, e, quarantined)
+	return inserted, err
+}
+
+// insertRecordOn executes through the autocommit pool or a batch tx. infra
+// flags an infrastructure-level SQL failure (poisons a PostgreSQL tx) versus
+// the logical "silently ignored" F2 detection (safe to continue past).
+func insertRecordOn(ctx context.Context, d *shared.DB, ex shared.Execer, e *ConversationRecord, quarantined bool) (inserted, infra bool, err error) {
 	ingestStatus := "accepted"
 	if quarantined {
 		ingestStatus = "quarantined"
@@ -60,49 +77,102 @@ func (r *sqlRepo) InsertRecord(ctx context.Context, e *ConversationRecord, quara
 	cd := convDate(e)
 	// Conflict target = the PK. PostgreSQL infers (event_id, conv_date) — the
 	// partition key must be in it; SQLite's INSERT OR IGNORE ignores the target.
-	insert := r.db.InsertOrIgnoreOn("conversation_records", convColumns, convPlaceholders, "event_id, conv_date")
-	res, err := r.db.ExecContext(ctx, insert,
+	insert := d.InsertOrIgnoreOn("conversation_records", convColumns, convPlaceholders, "event_id, conv_date")
+	res, err := ex.ExecContext(ctx, insert,
 		e.EventID, cd, e.OrgID, nullStr(e.SessionID), nullStr(e.OwnerAccountID), nullStr(e.SeatID),
 		nullStr(e.VirtualKeyID), nullStr(e.SourceID), e.SourceSeq, nullStr(e.Model), nullStr(e.ProviderCode),
 		nullStr(e.UserText), nullStr(e.AssistantText),
 		e.InputTokens, e.OutputTokens, e.CachedInputTokens, e.CacheCreationInputTokens, e.ReasoningTokens,
-		e.TotalTokens, e.CacheEnabled, e.DurationMs, e.RequestStatus, e.ContentBytes, ingestStatus, r.db.BindMillis(e.CreatedAt),
+		e.TotalTokens, e.CacheEnabled, e.DurationMs, e.RequestStatus, e.ContentBytes, ingestStatus, d.BindMillis(e.CreatedAt),
 	)
 	if err != nil {
-		return false, fmt.Errorf("insert conversation record %s: %w", e.EventID, err)
+		return false, true, fmt.Errorf("insert conversation record %s: %w", e.EventID, err)
 	}
 	if n, _ := res.RowsAffected(); n > 0 {
-		return true, nil
+		return true, false, nil
 	}
 	// rowsAffected==0: verify it's a genuine (event_id, conv_date) duplicate, not a
 	// swallowed NOT NULL/CHECK violation. Mirrors usage InsertEvent's F2 guard —
 	// never report "duplicated" while data was silently dropped.
 	var got string
-	verr := r.db.QueryRowContext(ctx,
+	verr := ex.QueryRowContext(ctx,
 		"SELECT event_id FROM conversation_records WHERE org_id = ? AND event_id = ? AND conv_date = ? LIMIT 1",
 		e.OrgID, e.EventID, cd,
 	).Scan(&got)
 	if verr == nil {
-		return false, nil // genuine duplicate
+		return false, false, nil // genuine duplicate
 	}
 	if verr == sql.ErrNoRows {
-		return false, fmt.Errorf("conversation INSERT silently ignored (no PK conflict on org=%s event_id=%s conv_date=%s) — likely NOT NULL/CHECK violation", e.OrgID, e.EventID, cd)
+		return false, false, fmt.Errorf("conversation INSERT silently ignored (no PK conflict on org=%s event_id=%s conv_date=%s) — likely NOT NULL/CHECK violation", e.OrgID, e.EventID, cd)
 	}
-	return false, fmt.Errorf("verify dedup event_id=%s: %w", e.EventID, verr)
+	return false, true, fmt.Errorf("verify dedup event_id=%s: %w", e.EventID, verr)
 }
 
 func (r *sqlRepo) UpsertSession(ctx context.Context, orgID, sessionID, ownerAccountID, systemText string) error {
+	return upsertSessionOn(ctx, r.db, r.db, orgID, sessionID, ownerAccountID, systemText)
+}
+
+func upsertSessionOn(ctx context.Context, d *shared.DB, ex shared.Execer, orgID, sessionID, ownerAccountID, systemText string) error {
 	// first_seen_at is the dialect-aware NowMillis() SQL expression inlined into
 	// the VALUES list (PG NOW()-epoch / SQLite epoch-ms); the other 4 are bound.
-	insert := r.db.InsertOrIgnoreOn("conversation_sessions",
+	insert := d.InsertOrIgnoreOn("conversation_sessions",
 		"org_id, session_id, owner_account_id, system_text, first_seen_at",
-		fmt.Sprintf("?,?,?,?,%s", r.db.NowMillis()),
+		fmt.Sprintf("?,?,?,?,%s", d.NowMillis()),
 		"org_id, session_id")
-	if _, err := r.db.ExecContext(ctx, insert, orgID, sessionID, nullStr(ownerAccountID), nullStr(systemText)); err != nil {
+	if _, err := ex.ExecContext(ctx, insert, orgID, sessionID, nullStr(ownerAccountID), nullStr(systemText)); err != nil {
 		return fmt.Errorf("upsert session org=%s session=%s: %w", orgID, sessionID, err)
 	}
 	return nil
 }
+
+// BeginBatch opens one transaction for a whole conversation batch (one commit +
+// WAL fsync per batch — P0-4). Same per-record statements and semantics; infra
+// SQL failures are flagged so the service rolls back and replays per-record.
+func (r *sqlRepo) BeginBatch(ctx context.Context) (BatchRecordWriter, error) {
+	tx, err := r.db.BeginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &convBatchWriter{d: r.db, tx: tx}, nil
+}
+
+type convBatchWriter struct {
+	d      *shared.DB
+	tx     *shared.Tx
+	failed bool
+}
+
+func (b *convBatchWriter) SeqOwner(ctx context.Context, orgID, sourceID string, seq int64) (string, bool, error) {
+	owner, found, infra, err := seqOwnerOn(ctx, b.tx, orgID, sourceID, seq)
+	if infra {
+		b.failed = true
+	}
+	return owner, found, err
+}
+
+func (b *convBatchWriter) InsertRecord(ctx context.Context, e *ConversationRecord, quarantined bool) (bool, error) {
+	inserted, infra, err := insertRecordOn(ctx, b.d, b.tx, e, quarantined)
+	if infra {
+		b.failed = true
+	}
+	return inserted, err
+}
+
+func (b *convBatchWriter) UpsertSession(ctx context.Context, orgID, sessionID, ownerAccountID, systemText string) error {
+	err := upsertSessionOn(ctx, b.d, b.tx, orgID, sessionID, ownerAccountID, systemText)
+	if err != nil {
+		// Any session-upsert SQL error inside the tx is treated as infra: on
+		// PostgreSQL it has poisoned the tx, so the only way to preserve the
+		// "session upsert is best-effort" semantic is rollback + per-record
+		// replay (where the failure degrades to a WARN as before).
+		b.failed = true
+	}
+	return err
+}
+
+func (b *convBatchWriter) Failed() bool    { return b.failed }
+func (b *convBatchWriter) Commit() error   { return b.tx.Commit() }
+func (b *convBatchWriter) Rollback() error { return b.tx.Rollback() }
 
 // AdvanceWatermark — see Repository.AdvanceWatermark. Zipper-advances the
 // connected-no-gap high-water for one source and persists it. Ledger-aware:

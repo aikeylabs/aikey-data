@@ -8,10 +8,36 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	_ "github.com/lib/pq"
 )
+
+// Connection-pool defaults, overridable via env (P0-4 capacity review found
+// the hardcoded 20 queues 300-concurrent ingest in the Go pool before
+// PostgreSQL is even reached). Defaults unchanged; env names follow the
+// AIKEY_ prefix convention (config-split §SR8, like AIKEY_LOG_LEVEL).
+const (
+	defaultDBMaxOpenConns = 20
+	defaultDBMaxIdleConns = 5
+)
+
+// envPoolSize reads a positive integer pool size from env; empty/invalid →
+// fallback with a WARN (never silently — logging-conventions).
+func envPoolSize(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		slog.Warn("invalid pool size env; using default",
+			"event.name", "shared.db.pool_env_invalid", "env", key, "value", v, "default", fallback)
+		return fallback
+	}
+	return n
+}
 
 // OpenDB opens a PostgreSQL connection and verifies connectivity.
 func OpenDB(dsn string) (*sql.DB, error) {
@@ -23,8 +49,8 @@ func OpenDB(dsn string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
-	db.SetMaxOpenConns(20)
-	db.SetMaxIdleConns(5)
+	db.SetMaxOpenConns(envPoolSize("AIKEY_DB_MAX_OPEN_CONNS", defaultDBMaxOpenConns))
+	db.SetMaxIdleConns(envPoolSize("AIKEY_DB_MAX_IDLE_CONNS", defaultDBMaxIdleConns))
 	return db, nil
 }
 

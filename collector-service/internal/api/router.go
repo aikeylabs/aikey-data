@@ -11,10 +11,13 @@ import (
 	"github.com/AiKeyLabs/pkg/buildinfo"
 )
 
-// MetricsResponse combines ingest and projector metrics.
+// MetricsResponse combines ingest and projector metrics. Backlog (P0-4) makes
+// projection lag externally readable: depth + oldest-pending age; consumption
+// rate / catch-up time are derivable from projector counter deltas by pollers.
 type MetricsResponse struct {
 	Ingest    ingest.MetricsSnapshot          `json:"ingest"`
 	Projector projector.WorkerMetricsSnapshot `json:"projector"`
+	Backlog   projector.BacklogSnapshot       `json:"backlog"`
 }
 
 // NewRouter creates the HTTP route multiplexer.
@@ -73,6 +76,7 @@ func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, convH *Convers
 		shared.JSON(w, http.StatusOK, MetricsResponse{
 			Ingest:    ingestSvc.MetricsSnapshot(),
 			Projector: projWorker.MetricsSnapshot(),
+			Backlog:   projWorker.Backlog(r.Context()),
 		})
 	})
 

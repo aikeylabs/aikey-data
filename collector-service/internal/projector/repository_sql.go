@@ -12,9 +12,15 @@ import (
 
 // --- ODSReader ---
 
-type sqlODSReader struct{ db *shared.DB }
+// sqlODSReader executes through ex — the autocommit pool by default, or a
+// batch transaction when the worker runs the P0-4 single-tx scan path. db is
+// kept for dialect helpers (pure string/bind builders).
+type sqlODSReader struct {
+	db *shared.DB
+	ex shared.Execer
+}
 
-func NewSQLODSReader(db *shared.DB) ODSReader { return &sqlODSReader{db: db} }
+func NewSQLODSReader(db *shared.DB) ODSReader { return &sqlODSReader{db: db, ex: db} }
 
 // fetchPendingSQL is built dynamically via nowExpr for dialect portability.
 //
@@ -61,7 +67,7 @@ func (r *sqlODSReader) FetchPending(ctx context.Context, limit int) ([]ODSRecord
 	// column — see 20260715-非生成流量不进用量审计与统计.md). Extracted
 	// SQL-side so we don't ship the whole raw blob per row.
 	query := fmt.Sprintf(fetchPendingTpl, r.db.JSONText("raw_event_json", "request_path"), r.db.NowMillis())
-	rows, err := r.db.QueryContext(ctx, query, limit)
+	rows, err := r.ex.QueryContext(ctx, query, limit)
 	if err != nil {
 		return nil, fmt.Errorf("fetch pending ods: %w", err)
 	}
@@ -101,7 +107,7 @@ func (r *sqlODSReader) MarkProjected(ctx context.Context, odsID int64, eventTime
 	// event_time in the WHERE prunes to the one partition on PostgreSQL (ODS is
 	// partitioned by event_time, v1.0.1-alpha.4) — without it this per-event
 	// UPDATE would scan every monthly partition. Harmless extra filter on SQLite.
-	_, err := r.db.ExecContext(ctx,
+	_, err := r.ex.ExecContext(ctx,
 		`UPDATE usage_event_ods SET dwd_status = 'projected' WHERE ods_id = ? AND event_time = ?`,
 		odsID, r.db.BindMillis(eventTime))
 	return err
@@ -113,7 +119,7 @@ func (r *sqlODSReader) MarkRetry(ctx context.Context, odsID int64, eventTime aik
 	// right driver type (int64 for SQLite INTEGER, time.Time for PG TIMESTAMPTZ).
 	nextRetryAt := aikeytime.FromTime(time.Now().Add(retryDelay(retryCount)))
 	// event_time prunes to one partition on PG (see MarkProjected).
-	_, err := r.db.ExecContext(ctx,
+	_, err := r.ex.ExecContext(ctx,
 		`UPDATE usage_event_ods
 		 SET dwd_status = 'retry',
 		     dwd_retry_count = ?,
@@ -137,7 +143,7 @@ func (r *sqlODSReader) MarkDeadLetter(ctx context.Context, odsID int64, eventTim
 	// never advanced `last_scanned_ods_id`. See bugfix 20260522.
 	// event_time prunes to one partition on PG (see MarkProjected). Bind order
 	// follows the `?` positions: code → msg → ods_id → event_time.
-	_, err := r.db.ExecContext(ctx,
+	_, err := r.ex.ExecContext(ctx,
 		`UPDATE usage_event_ods
 		 SET dwd_status = 'dead_letter',
 		     dwd_last_error_code = ?,
@@ -204,9 +210,12 @@ func (r *sqlControlEventReader) FindByVirtualKeyAtTime(ctx context.Context, virt
 
 // --- DWDWriter ---
 
-type sqlDWDWriter struct{ db *shared.DB }
+type sqlDWDWriter struct {
+	db *shared.DB
+	ex shared.Execer
+}
 
-func NewSQLDWDWriter(db *shared.DB) DWDWriter { return &sqlDWDWriter{db: db} }
+func NewSQLDWDWriter(db *shared.DB) DWDWriter { return &sqlDWDWriter{db: db, ex: db} }
 
 // projected_at is set explicitly from Go (aikeytime.Now()) rather than
 // relying on the SQL DEFAULT. Why: the v1.0.3-alpha migration's
@@ -271,7 +280,7 @@ func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 		conflictTarget = "org_id, event_id, usage_date"
 	}
 	insertDWDSQL := w.db.InsertOrIgnoreOn("usage_fact_dwd", dwdColumns, dwdPlaceholders, conflictTarget)
-	res, err := w.db.ExecContext(ctx, insertDWDSQL,
+	res, err := w.ex.ExecContext(ctx, insertDWDSQL,
 		// Why int64 millis (via BindMillis) instead of time.Time: Go's default
 		// time.Time String() format contains a local tz suffix (e.g. "+0800
 		// CST") that SQLite's date functions cannot parse, which broke
@@ -339,7 +348,7 @@ func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 	// a harmless extra filter on SQLite) — without it this dedup-verify would
 	// scan every monthly partition. usage_date is deterministic per event so it
 	// cannot exclude a genuine duplicate.
-	verr := w.db.QueryRowContext(ctx,
+	verr := w.ex.QueryRowContext(ctx,
 		"SELECT 1 FROM usage_fact_dwd WHERE org_id = ? AND event_id = ? AND usage_date = ? LIMIT 1",
 		f.OrgID, f.EventID, f.UsageDate,
 	).Scan(&found)
@@ -354,15 +363,18 @@ func (w *sqlDWDWriter) Insert(ctx context.Context, f *DWDFact) (bool, error) {
 
 // --- CheckpointStore ---
 
-type sqlCheckpointStore struct{ db *shared.DB }
+type sqlCheckpointStore struct {
+	db *shared.DB
+	ex shared.Execer
+}
 
 func NewSQLCheckpointStore(db *shared.DB) CheckpointStore {
-	return &sqlCheckpointStore{db: db}
+	return &sqlCheckpointStore{db: db, ex: db}
 }
 
 func (s *sqlCheckpointStore) GetLastScannedOdsID(ctx context.Context, taskName string) (int64, error) {
 	var id int64
-	err := s.db.QueryRowContext(ctx,
+	err := s.ex.QueryRowContext(ctx,
 		`SELECT last_scanned_ods_id FROM usage_dwd_projector_tasks WHERE task_name = ?`,
 		taskName).Scan(&id)
 	if err == sql.ErrNoRows {
@@ -373,7 +385,7 @@ func (s *sqlCheckpointStore) GetLastScannedOdsID(ctx context.Context, taskName s
 
 func (s *sqlCheckpointStore) UpdateCheckpoint(ctx context.Context, taskName string, lastOdsID int64) error {
 	nowExpr := s.db.Now()
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.ex.ExecContext(ctx,
 		fmt.Sprintf(`UPDATE usage_dwd_projector_tasks
 		 SET last_scanned_ods_id = ?, last_scanned_at = %s, last_success_at = %s, updated_at = %s
 		 WHERE task_name = ?`, nowExpr, nowExpr, nowExpr),

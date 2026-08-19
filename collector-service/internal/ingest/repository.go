@@ -48,3 +48,24 @@ type ODSRepository interface {
 	// new contiguous (stage D3).
 	ConfirmLost(ctx context.Context, orgID, sourceID string, seqs []int64, reason string) (promoted int, contiguous int64, err error)
 }
+
+// BatchEventWriter runs a whole ingest batch inside ONE transaction (one
+// commit + WAL fsync per batch instead of per event — the P0-4 batch rewrite).
+// InsertEvent keeps the exact per-event semantics of ODSRepository.InsertEvent.
+// Failed reports an infrastructure-level SQL failure inside the transaction
+// (on PostgreSQL that poisons the tx); the caller then Rollbacks and replays
+// the batch on the per-event autocommit path, which preserves per-event
+// independence. Commit/Rollback close the transaction.
+type BatchEventWriter interface {
+	InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte, quarantined bool) (inserted, conflict bool, err error)
+	Failed() bool
+	Commit() error
+	Rollback() error
+}
+
+// BatchCapableRepository is the optional capability a repository implements to
+// enable the single-transaction batch path. The service type-asserts it: mock
+// or legacy repositories without it transparently keep the per-event path.
+type BatchCapableRepository interface {
+	BeginBatch(ctx context.Context) (BatchEventWriter, error)
+}

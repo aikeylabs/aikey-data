@@ -122,6 +122,10 @@ func New(db *sql.DB, cfg Config) Result {
 			"event.name", "pricing.snapshot.ensure_failed", "error", serr)
 	}
 	projWorker := projector.NewWorker(odsReader, dwdWriter, checkpoint, enricher)
+	// P0-4: one transaction (one WAL fsync) per scan batch instead of 2+
+	// autocommits per event — same wiring as collector main.go so Trial's
+	// embedded collector gets the batched pipeline too.
+	projWorker.SetBatchDB(ddb)
 	// Delivery-integrity: one scanner instance drives BOTH the projector's
 	// periodic WARN surface and the /v1/diagnostics/completeness endpoint.
 	gapScanner := integrity.NewScanner(ddb, integrity.DefaultCriteria())

@@ -9,6 +9,7 @@ import (
 
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/integrity"
 	"github.com/AiKeyLabs/aikey-data/collector-service/internal/quota"
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
 )
 
 const (
@@ -76,6 +77,13 @@ type Worker struct {
 	// / quota-less). Best-effort + panic-guarded inside, so it can never break
 	// projection. Wired via SetQuotaMaterializer at both edition entrypoints.
 	quotaMat *quota.Materializer
+
+	// batchDB, when set (SetBatchDB at the edition entrypoints), enables the
+	// P0-4 single-transaction scan path: each scan batch's DWD inserts, ODS
+	// marks and the checkpoint commit as ONE transaction (one WAL fsync per
+	// scan instead of 2+ per event). nil → classic per-event autocommit
+	// (mock-backed tests, or any wiring that predates the batch path).
+	batchDB *shared.DB
 }
 
 // LossPromoter is the write-side the projector needs to record known losses —
@@ -128,6 +136,52 @@ func (w *Worker) SetLossPromoter(p LossPromoter) {
 // projection path. nil → no quota work (the default; Personal / quota-less).
 func (w *Worker) SetQuotaMaterializer(m *quota.Materializer) {
 	w.quotaMat = m
+}
+
+// SetBatchDB enables the single-transaction scan path (P0-4). Pass the same
+// *shared.DB the SQL reader/writer/checkpoint were built on.
+func (w *Worker) SetBatchDB(db *shared.DB) {
+	w.batchDB = db
+}
+
+// BacklogSnapshot is the projection backlog read for /metrics (P0-4: the
+// backlog was previously invisible — health-signal-surface requires it be
+// externally readable, because a lagging projector means the audit trail,
+// usage dashboards AND quota enforcement are all stale while every HTTP
+// ingest still returns 200).
+type BacklogSnapshot struct {
+	// Available is false when no batch DB is wired (mock-backed tests) — the
+	// gauges are then meaningless zeros, not a healthy-empty backlog.
+	Available bool `json:"backlog_available"`
+	// Pending counts un-projected ODS rows (dwd_status pending or retry —
+	// served by the idx_ods_dwd_unprojected partial index).
+	Pending int64 `json:"backlog_pending"`
+	// OldestPendingAgeMS is the age of the oldest un-projected row (its
+	// ingest_received_at to now) — the projection lag ceiling. 0 when empty.
+	OldestPendingAgeMS int64 `json:"backlog_oldest_pending_age_ms"`
+}
+
+// Backlog measures the current projection backlog. Consumption rate and
+// catch-up time are derivable by any poller from projector_events_projected_total
+// deltas plus these gauges, so they are deliberately not materialized here.
+func (w *Worker) Backlog(ctx context.Context) BacklogSnapshot {
+	if w.batchDB == nil {
+		return BacklogSnapshot{}
+	}
+	var snap BacklogSnapshot
+	q := fmt.Sprintf(
+		`SELECT COUNT(*), COALESCE(MAX(%s), 0) FROM usage_event_ods WHERE dwd_status IN ('pending','retry')`,
+		w.batchDB.AgeMillis("ingest_received_at"))
+	if err := w.batchDB.QueryRowContext(ctx, q).Scan(&snap.Pending, &snap.OldestPendingAgeMS); err != nil {
+		slog.Warn("projector backlog query failed",
+			"event.name", "projector.backlog.query_failed", "error", err)
+		return BacklogSnapshot{}
+	}
+	snap.Available = true
+	if snap.OldestPendingAgeMS < 0 {
+		snap.OldestPendingAgeMS = 0
+	}
+	return snap
 }
 
 // Run starts the projection loop. Blocks until ctx is cancelled. When a gap
@@ -280,12 +334,28 @@ func (w *Worker) scanOnce(ctx context.Context) {
 
 	slog.Debug("projector batch", "count", len(records))
 
+	// P0-4 batch rewrite: project the whole scan batch inside ONE transaction
+	// (one commit + WAL fsync per scan instead of 2+ per event). If the tx
+	// attempt fails at the SQL level it is rolled back (nothing durable) and
+	// the batch replays on the classic per-event path below.
+	if w.batchDB != nil && w.projectBatchTx(ctx, records) {
+		return
+	}
+	w.projectPerEvent(ctx, records)
+}
+
+// projectPerEvent is the classic per-event autocommit path — the pre-batch
+// implementation, kept verbatim as the fallback (and the only path when no
+// batch DB is wired, e.g. mock-backed tests).
+func (w *Worker) projectPerEvent(ctx context.Context, records []ODSRecord) {
 	var lastOdsID int64
 	for i := range records {
 		rec := &records[i]
-		if err := w.projectOne(ctx, rec); err != nil {
+		out, err := w.projectOneOn(ctx, rec, w.odsReader, w.dwdWriter, nil)
+		w.bumpOutcome(out, err)
+		if err != nil {
 			slog.Error("projector project one", "ods_id", rec.OdsID, "event_id", rec.EventID, "error", err)
-			// Error already handled inside projectOne (retry/dead_letter)
+			// Error already handled inside projectOneOn (retry/dead_letter)
 		}
 		if rec.OdsID > lastOdsID {
 			lastOdsID = rec.OdsID
@@ -300,29 +370,165 @@ func (w *Worker) scanOnce(ctx context.Context) {
 	}
 }
 
+// projectBatchTx runs one scan batch inside a single transaction. Returns
+// false when the attempt was rolled back (caller replays per-event). Quota
+// materialization is debounced per (seat, billing period, UTC day) and runs
+// AFTER commit — RecomputeFromDWD is an absolute materialized view (SUM over
+// committed DWD), so collapsing per-fact calls into one per key yields the
+// identical final counter (fenced by TestPipeline_QuotaCounterMatchesDWDSum).
+func (w *Worker) projectBatchTx(ctx context.Context, records []ODSRecord) bool {
+	tx, err := w.batchDB.BeginTx(ctx)
+	if err != nil {
+		slog.Warn("projector batch tx begin failed; falling back to per-event",
+			"event.name", "projector.batch_tx.begin_failed", "error", err)
+		return false
+	}
+	txReader := &sqlODSReader{db: w.batchDB, ex: tx}
+	txWriter := &sqlDWDWriter{db: w.batchDB, ex: tx}
+
+	var facts []*DWDFact
+	var sink func(*DWDFact)
+	if w.quotaMat != nil {
+		sink = func(f *DWDFact) { facts = append(facts, f) }
+	}
+
+	type pendingBump struct {
+		out projectOutcome
+		err error
+	}
+	bumps := make([]pendingBump, 0, len(records))
+	var lastOdsID int64
+	for i := range records {
+		rec := &records[i]
+		out, perr := w.projectOneOn(ctx, rec, txReader, txWriter, sink)
+		if perr != nil {
+			// Any SQL failure inside the tx (insert/mark) poisons a PostgreSQL
+			// transaction — abort the attempt; the per-event replay gives the
+			// failing record its individual retry/dead-letter handling.
+			_ = tx.Rollback()
+			slog.Warn("projector batch tx failed; replaying per-event",
+				"event.name", "projector.batch_tx.replay",
+				"ods_id", rec.OdsID, "event_id", rec.EventID, "error", perr)
+			return false
+		}
+		bumps = append(bumps, pendingBump{out, perr})
+		if rec.OdsID > lastOdsID {
+			lastOdsID = rec.OdsID
+		}
+	}
+	if lastOdsID > 0 {
+		txCheckpoint := &sqlCheckpointStore{db: w.batchDB, ex: tx}
+		if err := txCheckpoint.UpdateCheckpoint(ctx, defaultTaskName, lastOdsID); err != nil {
+			_ = tx.Rollback()
+			slog.Warn("projector batch tx checkpoint failed; replaying per-event",
+				"event.name", "projector.batch_tx.checkpoint_failed", "error", err)
+			return false
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		_ = tx.Rollback()
+		slog.Warn("projector batch tx commit failed; replaying per-event",
+			"event.name", "projector.batch_tx.commit_failed", "error", err)
+		return false
+	}
+
+	// Metrics count only committed outcomes (a rolled-back attempt is recounted
+	// by its replay, never double-counted).
+	for _, b := range bumps {
+		w.bumpOutcome(b.out, b.err)
+	}
+
+	// Post-commit quota debounce: one OnFact per (seat, billingPeriod, UTC day)
+	// with summed deltas. The key preserves every periodKey the per-fact calls
+	// would have produced (daily keys off the UTC date, weekly off its ISO week,
+	// monthly off billingPeriod), and the summed deltas preserve the >0
+	// recompute-skip guard (a sum of non-negatives is >0 iff any part was).
+	if w.quotaMat != nil && len(facts) > 0 {
+		type qKey struct{ seat, period, day string }
+		type qAcc struct {
+			tokens, usd float64
+			eventTime   time.Time
+		}
+		agg := make(map[qKey]*qAcc)
+		for _, f := range facts {
+			et := f.EventTime.Time()
+			k := qKey{seat: f.SeatID, period: f.BillingPeriod, day: et.UTC().Format("2006-01-02")}
+			a := agg[k]
+			if a == nil {
+				a = &qAcc{eventTime: et}
+				agg[k] = a
+			}
+			a.tokens += float64(f.InputTokens + f.OutputTokens + f.CachedInputTokens +
+				f.CacheCreationInputTokens + f.ReasoningTokens)
+			a.usd += billableFloat(f.BillableAmount)
+		}
+		for k, a := range agg {
+			w.quotaMat.OnFact(ctx, k.seat, a.tokens, a.usd, k.period, a.eventTime)
+		}
+	}
+	return true
+}
+
+// projectOutcome classifies one record's terminal state for metrics counting,
+// which is deferred to the caller so a rolled-back batch attempt never counts.
+type projectOutcome int
+
+const (
+	outcomeProjected projectOutcome = iota
+	outcomeRetried
+	outcomeDeadLetter
+)
+
+// bumpOutcome applies the pre-batch metric semantics: Projected only counts a
+// clean success (a failed MarkProjected left the row pending — it will be
+// re-scanned); Retried/DeadLetter count the classification itself.
+func (w *Worker) bumpOutcome(out projectOutcome, err error) {
+	switch out {
+	case outcomeProjected:
+		if err == nil {
+			w.metrics.Projected.Add(1)
+		}
+	case outcomeRetried:
+		w.metrics.Retried.Add(1)
+	case outcomeDeadLetter:
+		w.metrics.DeadLetter.Add(1)
+	}
+}
+
+// projectOne keeps the pre-batch signature (used directly by unit tests): one
+// record through the worker's default reader/writer, metrics bumped inline.
 func (w *Worker) projectOne(ctx context.Context, rec *ODSRecord) error {
+	out, err := w.projectOneOn(ctx, rec, w.odsReader, w.dwdWriter, nil)
+	w.bumpOutcome(out, err)
+	return err
+}
+
+// projectOneOn projects one record through the given reader/writer (autocommit
+// or tx-bound). factSink, when non-nil, receives each genuinely-new fact
+// INSTEAD of the inline quota OnFact — the batch path uses it to debounce
+// quota recomputes until after commit.
+func (w *Worker) projectOneOn(ctx context.Context, rec *ODSRecord, odsW ODSReader, dwdW DWDWriter, factSink func(*DWDFact)) (projectOutcome, error) {
 	// Canary short-circuit: ack (MarkProjected) without enriching or writing
 	// to usage_fact_dwd. Canaries are liveness probes, not business data —
 	// inserting them would pollute /user/overview stats. Diagnostics queries
 	// ODS.dwd_status='projected' for the canary DWD watermark, so acking here
 	// is what advances that watermark and keeps watermark_health healthy.
 	if rec.VirtualKeyID.Valid && rec.VirtualKeyID.String == canaryVirtualKeyID {
-		if err := w.odsReader.MarkProjected(ctx, rec.OdsID, rec.EventTime); err != nil {
+		if err := odsW.MarkProjected(ctx, rec.OdsID, rec.EventTime); err != nil {
 			slog.Error("canary mark projected failed", "ods_id", rec.OdsID, "error", err)
-			return err
+			return outcomeProjected, err
 		}
-		w.metrics.Projected.Add(1)
-		return nil
+		return outcomeProjected, nil
 	}
 
 	fact, err := w.enricher.Enrich(ctx, rec)
 	if err != nil {
-		return w.handleError(ctx, rec, "ENRICH_FAILED", err.Error())
+		return w.handleErrorOn(ctx, rec, odsW, "ENRICH_FAILED", err.Error())
 	}
 
-	inserted, err := w.dwdWriter.Insert(ctx, fact)
+	inserted, err := dwdW.Insert(ctx, fact)
 	if err != nil {
-		return w.handleError(ctx, rec, "DWD_INSERT_FAILED", err.Error())
+		return w.handleErrorOn(ctx, rec, odsW, "DWD_INSERT_FAILED", err.Error())
 	}
 
 	if !inserted {
@@ -333,21 +539,25 @@ func (w *Worker) projectOne(ctx context.Context, rec *ODSRecord) error {
 	// Phase 2 Stage 5: materialize quota_counter + record threshold crossings,
 	// ONLY for genuinely-new facts (inserted) so re-projection never double-counts
 	// (tied to the DWD insert's org_id+event_id idempotency). Best-effort +
-	// panic-guarded inside — never blocks projection.
-	if inserted && w.quotaMat != nil {
-		tokenDelta := float64(fact.InputTokens + fact.OutputTokens + fact.CachedInputTokens +
-			fact.CacheCreationInputTokens + fact.ReasoningTokens)
-		w.quotaMat.OnFact(ctx, fact.SeatID, tokenDelta, billableFloat(fact.BillableAmount),
-			fact.BillingPeriod, fact.EventTime.Time())
+	// panic-guarded inside — never blocks projection. In batch-tx mode factSink
+	// collects the fact instead; the debounced OnFact runs after commit.
+	if inserted {
+		if factSink != nil {
+			factSink(fact)
+		} else if w.quotaMat != nil {
+			tokenDelta := float64(fact.InputTokens + fact.OutputTokens + fact.CachedInputTokens +
+				fact.CacheCreationInputTokens + fact.ReasoningTokens)
+			w.quotaMat.OnFact(ctx, fact.SeatID, tokenDelta, billableFloat(fact.BillableAmount),
+				fact.BillingPeriod, fact.EventTime.Time())
+		}
 	}
 
-	if err := w.odsReader.MarkProjected(ctx, rec.OdsID, rec.EventTime); err != nil {
+	if err := odsW.MarkProjected(ctx, rec.OdsID, rec.EventTime); err != nil {
 		slog.Error("mark projected failed", "ods_id", rec.OdsID, "error", err)
-		return err
+		return outcomeProjected, err
 	}
 
-	w.metrics.Projected.Add(1)
-	return nil
+	return outcomeProjected, nil
 }
 
 // billableFloat parses the DWD fact's billable_amount (a *string decimal, nil
@@ -363,18 +573,19 @@ func billableFloat(s *string) float64 {
 	return v
 }
 
-func (w *Worker) handleError(ctx context.Context, rec *ODSRecord, errCode, errMsg string) error {
+// handleErrorOn classifies a failed record (retry vs dead-letter) and writes
+// the mark through the given reader. Metrics are the caller's job (bumpOutcome)
+// so a rolled-back batch attempt never counts.
+func (w *Worker) handleErrorOn(ctx context.Context, rec *ODSRecord, odsW ODSReader, errCode, errMsg string) (projectOutcome, error) {
 	newRetryCount := rec.DwdRetryCount + 1
 	if newRetryCount >= deadLetterThreshold {
 		slog.Warn("projector dead letter",
 			"ods_id", rec.OdsID, "event_id", rec.EventID, "retry_count", newRetryCount)
-		w.metrics.DeadLetter.Add(1)
-		return w.odsReader.MarkDeadLetter(ctx, rec.OdsID, rec.EventTime, errCode, errMsg)
+		return outcomeDeadLetter, odsW.MarkDeadLetter(ctx, rec.OdsID, rec.EventTime, errCode, errMsg)
 	}
 
-	w.metrics.Retried.Add(1)
 	slog.Warn("projector retry",
 		"ods_id", rec.OdsID, "event_id", rec.EventID,
 		"retry_count", newRetryCount, "error_code", errCode)
-	return w.odsReader.MarkRetry(ctx, rec.OdsID, rec.EventTime, newRetryCount, errCode, errMsg)
+	return outcomeRetried, odsW.MarkRetry(ctx, rec.OdsID, rec.EventTime, newRetryCount, errCode, errMsg)
 }

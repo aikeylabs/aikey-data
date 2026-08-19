@@ -55,6 +55,27 @@ type Repository interface {
 	RecordKnownLoss(ctx context.Context, orgID, sourceID string, seqs []int64, reason string) (contiguous int64, err error)
 }
 
+// BatchRecordWriter runs a whole conversation batch inside ONE transaction
+// (one commit + WAL fsync per batch — P0-4 batch rewrite). Same per-record
+// semantics as Repository; SeqOwner sees the batch's own uncommitted rows
+// (read-your-own-writes) so intra-batch seq conflicts are still caught.
+// Failed reports an infrastructure-level SQL failure (poisons a PostgreSQL
+// tx); the caller Rollbacks and replays per-record.
+type BatchRecordWriter interface {
+	SeqOwner(ctx context.Context, orgID, sourceID string, seq int64) (eventID string, found bool, err error)
+	InsertRecord(ctx context.Context, e *ConversationRecord, quarantined bool) (inserted bool, err error)
+	UpsertSession(ctx context.Context, orgID, sessionID, ownerAccountID, systemText string) error
+	Failed() bool
+	Commit() error
+	Rollback() error
+}
+
+// BatchCapableRepository is the optional capability enabling the batch path;
+// repositories without it keep the per-record path.
+type BatchCapableRepository interface {
+	BeginBatch(ctx context.Context) (BatchRecordWriter, error)
+}
+
 // StaleGap is one source with an aged delivery gap, returned by ScanStaleGaps.
 type StaleGap struct {
 	OrgID           string

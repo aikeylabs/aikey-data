@@ -225,11 +225,24 @@ type BatchResponse struct {
 	// NOT billed, held for review. omitempty so pre-C batches don't carry it.
 	Quarantined   int              `json:"quarantined,omitempty"`
 	ContiguousSeq map[string]int64 `json:"contiguous_seq,omitempty"`
+
+	// touched marks the (org, source) pairs whose delivery-integrity watermark
+	// must be advanced after the batch commits. Internal plumbing between
+	// tallyResults and advanceWatermarks — never serialized.
+	touched map[srcKey]struct{} `json:"-"`
 }
+
+// srcKey identifies one delivery-integrity watermark row.
+type srcKey struct{ org, src string }
 
 // EventResult tracks per-event ingest outcome.
 type EventResult struct {
 	EventID string
 	Status  string // "accepted", "duplicated", "rejected"
 	Reason  string
+	// contentHashConflict marks a duplicate whose stored content_hash differs
+	// from the incoming one (§6.2). Internal — metrics are tallied from results
+	// once per finally-committed outcome, so a rolled-back batch attempt never
+	// double-counts. Never serialized.
+	contentHashConflict bool
 }

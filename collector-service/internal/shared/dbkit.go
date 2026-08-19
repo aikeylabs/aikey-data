@@ -208,6 +208,46 @@ func (d *DB) BindMillisPtr(m *aikeytime.Millis) any {
 	return m.Time()
 }
 
+// Execer is the minimal statement-execution surface shared by *DB (autocommit)
+// and *Tx (batch transaction). Repository write paths that must be able to run
+// inside a batch transaction execute through an Execer instead of *DB directly;
+// dialect helpers (pure string/bind builders) stay on *DB. Introduced for the
+// P0-4 batch-transaction rewrite (one commit+fsync per batch instead of per
+// event) — see update/20260819-审计流水线容量-P0-4核证与批量投影方案.md.
+type Execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// Tx is a dialect-aware transaction: same ?→$n rewriting as DB, statements run
+// inside one BEGIN…COMMIT (one WAL fsync at commit).
+type Tx struct {
+	tx *sql.Tx
+	d  *DB
+}
+
+// BeginTx opens a batch transaction on the underlying pool.
+func (d *DB) BeginTx(ctx context.Context) (*Tx, error) {
+	tx, err := d.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &Tx{tx: tx, d: d}, nil
+}
+
+func (t *Tx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return t.tx.ExecContext(ctx, t.d.rewrite(query), args...)
+}
+func (t *Tx) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return t.tx.QueryContext(ctx, t.d.rewrite(query), args...)
+}
+func (t *Tx) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	return t.tx.QueryRowContext(ctx, t.d.rewrite(query), args...)
+}
+func (t *Tx) Commit() error   { return t.tx.Commit() }
+func (t *Tx) Rollback() error { return t.tx.Rollback() }
+
 func (d *DB) rewrite(query string) string {
 	if d.Dialect != DialectPostgres || !strings.Contains(query, "?") {
 		return query

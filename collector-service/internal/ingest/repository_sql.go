@@ -92,6 +92,52 @@ const odsPlaceholders = `?,?,?,?,?,
 // where the 5s projector could grab the row in between. content_hash is stored
 // for forensics + duplicate-conflict detection (§6.2).
 func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte, quarantined bool) (inserted, conflict bool, err error) {
+	inserted, conflict, _, err = insertEventOn(ctx, r.db, r.db, e, rawJSON, quarantined)
+	return inserted, conflict, err
+}
+
+// BeginBatch opens one transaction for a whole ingest batch so the batch costs
+// ONE commit+WAL-fsync instead of one per event (P0-4 batch rewrite). The
+// returned writer runs the SAME per-event insert logic (per-row statements —
+// NOT a multi-row INSERT — so intra-batch duplicate event_ids and the F2
+// swallow guard keep their exact per-row semantics). Infra-level SQL failures
+// are flagged via Failed() so the service can roll back and replay the batch
+// on the per-event autocommit path (on PostgreSQL one failed statement aborts
+// the whole transaction; per-event independence is preserved by that replay).
+func (r *sqlODS) BeginBatch(ctx context.Context) (BatchEventWriter, error) {
+	tx, err := r.db.BeginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &odsBatchWriter{d: r.db, tx: tx}, nil
+}
+
+type odsBatchWriter struct {
+	d      *shared.DB
+	tx     *shared.Tx
+	failed bool
+}
+
+func (b *odsBatchWriter) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte, quarantined bool) (bool, bool, error) {
+	inserted, conflict, infra, err := insertEventOn(ctx, b.d, b.tx, e, rawJSON, quarantined)
+	if infra {
+		b.failed = true
+	}
+	return inserted, conflict, err
+}
+
+func (b *odsBatchWriter) Failed() bool    { return b.failed }
+func (b *odsBatchWriter) Commit() error   { return b.tx.Commit() }
+func (b *odsBatchWriter) Rollback() error { return b.tx.Rollback() }
+
+// insertEventOn is the single insert implementation, executing through either
+// the autocommit pool (*shared.DB) or a batch transaction (*shared.Tx). infra
+// reports an infrastructure-level SQL failure (statement exec / scan error) as
+// opposed to the logical F2 "silently ignored" detection — inside a PostgreSQL
+// transaction an infra failure poisons the tx, so the batch writer uses it to
+// trigger rollback+replay, while the F2 detection (a successful statement +
+// ErrNoRows verify) is safe to continue past.
+func insertEventOn(ctx context.Context, d *shared.DB, ex shared.Execer, e *UsageEvent, rawJSON []byte, quarantined bool) (inserted, conflict, infra bool, err error) {
 	ingestStatus, dwdStatus := "accepted", "pending"
 	if quarantined {
 		ingestStatus, dwdStatus = "quarantined", "quarantined"
@@ -111,16 +157,16 @@ func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte,
 	// path will misread a true duplicate as a NOT NULL/CHECK rejection. See
 	// workflow/CI/bugfix/2026-06-10-collector-dedup-event-time-misclassify.md.
 	conflictTarget := "org_id, event_id"
-	if r.db.Dialect == shared.DialectPostgres {
+	if d.Dialect == shared.DialectPostgres {
 		conflictTarget = "org_id, event_id, event_time"
 	}
-	insertODS := r.db.InsertOrIgnoreOn("usage_event_ods", odsColumns, odsPlaceholders, conflictTarget)
-	res, err := r.db.ExecContext(ctx, insertODS,
+	insertODS := d.InsertOrIgnoreOn("usage_event_ods", odsColumns, odsPlaceholders, conflictTarget)
+	res, err := ex.ExecContext(ctx, insertODS,
 		e.EventID, nullStr(e.RequestID), nullStr(e.TraceID), nullStr(e.ProxyInstanceID), nullStr(e.DeviceID),
 		e.SchemaVersion, "local_proxy", nullStr(e.SourceVersion), nullStr(e.ClientVersion),
 		nullStr(e.ProxyConfigVersion), e.ProxyLoadedControlSeq,
-		r.db.BindMillis(e.EventTime), r.db.BindMillis(e.OccurredAt), r.db.BindMillisPtr(e.StartedAt), r.db.BindMillisPtr(e.FinishedAt),
-		r.db.BindMillis(aikeytime.Now()), r.db.BindMillis(aikeytime.Now()),
+		d.BindMillis(e.EventTime), d.BindMillis(e.OccurredAt), d.BindMillisPtr(e.StartedAt), d.BindMillisPtr(e.FinishedAt),
+		d.BindMillis(aikeytime.Now()), d.BindMillis(aikeytime.Now()),
 		e.OrgID, nullStr(e.AccountID), nullStr(e.SeatID), nullStr(e.AccountStatusSnapshot),
 		nullStr(e.VirtualKeyID), nullStr(e.VirtualKeyRevision), nullStr(e.VirtualKeyHash),
 		nullStr(e.BindingID), nullStr(e.CredentialID), nullStr(e.CredentialRevision),
@@ -144,11 +190,11 @@ func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte,
 		nullStr(e.FallbackReason), e.FallbackAttempt,
 	)
 	if err != nil {
-		return false, false, fmt.Errorf("insert ods event %s: %w", e.EventID, err)
+		return false, false, true, fmt.Errorf("insert ods event %s: %w", e.EventID, err)
 	}
 	n, _ := res.RowsAffected()
 	if n > 0 {
-		return true, false, nil
+		return true, false, false, nil
 	}
 	// rowsAffected==0 from `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` is
 	// historically misread as "duplicate". It also fires for *any* other
@@ -171,18 +217,18 @@ func (r *sqlODS) InsertEvent(ctx context.Context, e *UsageEvent, rawJSON []byte,
 	// event_time in the WHERE prunes to the one partition on PostgreSQL (harmless
 	// extra filter on SQLite). It matches the existing row because event_time is
 	// deterministic per event, so it never hides a genuine duplicate.
-	verr := r.db.QueryRowContext(ctx,
+	verr := ex.QueryRowContext(ctx,
 		"SELECT content_hash FROM usage_event_ods WHERE org_id = ? AND event_id = ? AND event_time = ? LIMIT 1",
-		e.OrgID, e.EventID, r.db.BindMillis(e.EventTime),
+		e.OrgID, e.EventID, d.BindMillis(e.EventTime),
 	).Scan(&storedHash)
 	if verr == nil {
 		conflict := e.ContentHash != "" && storedHash.Valid && storedHash.String != "" && storedHash.String != e.ContentHash
-		return false, conflict, nil // genuine duplicate (conflict flagged when hashes differ)
+		return false, conflict, false, nil // genuine duplicate (conflict flagged when hashes differ)
 	}
 	if verr == sql.ErrNoRows {
-		return false, false, fmt.Errorf("ods INSERT silently ignored (no UNIQUE conflict on org_id=%s event_id=%s) — likely NOT NULL/CHECK/FK violation. F2 root cause: NOT NULL on _legacy_text columns left over from v1.0.3 hook is hit when v1.0.4 collector binds only INTEGER columns. Run dbmigrate v1.0.4 hook upgrade to drop legacy NOT NULL", e.OrgID, e.EventID)
+		return false, false, false, fmt.Errorf("ods INSERT silently ignored (no UNIQUE conflict on org_id=%s event_id=%s) — likely NOT NULL/CHECK/FK violation. F2 root cause: NOT NULL on _legacy_text columns left over from v1.0.3 hook is hit when v1.0.4 collector binds only INTEGER columns. Run dbmigrate v1.0.4 hook upgrade to drop legacy NOT NULL", e.OrgID, e.EventID)
 	}
-	return false, false, fmt.Errorf("verify dedup for event_id=%s: %w", e.EventID, verr)
+	return false, false, true, fmt.Errorf("verify dedup for event_id=%s: %w", e.EventID, verr)
 }
 
 // advanceWatermarkScanLimit bounds how many source_seq rows AdvanceWatermark
