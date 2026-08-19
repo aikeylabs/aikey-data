@@ -38,6 +38,13 @@ type HourlyPoint struct {
 	TotalTokens  int64   `json:"total_tokens"`
 	RequestCount int64   `json:"request_count"`
 	CostUSD      float64 `json:"cost_usd"` // USD billable summed for the hour
+	// ProviderCode is set ONLY when the query ran with group_by=provider
+	// (2026-08-18, tray route↔usage linkage variant B): rows then carry one
+	// (hour, provider) pair each and the client sums whatever grouping it
+	// wants — per client route, per family — without a second query shape.
+	// Empty in the default ungrouped mode; omitempty keeps the wire format
+	// byte-identical for every existing consumer.
+	ProviderCode string `json:"provider_code,omitempty"`
 }
 
 // ProtocolTimelinePoint adds provider dimension to a timeline point.
@@ -437,6 +444,12 @@ type QueryParams struct {
 	// Other endpoints (hourly / by-protocol / by-key / recent) ignore
 	// the field; extending them is a non-goal of Phase 4 Stage B.
 	AppSlug string
+
+	// GroupByProvider, when true, makes PersonalHourlyTimeline return one row
+	// per (hour, provider_code) instead of one per hour — the additive
+	// dimension behind the tray's per-route chart (variant B). Same shape of
+	// opt-in as AppSlug above: zero value preserves existing behaviour.
+	GroupByProvider bool
 
 	// SessionID, when non-empty, narrows the result to events tagged
 	// with this conversation session. Powers the Performance page's

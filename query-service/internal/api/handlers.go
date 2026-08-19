@@ -784,6 +784,9 @@ func parsePersonalParams(r *http.Request) (usage.QueryParams, error) {
 		// `personalTimeline` + `personalByModelTotal`. Other endpoints
 		// ignore this field — see QueryParams.AppSlug doc.
 		AppSlug: q.Get("app_slug"),
+		// group_by=provider is the only grouped mode; any other value is
+		// ignored rather than erroring, matching how unknown params behave.
+		GroupByProvider: q.Get("group_by") == "provider",
 		// Performance drill-down (2026-05-26): optional per-session
 		// scoping. Honored by personalByKeyTotal + personalByModelTotal
 		// when set; personalBySessionTotal deliberately ignores it (the

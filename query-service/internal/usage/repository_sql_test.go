@@ -1480,3 +1480,62 @@ func TestMasterUpstreamStepArounds(t *testing.T) {
 		t.Errorf("last_at = %d, want the most recent switch (%d)", last, baseMs+4*60_000)
 	}
 }
+
+// group_by=provider (2026-08-18, tray route↔usage linkage variant B): one row
+// per (hour, provider_code), so a client can build per-provider or per-family
+// series without a second query shape. The fence pins three things at once:
+// the grouped rows carry the dimension, the SAME params without the flag keep
+// the exact pre-existing one-row-per-hour shape (additive contract), and the
+// grouped rows sum to the ungrouped ones (no traffic invented or dropped).
+func TestPersonalHourlyTimeline_GroupByProvider(t *testing.T) {
+	db := setupUsageTestDB(t)
+
+	utcInstant, _ := time.Parse(time.RFC3339, "2026-04-24T10:30:00Z")
+	ms := utcInstant.UTC().UnixMilli()
+	const date = "2026-04-24"
+	// Two providers in the SAME hour — the one case a per-hour rollup cannot
+	// represent and the grouped mode exists for.
+	insertDWD(t, db, dwdRow{
+		EventID: "grp-ev1", OrgID: "org1", SeatID: "seat1",
+		ProviderCode: "moonshot", BillingScope: "org_and_user",
+		EventTimeMs: ms, UsageDate: date, TotalTokens: 400, RequestCount: 4,
+	})
+	insertDWD(t, db, dwdRow{
+		EventID: "grp-ev2", OrgID: "org1", SeatID: "seat1",
+		ProviderCode: "anthropic", BillingScope: "org_and_user",
+		EventTimeMs: ms, UsageDate: date, TotalTokens: 600, RequestCount: 6,
+	})
+
+	repo := NewSQLRepository(db)
+	day, _ := time.Parse("2006-01-02", date)
+
+	grouped, err := repo.PersonalHourlyTimeline(context.Background(), QueryParams{
+		SeatID: "seat1", StartDate: day, GroupByProvider: true,
+	})
+	if err != nil {
+		t.Fatalf("grouped: %v", err)
+	}
+	if len(grouped) != 2 {
+		t.Fatalf("want one row per (hour, provider), got %+v", grouped)
+	}
+	byProv := map[string]HourlyPoint{}
+	for _, p := range grouped {
+		if p.Hour != 10 {
+			t.Errorf("row hour = %d, want 10: %+v", p.Hour, p)
+		}
+		byProv[p.ProviderCode] = p
+	}
+	if byProv["moonshot"].TotalTokens != 400 || byProv["anthropic"].TotalTokens != 600 {
+		t.Errorf("grouped split wrong: %+v", byProv)
+	}
+
+	ungrouped, err := repo.PersonalHourlyTimeline(context.Background(), QueryParams{
+		SeatID: "seat1", StartDate: day,
+	})
+	if err != nil {
+		t.Fatalf("ungrouped: %v", err)
+	}
+	if len(ungrouped) != 1 || ungrouped[0].ProviderCode != "" || ungrouped[0].TotalTokens != 1000 {
+		t.Errorf("ungrouped mode must stay one bare row per hour summing everything: %+v", ungrouped)
+	}
+}

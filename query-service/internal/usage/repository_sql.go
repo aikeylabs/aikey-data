@@ -163,14 +163,24 @@ func (r *sqlRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]
 	appSlugFrag, appSlugArg := appSlugFilter(p)
 	args := []interface{}{id, r.db.BindMillis(dayStart), r.db.BindMillis(dayEnd)}
 	args = appendNonNil(args, appSlugArg)
+	// group_by=provider (2026-08-18, additive — same opt-in shape as the
+	// AppSlug filter above): one row per (hour, provider_code), letting the
+	// client build any per-provider or per-family series without a second
+	// query shape. COALESCE because ODS rows predating provider tagging carry
+	// NULL, and a NULL group would otherwise become a phantom provider.
+	provCol, provGroup := "", ""
+	if p.GroupByProvider {
+		provCol = ", COALESCE(provider_code,'')"
+		provGroup = ", COALESCE(provider_code,'')"
+	}
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT %s AS hour, COALESCE(SUM(total_tokens),0), COALESCE(SUM(client_request_count),0),
+		SELECT %s AS hour%s, COALESCE(SUM(total_tokens),0), COALESCE(SUM(client_request_count),0),
 		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0)
 		FROM usage_reporting_fact
 		WHERE %s
 		  AND event_time >= ? AND event_time < ?%s
-		GROUP BY hour
-		ORDER BY hour`, hourExpr, filter, appSlugFrag),
+		GROUP BY hour%s
+		ORDER BY hour`, hourExpr, provCol, filter, appSlugFrag, provGroup),
 		args...)
 	if err != nil {
 		return nil, fmt.Errorf("personal hourly timeline: %w", err)
@@ -179,8 +189,14 @@ func (r *sqlRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]
 	var result []HourlyPoint
 	for rows.Next() {
 		var hp HourlyPoint
-		if err := rows.Scan(&hp.Hour, &hp.TotalTokens, &hp.RequestCount, &hp.CostUSD); err != nil {
-			return nil, err
+		var scanErr error
+		if p.GroupByProvider {
+			scanErr = rows.Scan(&hp.Hour, &hp.ProviderCode, &hp.TotalTokens, &hp.RequestCount, &hp.CostUSD)
+		} else {
+			scanErr = rows.Scan(&hp.Hour, &hp.TotalTokens, &hp.RequestCount, &hp.CostUSD)
+		}
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan hourly point: %w", scanErr)
 		}
 		result = append(result, hp)
 	}
