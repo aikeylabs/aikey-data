@@ -1539,3 +1539,41 @@ func TestPersonalHourlyTimeline_GroupByProvider(t *testing.T) {
 		t.Errorf("ungrouped mode must stay one bare row per hour summing everything: %+v", ungrouped)
 	}
 }
+
+// LocalAllScope must count rows from EVERY identity in a personal database:
+// personal keys (org_id="personal"), team keys (real org + seat) and OAuth
+// (its own account) all land in the same local DB, and the desktop app asks
+// for the machine's total (2026-08-20). Without it the app shows the
+// personal-key slice and calls it "today's usage".
+func TestPersonalHourlyTimeline_LocalAllScopeSpansEveryIdentity(t *testing.T) {
+	db := setupUsageTestDB(t)
+	repo := NewSQLRepository(db)
+	day, _ := time.Parse("2006-01-02", "2026-08-20")
+	at := day.Add(3 * time.Hour).UnixMilli()
+
+	insertDWD(t, db, dwdRow{EventID: "p1", OrgID: "personal", EventTimeMs: at, UsageDate: "2026-08-20", TotalTokens: 10, RequestCount: 1})
+	insertDWD(t, db, dwdRow{EventID: "t1", OrgID: "org-real", SeatID: "seat-9", EventTimeMs: at, UsageDate: "2026-08-20", TotalTokens: 20, RequestCount: 1})
+	insertDWD(t, db, dwdRow{EventID: "o1", OrgID: "org-oauth", AccountID: "acct-oauth", EventTimeMs: at, UsageDate: "2026-08-20", TotalTokens: 30, RequestCount: 1})
+
+	sum := func(p QueryParams) int64 {
+		pts, err := repo.PersonalHourlyTimeline(context.Background(), p)
+		if err != nil {
+			t.Fatalf("query failed: %v", err)
+		}
+		var n int64
+		for _, pt := range pts {
+			n += pt.TotalTokens
+		}
+		return n
+	}
+
+	scoped := QueryParams{OrgID: "personal", StartDate: day}
+	if got := sum(scoped); got != 10 {
+		t.Fatalf("personal-only scope should see 10 tokens, got %d", got)
+	}
+	all := scoped
+	all.LocalAllScope = true
+	if got := sum(all); got != 60 {
+		t.Fatalf("local-all scope must span personal+team+oauth (60 tokens), got %d", got)
+	}
+}

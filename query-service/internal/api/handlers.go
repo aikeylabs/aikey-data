@@ -18,17 +18,28 @@ const resolvedOwnerScopeHeader = "X-Aikey-Resolved-Owner-Scope"
 // UsageHandler handles usage query endpoints.
 type UsageHandler struct {
 	repo usage.Repository
+	// localAllScope is the DEPLOYMENT capability behind QueryParams'
+	// LocalAllScope: true only for the personal edition's in-proc facade,
+	// whose database holds exactly one human's traffic. Construction-time,
+	// never request-time — see the QueryParams.LocalAllScope doc.
+	localAllScope bool
 }
 
 func NewUsageHandler(repo usage.Repository) *UsageHandler {
 	return &UsageHandler{repo: repo}
 }
 
+// NewPersonalUsageHandler builds the handler for a PERSONAL single-user
+// database, where "all usage on this machine" is a legitimate question.
+func NewPersonalUsageHandler(repo usage.Repository) *UsageHandler {
+	return &UsageHandler{repo: repo, localAllScope: true}
+}
+
 // --- Personal page ---
 
 // GET /v1/usage/personal/timeline?seat_id=...&start_date=...&end_date=...
 func (h *UsageHandler) PersonalTimeline(w http.ResponseWriter, r *http.Request) {
-	p, err := parsePersonalParams(r)
+	p, err := h.personalParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
@@ -55,7 +66,7 @@ func (h *UsageHandler) PersonalTimeline(w http.ResponseWriter, r *http.Request) 
 // noon (what was UTC 04:00). Endpoint intentionally ignores end_date
 // — the bucket shape only makes sense for a single day.
 func (h *UsageHandler) PersonalHourlyTimeline(w http.ResponseWriter, r *http.Request) {
-	p, err := parsePersonalParams(r)
+	p, err := h.personalParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
@@ -92,7 +103,7 @@ func (h *UsageHandler) PersonalHourlyTimeline(w http.ResponseWriter, r *http.Req
 
 // GET /v1/usage/personal/by-protocol/timeline?seat_id=...&start_date=...&end_date=...
 func (h *UsageHandler) PersonalByProtocolTimeline(w http.ResponseWriter, r *http.Request) {
-	p, err := parsePersonalParams(r)
+	p, err := h.personalParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
@@ -118,7 +129,7 @@ func (h *UsageHandler) PersonalByProtocolTimeline(w http.ResponseWriter, r *http
 // only ?start_date/?end_date — ?date semantics are hourly-handler
 // specific). SQL impl consumes StartDate + TZOffsetMs.
 func (h *UsageHandler) PersonalByProtocolHourly(w http.ResponseWriter, r *http.Request) {
-	p, err := parsePersonalParams(r)
+	p, err := h.personalParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
@@ -152,7 +163,7 @@ func (h *UsageHandler) PersonalByProtocolHourly(w http.ResponseWriter, r *http.R
 
 // GET /v1/usage/personal/by-protocol/total?seat_id=...&start_date=...&end_date=...
 func (h *UsageHandler) PersonalByProtocolTotal(w http.ResponseWriter, r *http.Request) {
-	p, err := parsePersonalParams(r)
+	p, err := h.personalParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
@@ -177,7 +188,7 @@ func (h *UsageHandler) PersonalByProtocolTotal(w http.ResponseWriter, r *http.Re
 // provider_code (anthropic→claude, openai→codex, kimi_code→kimi, ...).
 // See usage.AppTotal docstring for the full shape contract.
 func (h *UsageHandler) PersonalByAppTotal(w http.ResponseWriter, r *http.Request) {
-	p, err := parsePersonalParams(r)
+	p, err := h.personalParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
@@ -201,7 +212,7 @@ func (h *UsageHandler) PersonalByAppTotal(w http.ResponseWriter, r *http.Request
 // rows under that root. Sensitive account-identity enrichment has the stronger
 // server-owned scope gate below because seat_id is otherwise a request param.
 func (h *UsageHandler) PersonalByAgentTotal(w http.ResponseWriter, r *http.Request) {
-	p, err := parsePersonalParams(r)
+	p, err := h.personalParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
@@ -237,7 +248,7 @@ func (h *UsageHandler) PersonalByAgentTotal(w http.ResponseWriter, r *http.Reque
 // (default 10, no hard cap — the underlying query already coalesces
 // per-session so payload size is bounded by distinct sessions).
 func (h *UsageHandler) PersonalBySessionTotal(w http.ResponseWriter, r *http.Request) {
-	p, err := parsePersonalParams(r)
+	p, err := h.personalParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
@@ -266,7 +277,7 @@ func (h *UsageHandler) PersonalBySessionTotal(w http.ResponseWriter, r *http.Req
 // endpoint (not this one, which is shaped for the Overview "Recent
 // Requests" mini-card). Phase 3B R23.
 func (h *UsageHandler) PersonalRecent(w http.ResponseWriter, r *http.Request) {
-	p, err := parsePersonalParams(r)
+	p, err := h.personalParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
@@ -301,7 +312,7 @@ func (h *UsageHandler) PersonalRecent(w http.ResponseWriter, r *http.Request) {
 // Per-request rows for the Usage Detail page (last 7 days via start/end_date;
 // optional drill-down filters). Reads usage_event_ods (per-event source).
 func (h *UsageHandler) PersonalUsageDetail(w http.ResponseWriter, r *http.Request) {
-	p, err := parsePersonalParams(r)
+	p, err := h.personalParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
@@ -342,7 +353,7 @@ func (h *UsageHandler) PersonalUsageDetail(w http.ResponseWriter, r *http.Reques
 // total_tokens DESC, capped at 20 in the repo layer. Model strings
 // are kept as provider-reported (no snapshot normalization).
 func (h *UsageHandler) PersonalByModelTotal(w http.ResponseWriter, r *http.Request) {
-	p, err := parsePersonalParams(r)
+	p, err := h.personalParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
@@ -362,7 +373,7 @@ func (h *UsageHandler) PersonalByModelTotal(w http.ResponseWriter, r *http.Reque
 // GET /v1/usage/personal/by-key/total?seat_id=...&start_date=...&end_date=...
 // OR account_id=...
 func (h *UsageHandler) PersonalByKeyTotal(w http.ResponseWriter, r *http.Request) {
-	p, err := parsePersonalParams(r)
+	p, err := h.personalParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
@@ -764,6 +775,25 @@ func msToRFC3339(ms int64) string {
 }
 
 // --- param parsers ---
+
+// personalParams wraps parsePersonalParams and grants the deployment's
+// local-all capability. Every personal endpoint goes through it, so a new
+// endpoint cannot forget the scope and silently under-report.
+func (h *UsageHandler) personalParams(r *http.Request) (usage.QueryParams, error) {
+	p, err := parsePersonalParams(r)
+	if err != nil {
+		return p, err
+	}
+	// TWO conditions, deliberately (2026-08-20): the deployment must ALLOW
+	// the question (personal single-user DB) AND the caller must ASK it
+	// (?scope=all). Capability alone would silently widen every existing
+	// consumer — the Personal web's Overview charts call this same endpoint
+	// and must keep showing the personal-key figures they always showed.
+	// On a team deployment the param is ignored outright, so it can never
+	// be used to read across users.
+	p.LocalAllScope = h.localAllScope && r.URL.Query().Get("scope") == "all"
+	return p, nil
+}
 
 func parsePersonalParams(r *http.Request) (usage.QueryParams, error) {
 	q := r.URL.Query()

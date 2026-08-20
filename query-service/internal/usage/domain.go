@@ -451,6 +451,19 @@ type QueryParams struct {
 	// opt-in as AppSlug above: zero value preserves existing behaviour.
 	GroupByProvider bool
 
+	// LocalAllScope drops the identity filter entirely: every row in this
+	// database counts (2026-08-20 desktop app "全部用量" ask). A personal
+	// machine's traffic arrives under three identities — personal keys as
+	// org_id="personal", team keys as the real org + seat, OAuth as its own
+	// account — so any single-identity filter reports a fraction as if it
+	// were the total.
+	//
+	// 🔴 NEVER settable from the query string. It is a DEPLOYMENT capability
+	// (personal single-user DB), granted at handler construction by
+	// appkit.Config.PersonalLocalScope; a shared team database must never
+	// honour it or one user reads another's usage.
+	LocalAllScope bool
+
 	// SessionID, when non-empty, narrows the result to events tagged
 	// with this conversation session. Powers the Performance page's
 	// drill-down — clicking a row in the Top N sessions chart filters

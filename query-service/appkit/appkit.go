@@ -22,6 +22,12 @@ type Config struct {
 	ServiceToken string
 	// Logger for query-service output.
 	Logger *slog.Logger
+	// PersonalLocalScope marks a PERSONAL single-user database, where the
+	// desktop app may ask for "all usage on this machine" across personal /
+	// team / OAuth identities (2026-08-20). Team and cluster deployments
+	// leave it false — their database is shared, and an unfiltered query
+	// there would cross user boundaries.
+	PersonalLocalScope bool
 }
 
 // NewHandler assembles the query-service and returns a single http.Handler.
@@ -29,6 +35,9 @@ func NewHandler(db *sql.DB, cfg Config) http.Handler {
 	ddb := shared.NewDB(db, cfg.DBDialect)
 	repo := usage.NewSQLRepository(ddb)
 	handler := api.NewUsageHandler(repo)
+	if cfg.PersonalLocalScope {
+		handler = api.NewPersonalUsageHandler(repo)
+	}
 	admin := api.NewAdminHandler(repo)
 	convH := api.NewConversationHandler(conversation.NewSQLRepository(ddb))
 	// Keep embedded Trial/Personal and standalone Production/Cluster on the

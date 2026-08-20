@@ -35,6 +35,25 @@ func NewSQLRepository(db *shared.DB) Repository {
 // org_id="personal" but no account_id. Without this clause the query returns
 // empty, and the Usage Ledger shows zero.
 func personalFilter(p QueryParams) (clause string, id string) {
+	// LocalAllScope: every row in THIS database, whatever org / account /
+	// seat tagged it (2026-08-20, desktop app "全部用量" ask). The personal
+	// machine's local DB holds exactly one human's traffic, but that traffic
+	// arrives under three different identities — personal keys report
+	// org_id="personal", team keys report the real org + seat, OAuth reports
+	// its own account — so ANY single-identity filter shows a fraction and
+	// silently calls it the total.
+	//
+	// 🔴 NOT settable from the query string. A team deployment serves many
+	// people from one database, where "every row" would be a cross-user
+	// leak; the flag is injected server-side by the personal local-server
+	// facade only (appkit/user-local mounts this in-proc). See the
+	// LocalAllScope field doc for the wiring.
+	if p.LocalAllScope {
+		// The placeholder is kept (bound to an ignored value) so every
+		// caller's arg list keeps the same shape — the clause is simply
+		// always true.
+		return "(1 = 1 OR org_id = ?)", ""
+	}
 	if p.SeatID != "" {
 		return "seat_id = ?", p.SeatID
 	}
