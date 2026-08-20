@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -18,10 +19,10 @@ type gapsRepo interface {
 }
 
 type gapsResponse struct {
-	OrgID      string  `json:"org_id"`
-	SourceID   string  `json:"source_id"`
+	OrgID       string  `json:"org_id"`
+	SourceID    string  `json:"source_id"`
 	MissingSeqs []int64 `json:"missing_seqs"`
-	Truncated  bool    `json:"truncated"`
+	Truncated   bool    `json:"truncated"`
 }
 
 // handleGaps serves GET /v1/diagnostics/gaps?org_id=&source_id=&limit= — the
@@ -82,6 +83,26 @@ func handleConfirmLost(repo gapsRepo) http.HandlerFunc {
 		if err != nil {
 			shared.JSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
+		}
+		// 🔴 Ledgering is PERMANENT destruction of billable events, and this is
+		// the second of the two paths that do it. The projector's own
+		// timeout-promotion has warned since it was written
+		// (integrity.known_loss.promoted); this client-driven path shipped
+		// silent, so a client could write off a source's whole history and
+		// leave no trace on the server at all — which is exactly what happened
+		// on 2026-08-20: 768 seqs ledgered, not one line in the server log to
+		// find them by. Same event shape as the projector's WARN on purpose, so
+		// one query over event.name finds every loss regardless of who declared
+		// it. See workflow/CI/bugfix/20260820-usage-delivery-org-partitioned-seq-stream.md
+		if promoted > 0 {
+			slog.Warn("delivery integrity: seqs ledgered as known-loss on CLIENT declaration",
+				"event.name", "integrity.known_loss.promoted",
+				"reason", "client_confirmed",
+				"org_id", req.OrgID,
+				"source_id", req.SourceID,
+				"promoted_count", promoted,
+				"requested_count", len(req.Seqs),
+				"contiguous_seq", contiguous)
 		}
 		shared.JSON(w, http.StatusOK, confirmLostResponse{Promoted: promoted, Contiguous: contiguous})
 	}

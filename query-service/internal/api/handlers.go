@@ -65,29 +65,50 @@ func (h *UsageHandler) PersonalTimeline(w http.ResponseWriter, r *http.Request) 
 // from local midnight through the next, with `hour=12` being local
 // noon (what was UTC 04:00). Endpoint intentionally ignores end_date
 // — the bucket shape only makes sense for a single day.
+// hourlyDay resolves the single calendar day PersonalHourlyTimeline answers
+// for: `date` (naïve YYYY-MM-DD) read as that calendar day in loc, or TODAY in
+// loc when `date` is absent or unparseable. Returned at local midnight so the
+// repo's event_time range filter covers the caller's day, not a UTC day —
+// re-applying the tz shift here is what code review HIGH #1 originally fixed.
+//
+// 🔴 Never gate the "today" fallback on p.StartDate.IsZero() (bugfix
+// 2026-08-20). parsePersonalParams → Defaults() has ALREADY filled StartDate
+// with `EndDate-30d`: that is the multi-day default, right for the timeline
+// endpoints and meaningless for this single-day one. IsZero() was therefore
+// never true, the fallback never ran, and every caller that omitted `date` got
+// the one day 30 days in the past — HTTP 200 with an empty array, which reads
+// on screen as "you used nothing today". The desktop app (aikey-cli
+// usage_console.rs today_hourly) omitted it, so its usage headline was pinned
+// at 0 forever; the web console always sends `date`, which is why this went
+// unnoticed. Deciding the day HERE, unconditionally, is what keeps the two
+// callers from diverging again.
+func hourlyDay(date string, loc *time.Location) time.Time {
+	if t, err := time.Parse("2006-01-02", date); err == nil {
+		y, m, d := t.Date()
+		return time.Date(y, m, d, 0, 0, 0, 0, loc)
+	}
+	if date != "" {
+		// A malformed date used to land in the same 30-days-ago hole as an
+		// absent one. Answering for today is the honest reading, but the
+		// caller still has a bug and must be able to see it.
+		slog.Warn("query-service: unparseable ?date on the hourly timeline, answering for today",
+			"event.name", "query.usage.hourly_date_unparseable", "date", date)
+	}
+	now := time.Now().In(loc)
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+}
+
 func (h *UsageHandler) PersonalHourlyTimeline(w http.ResponseWriter, r *http.Request) {
 	p, err := h.personalParams(r)
 	if err != nil {
 		shared.Error(w, http.StatusBadRequest, "INVALID_PARAMS", err.Error())
 		return
 	}
-	// Override date range: collapse to a single day. If the client
-	// passed `date=YYYY-MM-DD`, interpret it in the caller's local tz
-	// (matching parsePersonalParams → Defaults() semantics for
-	// start_date / end_date). Failing to re-apply toLocalMidnight here
-	// would undo the tz shift and produce a UTC-day window — see code
-	// review HIGH #1 for the original bug.
-	q := r.URL.Query()
-	if ds := q.Get("date"); ds != "" {
-		if t, err := time.Parse("2006-01-02", ds); err == nil {
-			y, m, d := t.Date()
-			p.StartDate = time.Date(y, m, d, 0, 0, 0, 0, p.TZLocation)
-		}
-	}
-	if p.StartDate.IsZero() {
-		now := time.Now().In(p.TZLocation)
-		p.StartDate = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, p.TZLocation)
-	}
+	// Collapse the range to the single day this endpoint answers for.
+	// hourlyDay is the ONE place that decides which day that is — see its
+	// doc for why the previous two-step form silently answered for the day
+	// 30 days in the past whenever `date` was omitted.
+	p.StartDate = hourlyDay(r.URL.Query().Get("date"), p.TZLocation)
 	p.EndDate = p.StartDate
 	data, err := h.repo.PersonalHourlyTimeline(r.Context(), p)
 	if err != nil {
@@ -531,9 +552,10 @@ func parseMasterAuditFilters(p *usage.QueryParams, r *http.Request) error {
 }
 
 // GET /v1/usage/master/detail?org_id=...&days=3&limit=1000
-//   or ...&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD (≤31-day span)
-//   plus optional filters: seat_id / credential_id / provider / model /
-//   quality / key / protocol / anomaly / priced (see parseMasterAuditFilters).
+//
+//	or ...&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD (≤31-day span)
+//	plus optional filters: seat_id / credential_id / provider / model /
+//	quality / key / protocol / anomaly / priced (see parseMasterAuditFilters).
 //
 // Per-event audit rows for the enterprise usage-audit page. Window is either an
 // explicit [start_date, end_date] range (20260729 filters — the page's date
@@ -646,7 +668,8 @@ func (h *UsageHandler) MasterUsageDetail(w http.ResponseWriter, r *http.Request)
 }
 
 // GET /v1/usage/master/export?org_id=...&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
-//   plus the same optional audit filters as /detail (parseMasterAuditFilters).
+//
+//	plus the same optional audit filters as /detail (parseMasterAuditFilters).
 //
 // Streams the full audit column set as CSV for [start_date, end_date] (inclusive
 // by usage_date). Both dates are REQUIRED and the span is capped at 366 days so
