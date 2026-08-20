@@ -63,6 +63,30 @@ type BatchEventWriter interface {
 	Rollback() error
 }
 
+// TransientStorageError marks an infrastructure-level insert failure (exec /
+// scan error: PG contention, timeout, pool exhaustion). P0-4 A-fix: the wire
+// must distinguish "never resend" (validation, F2 swallow → per-event rejected
+// in a 200) from "resend later" — a transient failure anywhere in the batch
+// makes the handler answer 503 so the proxy re-sends from its WAL (idempotent
+// inserts dedup the already-stored part → exactly-once). Without this the
+// proxy's sentSeq advanced past the event inside the 200 and it was silently
+// lost forever (2026-08-19 ladder forensics).
+type TransientStorageError struct{ Err error }
+
+func (e *TransientStorageError) Error() string { return e.Err.Error() }
+func (e *TransientStorageError) Unwrap() error { return e.Err }
+
+// HasTransientFailure reports whether any event in the batch failed on a
+// transient storage error — the HTTP handler's 503 predicate.
+func HasTransientFailure(results []EventResult) bool {
+	for i := range results {
+		if results[i].transient {
+			return true
+		}
+	}
+	return false
+}
+
 // BatchCapableRepository is the optional capability a repository implements to
 // enable the single-transaction batch path. The service type-asserts it: mock
 // or legacy repositories without it transparently keep the per-event path.

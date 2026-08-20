@@ -190,7 +190,7 @@ func insertEventOn(ctx context.Context, d *shared.DB, ex shared.Execer, e *Usage
 		nullStr(e.FallbackReason), e.FallbackAttempt,
 	)
 	if err != nil {
-		return false, false, true, fmt.Errorf("insert ods event %s: %w", e.EventID, err)
+		return false, false, true, &TransientStorageError{Err: fmt.Errorf("insert ods event %s: %w", e.EventID, err)}
 	}
 	n, _ := res.RowsAffected()
 	if n > 0 {
@@ -228,7 +228,7 @@ func insertEventOn(ctx context.Context, d *shared.DB, ex shared.Execer, e *Usage
 	if verr == sql.ErrNoRows {
 		return false, false, false, fmt.Errorf("ods INSERT silently ignored (no UNIQUE conflict on org_id=%s event_id=%s) — likely NOT NULL/CHECK/FK violation. F2 root cause: NOT NULL on _legacy_text columns left over from v1.0.3 hook is hit when v1.0.4 collector binds only INTEGER columns. Run dbmigrate v1.0.4 hook upgrade to drop legacy NOT NULL", e.OrgID, e.EventID)
 	}
-	return false, false, true, fmt.Errorf("verify dedup for event_id=%s: %w", e.EventID, verr)
+	return false, false, true, &TransientStorageError{Err: fmt.Errorf("verify dedup for event_id=%s: %w", e.EventID, verr)}
 }
 
 // advanceWatermarkScanLimit bounds how many source_seq rows AdvanceWatermark

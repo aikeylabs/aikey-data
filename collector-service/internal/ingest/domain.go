@@ -245,4 +245,8 @@ type EventResult struct {
 	// once per finally-committed outcome, so a rolled-back batch attempt never
 	// double-counts. Never serialized.
 	contentHashConflict bool
+	// transient marks a rejection caused by a TransientStorageError — the
+	// handler converts any such batch to a 503 so the proxy re-sends (P0-4
+	// A-fix). Never serialized.
+	transient bool
 }

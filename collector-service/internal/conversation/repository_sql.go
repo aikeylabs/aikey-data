@@ -56,7 +56,7 @@ func seqOwnerOn(ctx context.Context, ex shared.Execer, orgID, sourceID string, s
 		return "", false, false, nil
 	}
 	if err != nil {
-		return "", false, true, fmt.Errorf("seq owner org=%s source=%s seq=%d: %w", orgID, sourceID, seq, err)
+		return "", false, true, &TransientStorageError{Err: fmt.Errorf("seq owner org=%s source=%s seq=%d: %w", orgID, sourceID, seq, err)}
 	}
 	return eventID, true, false, nil
 }
@@ -86,7 +86,7 @@ func insertRecordOn(ctx context.Context, d *shared.DB, ex shared.Execer, e *Conv
 		e.TotalTokens, e.CacheEnabled, e.DurationMs, e.RequestStatus, e.ContentBytes, ingestStatus, d.BindMillis(e.CreatedAt),
 	)
 	if err != nil {
-		return false, true, fmt.Errorf("insert conversation record %s: %w", e.EventID, err)
+		return false, true, &TransientStorageError{Err: fmt.Errorf("insert conversation record %s: %w", e.EventID, err)}
 	}
 	if n, _ := res.RowsAffected(); n > 0 {
 		return true, false, nil
@@ -105,7 +105,7 @@ func insertRecordOn(ctx context.Context, d *shared.DB, ex shared.Execer, e *Conv
 	if verr == sql.ErrNoRows {
 		return false, false, fmt.Errorf("conversation INSERT silently ignored (no PK conflict on org=%s event_id=%s conv_date=%s) — likely NOT NULL/CHECK violation", e.OrgID, e.EventID, cd)
 	}
-	return false, true, fmt.Errorf("verify dedup event_id=%s: %w", e.EventID, verr)
+	return false, true, &TransientStorageError{Err: fmt.Errorf("verify dedup event_id=%s: %w", e.EventID, verr)}
 }
 
 func (r *sqlRepo) UpsertSession(ctx context.Context, orgID, sessionID, ownerAccountID, systemText string) error {

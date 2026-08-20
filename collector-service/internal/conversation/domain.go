@@ -115,4 +115,8 @@ type RecordResult struct {
 	EventID string
 	Status  string
 	Reason  string
+	// transient marks a rejection caused by a TransientStorageError — the
+	// handler converts any such batch to a 503 so the proxy re-sends (P0-4
+	// A-fix). Never serialized.
+	transient bool `json:"-"`
 }

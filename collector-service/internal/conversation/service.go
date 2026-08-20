@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 )
@@ -173,7 +174,7 @@ func (s *Service) ingestOne(ctx context.Context, e *ConversationRecord, w record
 		if err != nil {
 			slog.Error("conversation seq-owner check failed",
 				"event.name", "conversation.seq_owner.failed", "event_id", e.EventID, "error", err)
-			return RecordResult{EventID: e.EventID, Status: "rejected", Reason: "internal error"}
+			return rejectedResult(e.EventID, err)
 		}
 		if found && owner != e.EventID {
 			quarantined = true
@@ -188,7 +189,7 @@ func (s *Service) ingestOne(ctx context.Context, e *ConversationRecord, w record
 	inserted, err := w.InsertRecord(ctx, e, quarantined)
 	if err != nil {
 		slog.Error("insert conversation record failed", "event_id", e.EventID, "error", err)
-		return RecordResult{EventID: e.EventID, Status: "rejected", Reason: "internal error"}
+		return rejectedResult(e.EventID, err)
 	}
 
 	// system_text first-wins (r3 #4 / Q1 option A): store the system prompt ONCE
@@ -220,6 +221,17 @@ func (s *Service) ingestOne(ctx context.Context, e *ConversationRecord, w record
 		return RecordResult{EventID: e.EventID, Status: "quarantined", Reason: "source_seq conflict"}
 	}
 	return RecordResult{EventID: e.EventID, Status: "accepted"}
+}
+
+// rejectedResult classifies a storage error: transient infra failures are
+// marked so the handler answers 503 (proxy re-sends — P0-4 A-fix); anything
+// else stays a terminal per-record rejected.
+func rejectedResult(eventID string, err error) RecordResult {
+	var tse *TransientStorageError
+	if errors.As(err, &tse) {
+		return RecordResult{EventID: eventID, Status: "rejected", Reason: "transient storage failure", transient: true}
+	}
+	return RecordResult{EventID: eventID, Status: "rejected", Reason: "internal error"}
 }
 
 func validate(e *ConversationRecord) error {

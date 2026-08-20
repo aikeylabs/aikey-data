@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -133,7 +134,12 @@ func (s *Service) tallyResults(req *BatchRequest, results []EventResult) *BatchR
 			}
 		case "rejected":
 			resp.Rejected++
-			s.metrics.Rejected.Add(1)
+			// Transient rejects are re-sent by the proxy after the 503 — bumping
+			// the terminal-rejected metric for them would inflate it on every
+			// retry round. Only genuinely-terminal rejects count.
+			if !results[i].transient {
+				s.metrics.Rejected.Add(1)
+			}
 			continue
 		}
 		// SourceID empty (v1 / older proxy) → skip gap tracking entirely.
@@ -243,6 +249,12 @@ func (s *Service) ingestOne(ctx context.Context, e *UsageEvent, ins eventInserte
 	inserted, conflict, err := ins.InsertEvent(ctx, e, rawJSON, quarantined)
 	if err != nil {
 		slog.Error("insert event failed", "event_id", e.EventID, "error", err)
+		// Transient infra failures are marked so the handler can 503 the whole
+		// batch (proxy re-sends; never a silent per-event drop inside a 200).
+		var tse *TransientStorageError
+		if errors.As(err, &tse) {
+			return EventResult{EventID: e.EventID, Status: "rejected", Reason: "transient storage failure", transient: true}
+		}
 		return EventResult{EventID: e.EventID, Status: "rejected", Reason: "internal error"}
 	}
 	if conflict {

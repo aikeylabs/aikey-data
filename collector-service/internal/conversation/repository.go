@@ -70,6 +70,24 @@ type BatchRecordWriter interface {
 	Rollback() error
 }
 
+// TransientStorageError mirrors ingest.TransientStorageError for the
+// conversation lane (P0-4 A-fix): transient infra failures must surface as a
+// whole-batch 503 (proxy re-sends), never a per-record rejected inside a 200.
+type TransientStorageError struct{ Err error }
+
+func (e *TransientStorageError) Error() string { return e.Err.Error() }
+func (e *TransientStorageError) Unwrap() error { return e.Err }
+
+// HasTransientFailure is the HTTP handler's 503 predicate.
+func HasTransientFailure(results []RecordResult) bool {
+	for i := range results {
+		if results[i].transient {
+			return true
+		}
+	}
+	return false
+}
+
 // BatchCapableRepository is the optional capability enabling the batch path;
 // repositories without it keep the per-record path.
 type BatchCapableRepository interface {

@@ -71,7 +71,8 @@ test-pricing:
 ## test-batch-fences: P0-4 batch-transaction fences (real-schema batch semantics,
 ## conservation client_ok==ODS==DWD, tx-failure fallback, backlog gauges)
 test-batch-fences:
-	$(GO) test -race -count=1 -run 'TestIngestBatch_|TestConversationIngestBatch|TestScanOnce_|TestPipeline_|TestBacklogSnapshot' ./internal/ingest/ ./internal/conversation/ ./internal/projector/
+	$(GO) test -race -count=1 -run 'TestIngestBatch_|TestConversationIngestBatch|TestScanOnce_|TestPipeline_|TestBacklogSnapshot|TestDrainOnce' ./internal/ingest/ ./internal/conversation/ ./internal/projector/
+	$(GO) test -race -count=1 -run 'TransientInsertFailure|ValidationReject_Still200|F2Swallow_Still200' ./internal/api/
 
 ## bench-pipeline: P0-4 ingest/projector throughput benchmarks (file-backed
 ## SQLite = real per-commit fsync; compare before/after batching changes)

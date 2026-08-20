@@ -81,5 +81,18 @@ func (h *IngestHandler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// P0-4 A-fix: a transient storage failure anywhere in the batch makes the
+	// WHOLE batch retryable on the wire. A 200 here would silently drop the
+	// failed event from the proxy's resend set (its sentSeq advances past it) —
+	// per-event results are not on the wire, so 5xx is the only signal the
+	// proxy can act on. Idempotent inserts dedup the already-stored part of the
+	// re-sent batch. Terminal per-event failures (validation, F2 swallow) keep
+	// the 200 + rejected shape — resending cannot help those.
+	if ingest.HasTransientFailure(results) {
+		shared.Error(w, http.StatusServiceUnavailable, "INGEST_TRANSIENT_FAILURE",
+			"transient storage failure while persisting the batch; retry the batch (idempotent)")
+		return
+	}
+
 	shared.JSON(w, http.StatusOK, resp)
 }

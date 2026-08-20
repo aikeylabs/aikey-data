@@ -59,5 +59,13 @@ func (h *ConversationHandler) HandleBatch(w http.ResponseWriter, r *http.Request
 				"event_id", rr.EventID, "reason", rr.Reason)
 		}
 	}
+	// P0-4 A-fix: same wire classification as usage ingest — a transient
+	// storage failure makes the whole batch retryable (503); a 200 would let
+	// the proxy's content-WAL cursor advance past the record and lose the turn.
+	if conversation.HasTransientFailure(results) {
+		shared.Error(w, http.StatusServiceUnavailable, "INGEST_TRANSIENT_FAILURE",
+			"transient storage failure while persisting the batch; retry the batch (idempotent)")
+		return
+	}
 	shared.JSON(w, http.StatusOK, resp)
 }
