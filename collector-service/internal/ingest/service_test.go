@@ -50,6 +50,14 @@ func (m *mockODS) RecordKnownLoss(_ context.Context, _, _ string, _ []int64, _ s
 	return 0, nil
 }
 
+// ApplyStreamFloor: the mock does not model watermarks, and no test here
+// exercises the stream switch — it is covered against the REAL schema in
+// internal/api (stream_switch_test.go), where the idempotency guard actually
+// runs SQL. A mock that pretended to implement it would fence nothing.
+func (m *mockODS) ApplyStreamFloor(_ context.Context, _, _ string, floor int64) (int64, bool, error) {
+	return floor, true, nil
+}
+
 func (m *mockODS) GapSeqs(_ context.Context, _, _ string, _ int64) ([]int64, bool, error) {
 	return nil, false, nil
 }

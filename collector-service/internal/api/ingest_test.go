@@ -65,6 +65,10 @@ func (c *capturingODS) AdvanceWatermark(_ context.Context, orgID, sourceID strin
 	return contiguous, nil
 }
 
+func (c *capturingODS) ApplyStreamFloor(_ context.Context, _, _ string, floor int64) (int64, bool, error) {
+	return floor, true, nil
+}
+
 func (c *capturingODS) EnumerateMissingSeqs(_ context.Context, _, _ string, _, _ int64) ([]int64, error) {
 	return nil, nil
 }

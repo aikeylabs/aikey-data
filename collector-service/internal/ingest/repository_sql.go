@@ -181,7 +181,7 @@ func insertEventOn(ctx context.Context, d *shared.DB, ex shared.Execer, e *Usage
 		nullStr(e.SessionID),
 		nullStr(e.SourceID), e.SourceSeq, // delivery integrity (v2); SourceSeq nil → NULL for v1 events
 		nullStr(e.Region), nullStr(e.EndpointURL), // cost-pricing audit (v1.0.0-rc.8)
-		nullStr(e.KeyLabel),                            // virtual_key_alias (v1.0.0-rc.11) — display label, carried into DWD by projector
+		nullStr(e.KeyLabel),                             // virtual_key_alias (v1.0.0-rc.11) — display label, carried into DWD by projector
 		nullStr(e.ContentHash), ingestStatus, dwdStatus, // stage C: content fingerprint + disposition
 		// 🔴 Upstream fallback attribution. `e.FallbackAttempt` is bound as the
 		// pointer it is: a nil reaches the column as NULL ("the sender said
@@ -397,6 +397,56 @@ func (r *sqlODS) RecordKnownLoss(ctx context.Context, orgID, sourceID string, se
 	// Re-advance so contiguous moves past the ledgered seqs. clientAllocated=0 is
 	// a no-op on that column (MAX guard); we're only here to zip contiguity.
 	return r.AdvanceWatermark(ctx, orgID, sourceID, 0)
+}
+
+// ApplyStreamFloor — see ODSRepository.
+//
+// Advances contiguous_seq past the terminated span in the SAME statement that
+// records the floor, so the two can never disagree: a reader that sees
+// contiguous jump can always find the floor that authorised it.
+func (r *sqlODS) ApplyStreamFloor(ctx context.Context, orgID, sourceID string, floor int64) (int64, bool, error) {
+	if floor <= 0 {
+		return 0, false, fmt.Errorf("stream floor must be positive, got %d", floor)
+	}
+	// The guard `stream_floor_seq < ?` is the idempotency: a replayed
+	// declaration matches zero rows and changes nothing.
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE usage_source_watermark
+		    SET stream_floor_seq = ?,
+		        contiguous_seq   = CASE WHEN contiguous_seq < ? THEN ? ELSE contiguous_seq END
+		  WHERE org_id = ? AND source_id = ? AND stream_floor_seq < ?`,
+		floor, floor, floor, orgID, sourceID, floor)
+	if err != nil {
+		return 0, false, fmt.Errorf("apply stream floor org=%s source=%s floor=%d: %w", orgID, sourceID, floor, err)
+	}
+	n, _ := res.RowsAffected()
+	changed := n > 0
+	if n == 0 {
+		// Either already at/above this floor (idempotent replay), or the row
+		// does not exist yet because this lane has never delivered an event.
+		// The second case must still be recorded, or the first event to arrive
+		// starts a watermark at zero and the terminated span reappears as a gap.
+		if insRes, ierr := r.db.ExecContext(ctx, r.db.InsertOrIgnoreOn(
+			"usage_source_watermark",
+			"org_id, source_id, contiguous_seq, max_seen_seq, client_allocated_seq, stream_floor_seq",
+			"?,?,?,?,?,?", "org_id, source_id"),
+			orgID, sourceID, floor, 0, 0, floor); ierr != nil {
+			return 0, false, fmt.Errorf("seed watermark for stream floor org=%s source=%s: %w", orgID, sourceID, ierr)
+		} else if ins, _ := insRes.RowsAffected(); ins > 0 {
+			// Seeding a lane that had never delivered IS a state change — the
+			// audit WARN must fire for it. Reporting it as a replay (the first
+			// version of this did, because `changed` only tracked the UPDATE)
+			// would hide the very first switch of every new lane.
+			changed = true
+		}
+	}
+	var contiguous int64
+	if err := r.db.QueryRowContext(ctx,
+		"SELECT contiguous_seq FROM usage_source_watermark WHERE org_id = ? AND source_id = ?",
+		orgID, sourceID).Scan(&contiguous); err != nil {
+		return 0, false, fmt.Errorf("read watermark after stream floor: %w", err)
+	}
+	return contiguous, changed, nil
 }
 
 // GapSeqs — see ODSRepository. Returns the source's unaccounted seqs (absent from

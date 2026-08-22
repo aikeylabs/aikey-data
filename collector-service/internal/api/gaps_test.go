@@ -22,6 +22,15 @@ import (
 // run against the same schema production uses, not an inlined fake table.
 func newGapsRepo(t *testing.T) ingest.ODSRepository {
 	t.Helper()
+	repo, _ := newGapsRepoDB(t)
+	return repo
+}
+
+// newGapsRepoDB is newGapsRepo plus the raw handle, for assertions that must
+// look at a table the repository interface does not expose (e.g. proving the
+// stream switch did NOT touch usage_known_loss_ledger).
+func newGapsRepoDB(t *testing.T) (ingest.ODSRepository, *sql.DB) {
+	t.Helper()
 	raw, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +40,7 @@ func newGapsRepo(t *testing.T) ingest.ODSRepository {
 		dbmigrate.DialectSQLite, []dbmigrate.Component{dbmigrate.ComponentData}, ""); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	return ingest.NewSQLODSRepository(shared.NewDB(raw, shared.DialectSQLite))
+	return ingest.NewSQLODSRepository(shared.NewDB(raw, shared.DialectSQLite)), raw
 }
 
 // seedSource inserts the given seqs for (org, src) and advances the watermark,
@@ -63,6 +72,10 @@ func (e errGapsRepo) GapSeqs(context.Context, string, string, int64) ([]int64, b
 }
 func (e errGapsRepo) ConfirmLost(context.Context, string, string, []int64, string) (int, int64, error) {
 	return 0, 0, e.err
+}
+
+func (e errGapsRepo) ApplyStreamFloor(context.Context, string, string, int64) (int64, bool, error) {
+	return 0, false, e.err
 }
 
 // ── handleGaps validation (HTTP contract) ───────────────────────────────

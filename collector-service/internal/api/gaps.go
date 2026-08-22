@@ -16,6 +16,7 @@ import (
 type gapsRepo interface {
 	GapSeqs(ctx context.Context, orgID, sourceID string, limit int64) ([]int64, bool, error)
 	ConfirmLost(ctx context.Context, orgID, sourceID string, seqs []int64, reason string) (promoted int, contiguous int64, err error)
+	ApplyStreamFloor(ctx context.Context, orgID, sourceID string, floor int64) (contiguous int64, applied bool, err error)
 }
 
 type gapsResponse struct {
@@ -105,5 +106,66 @@ func handleConfirmLost(repo gapsRepo) http.HandlerFunc {
 				"contiguous_seq", contiguous)
 		}
 		shared.JSON(w, http.StatusOK, confirmLostResponse{Promoted: promoted, Contiguous: contiguous})
+	}
+}
+
+type streamSwitchRequest struct {
+	OrgID    string `json:"org_id"`
+	SourceID string `json:"source_id"`
+	// Floor is the last seq of the OLD stream. Everything at or below it is
+	// terminated: never issued to an event, never arriving.
+	Floor int64 `json:"floor_seq"`
+}
+
+type streamSwitchResponse struct {
+	Applied    bool  `json:"applied"`        // false = already at/above this floor (idempotent replay)
+	Contiguous int64 `json:"contiguous_seq"` // high-water after the declaration
+}
+
+// handleStreamSwitch serves POST /v1/diagnostics/stream-switch — the client
+// declares that it has restarted numbering on this (org, source) above `floor`.
+//
+// WHY A DEDICATED ENDPOINT rather than a field on the ingest batch (2026-08-21,
+// user decision B): this is a ONE-OFF administrative act that must leave a
+// trace. Riding it on the hot upload path would make every batch carry a field
+// that is almost always empty, and would bury an auditable state change inside
+// routine data traffic. careful-api says be RELUCTANT to add surface, not that
+// surface may never be added — the justification here is that the semantics
+// differ, not that it was easier.
+//
+// 🔴 And it is deliberately NOT confirm-lost, which also advances contiguous.
+// That path means "this data was lost". A terminated span was never handed to
+// any event, so filing it as loss would fabricate loss records and destroy the
+// ledger's credibility — the exact pollution this whole change exists to undo.
+func handleStreamSwitch(repo gapsRepo) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req streamSwitchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			shared.JSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body: " + err.Error()})
+			return
+		}
+		if req.OrgID == "" || req.SourceID == "" {
+			shared.JSON(w, http.StatusBadRequest, map[string]string{"error": "org_id and source_id are required"})
+			return
+		}
+		if req.Floor <= 0 {
+			shared.JSON(w, http.StatusBadRequest, map[string]string{"error": "floor_seq must be positive"})
+			return
+		}
+		contiguous, applied, err := repo.ApplyStreamFloor(r.Context(), req.OrgID, req.SourceID, req.Floor)
+		if err != nil {
+			shared.JSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		// Loud on the state change, quiet on the replay: an operator looking at
+		// "why did contiguous jump" must find this line, and a retry storm must
+		// not drown it.
+		if applied {
+			slog.Warn("delivery integrity: sequence stream restarted above a declared floor",
+				"event.name", "integrity.stream.switched",
+				"org_id", req.OrgID, "source_id", req.SourceID,
+				"floor_seq", req.Floor, "contiguous_seq", contiguous)
+		}
+		shared.JSON(w, http.StatusOK, streamSwitchResponse{Applied: applied, Contiguous: contiguous})
 	}
 }

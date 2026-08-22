@@ -51,10 +51,10 @@ type UsageEvent struct {
 	ContentHash string `json:"content_hash,omitempty"`
 
 	// schema + source metadata
-	SchemaVersion        int    `json:"schema_version"`
-	SourceVersion        string `json:"source_version,omitempty"`
-	ClientVersion        string `json:"client_version,omitempty"`
-	ProxyConfigVersion   string `json:"proxy_config_version,omitempty"`
+	SchemaVersion         int    `json:"schema_version"`
+	SourceVersion         string `json:"source_version,omitempty"`
+	ClientVersion         string `json:"client_version,omitempty"`
+	ProxyConfigVersion    string `json:"proxy_config_version,omitempty"`
 	ProxyLoadedControlSeq *int64 `json:"proxy_loaded_control_seq,omitempty"`
 
 	// timestamps: int64 Unix epoch milliseconds (UTC). Wire format switched
@@ -73,9 +73,9 @@ type UsageEvent struct {
 	AccountStatusSnapshot string `json:"account_status_snapshot,omitempty"`
 
 	// routing
-	VirtualKeyID               string `json:"virtual_key_id,omitempty"`
-	VirtualKeyRevision         string `json:"virtual_key_revision,omitempty"`
-	VirtualKeyHash             string `json:"virtual_key_hash,omitempty"`
+	VirtualKeyID       string `json:"virtual_key_id,omitempty"`
+	VirtualKeyRevision string `json:"virtual_key_revision,omitempty"`
+	VirtualKeyHash     string `json:"virtual_key_hash,omitempty"`
 	// KeyLabel — user-friendly name for the credential the proxy resolved
 	// (account-scoped alias for personal, OAuth email, team-side
 	// `key-<id>-<alias>` for team keys, app slug for app routes, etc.).
@@ -98,7 +98,7 @@ type UsageEvent struct {
 	ProviderID   string `json:"provider_id,omitempty"`
 	ProviderCode string `json:"provider_code,omitempty"`
 	ProtocolType string `json:"protocol_type,omitempty"`
-	RouteSource    string `json:"route_source,omitempty"`
+	RouteSource  string `json:"route_source,omitempty"`
 	// Upstream fallback attribution (openspec `aliyun-aigw-p0-upstream-fallback`,
 	// tasks 3.2 / 3.7). FallbackReason is the frozen error code that caused the
 	// switch TO this hop; FallbackAttempt is the 1-based index of the hop that
@@ -117,7 +117,7 @@ type UsageEvent struct {
 	// The two mean different things to every count built on this column.
 	FallbackReason  string `json:"fallback_reason,omitempty"`
 	FallbackAttempt *int   `json:"fallback_attempt,omitempty"`
-	OAuthIdentity  string `json:"oauth_identity,omitempty"` // Email/display name for OAuth accounts
+	OAuthIdentity   string `json:"oauth_identity,omitempty"` // Email/display name for OAuth accounts
 
 	// Cost-pricing audit (v1.0.0-rc.8): upstream region + endpoint reported by
 	// proxy, persisted to ODS then projected to DWD for cost auditing

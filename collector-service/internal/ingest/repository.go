@@ -39,6 +39,24 @@ type ODSRepository interface {
 	// contiguous_seq (stage D1, server-timeout promotion).
 	RecordKnownLoss(ctx context.Context, orgID, sourceID string, seqs []int64, reason string) (contiguous int64, err error)
 
+	// ApplyStreamFloor declares that every seq at or below floor on this
+	// (org, source) is TERMINATED — never issued to an event and never coming.
+	//
+	// It exists for the per-lane seq-stream switch (2026-08-21): after the
+	// split each lane starts above the old single stream's high-water so
+	// never-reuse survives, which strands a bounded span the server would
+	// otherwise wait for and eventually write into the known-loss ledger.
+	//
+	// 🔴 This is NOT a loss. Recording the span as known-loss would fabricate
+	// loss records and make that ledger untrustworthy — see the alpha.7
+	// migration comment. Terminated and lost are different facts and are
+	// stored apart on purpose.
+	//
+	// Idempotent by construction: a floor already >= the requested one is a
+	// no-op (applied=false), so a retried declaration can neither double-
+	// advance nor regress the watermark.
+	ApplyStreamFloor(ctx context.Context, orgID, sourceID string, floor int64) (contiguous int64, applied bool, err error)
+
 	// GapSeqs returns the source's unaccounted seqs (bounded) so a client can
 	// check them against its WAL (stage D3, client-confirmed reconciliation).
 	GapSeqs(ctx context.Context, orgID, sourceID string, limit int64) (seqs []int64, truncated bool, err error)

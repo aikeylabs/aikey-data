@@ -102,6 +102,7 @@ func NewRouter(ingestH *IngestHandler, ingestSvc *ingest.Service, convH *Convers
 	if deliveryRepo != nil {
 		mux.HandleFunc("GET /v1/diagnostics/gaps", handleGaps(deliveryRepo))
 		mux.HandleFunc("POST /v1/diagnostics/confirm-lost", handleConfirmLost(deliveryRepo))
+		mux.HandleFunc("POST /v1/diagnostics/stream-switch", handleStreamSwitch(deliveryRepo))
 	}
 
 	// Ingest API — authenticated

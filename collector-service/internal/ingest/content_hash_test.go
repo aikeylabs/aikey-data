@@ -108,9 +108,9 @@ func TestContentHash_MismatchQuarantined(t *testing.T) {
 	e, h := hashEvent("h-bad", 1, 100, 50, 10, 20, "claude", "anthropic")
 	e.ContentHash = h
 	zero := int64(0)
-	e.OutputTokens = &zero            // corruption: the silent-zero bug
-	total := int64(100)               // total no longer matches in+out=100? in=100,out=0→total should be 100
-	e.TotalTokens = &total            // keep total consistent with in to isolate the output corruption
+	e.OutputTokens = &zero // corruption: the silent-zero bug
+	total := int64(100)    // total no longer matches in+out=100? in=100,out=0→total should be 100
+	e.TotalTokens = &total // keep total consistent with in to isolate the output corruption
 
 	if r := ingestOneEvent(t, svc, e); r.Status != "quarantined" {
 		t.Fatalf("status=%s, want quarantined", r.Status)

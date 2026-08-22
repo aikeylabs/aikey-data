@@ -11,10 +11,10 @@ import (
 // the live E2E's "byte-identical WAL replay" assertion: if the collector stored
 // the re-sent event with any field altered, this differs.
 type odsRowSnapshot struct {
-	eventID                       string
-	contentHash                   sql.NullString
-	model, provider               string
-	reqStatus, ingest, dwd        string
+	eventID                        string
+	contentHash                    sql.NullString
+	model, provider                string
+	reqStatus, ingest, dwd         string
 	total, in, out, cacheR, cacheC sql.NullInt64
 }
 
