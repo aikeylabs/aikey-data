@@ -273,8 +273,8 @@ func (r *sqlODS) AdvanceWatermark(ctx context.Context, orgID, sourceID string, c
 	// out-of-order seq raises max_seen even though it didn't advance contiguous.
 	var maxSeen int64
 	if err := r.db.QueryRowContext(ctx,
-		"SELECT COALESCE(MAX(source_seq), 0) FROM usage_event_ods WHERE org_id = ? AND source_id = ?",
-		orgID, sourceID,
+		"SELECT COALESCE(MAX(source_seq), 0) FROM usage_event_ods WHERE source_id = ?",
+		sourceID,
 	).Scan(&maxSeen); err != nil {
 		return 0, fmt.Errorf("max_seen org=%s source=%s: %w", orgID, sourceID, err)
 	}
@@ -320,11 +320,24 @@ func (r *sqlODS) AdvanceWatermark(ctx context.Context, orgID, sourceID string, c
 // contiguity: received in ODS OR recorded in the known-loss ledger (stage D1).
 // Two bounded queries merged in memory. NULL source_seq rows (v1 events) are
 // excluded by the `> ?` comparison.
+	// 🔴 D1a (2026-08-24): contiguity is computed per SOURCE, across every org.
+	// A source_id is one proxy install, and that proxy allocates ONE dense
+	// sequence stream — it does not restart numbering per credential. Filtering
+	// by org here split that single stream into one ledger per org, and each
+	// half then saw the other half's sequences as gaps. Field evidence (winpc2):
+	// the same source_id had two rows, personal stalled at contiguous 2082 with
+	// 2075 sequences written off as "known loss" that were in fact delivered
+	// under the team org — and a blinded reconciler then reported "nothing
+	// missing", so the proxy never resent them. Guarded by
+	// d1_contiguity_per_source_test.go.
+	//
+	// The watermark ROW is still keyed (org_id, source_id): this changes what is
+	// COUNTED, not where it is stored, so no migration is required.
 func (r *sqlODS) presentSeqSet(ctx context.Context, orgID, sourceID string, lo, hi int64) (map[int64]bool, error) {
 	present := make(map[int64]bool)
 	odsRows, err := r.db.QueryContext(ctx,
-		"SELECT source_seq FROM usage_event_ods WHERE org_id = ? AND source_id = ? AND source_seq > ? AND source_seq <= ?",
-		orgID, sourceID, lo, hi)
+		"SELECT source_seq FROM usage_event_ods WHERE source_id = ? AND source_seq > ? AND source_seq <= ?",
+		sourceID, lo, hi)
 	if err != nil {
 		return nil, fmt.Errorf("scan ods seqs org=%s source=%s: %w", orgID, sourceID, err)
 	}
@@ -341,8 +354,8 @@ func (r *sqlODS) presentSeqSet(ctx context.Context, orgID, sourceID string, lo, 
 		return nil, err
 	}
 	ledRows, err := r.db.QueryContext(ctx,
-		"SELECT seq FROM usage_known_loss_ledger WHERE org_id = ? AND source_id = ? AND seq > ? AND seq <= ?",
-		orgID, sourceID, lo, hi)
+		"SELECT seq FROM usage_known_loss_ledger WHERE source_id = ? AND seq > ? AND seq <= ?",
+		sourceID, lo, hi)
 	if err != nil {
 		return nil, fmt.Errorf("scan ledger seqs org=%s source=%s: %w", orgID, sourceID, err)
 	}
@@ -561,3 +574,4 @@ func jsonbOrNull(v any) any {
 	}
 	return b
 }
+

@@ -34,7 +34,90 @@ func NewSQLRepository(db *shared.DB) Repository {
 // Why org_id="personal": in local-user mode the proxy reports events with
 // org_id="personal" but no account_id. Without this clause the query returns
 // empty, and the Usage Ledger shows zero.
-func personalFilter(p QueryParams) (clause string, id string) {
+// partitionPrune returns a COARSE `usage_date` range predicate for p's window,
+// to be ANDed in front of the exact `event_time` filter every caller already
+// has.
+//
+// 🔴 WHY THIS EXISTS (2026-08-24). usage_fact_dwd is RANGE-partitioned on
+// usage_date, but every query filters on event_time — a different column — so
+// Postgres could prune nothing and sequentially scanned EVERY partition on
+// EVERY query. Measured on staging for a one-day window:
+//
+//	WHERE usage_date  >= current_date - 1   ->  Subplans Removed: 1, Index Only
+//	                                            Scan,               cost     51
+//	WHERE event_time  >= now() - 1 day      ->  no pruning, Seq Scan on all
+//	                                            partitions,         cost   9036
+//
+// 177x, and it degrades WITHOUT BOUND: one more partition every month, each
+// one scanned forever. Together with the per-row correlated subquery in the
+// usage_reporting_fact view this pushed five aggregate endpoints past the
+// caller's 15s deadline — query-service logged `pq: canceling statement due to
+// user request (57014)` and the team-usage page failed to load ~90% of the
+// time.
+//
+// 🔴 WHY IT CANNOT CHANGE RESULTS. The predicate is a strict SUPERSET of the
+// exact event_time window that stays in the query:
+//   - usage_date is NOT NULL (it is the partition key) — verified on staging:
+//     0 nulls in 57581 rows, so no row can be filtered out by its absence;
+//   - usage_date equals the UTC calendar date of event_time — verified on the
+//     same rows: min and max of (usage_date - event_time::date) are both 0;
+//   - and the bounds are widened by one day on each side anyway, which absorbs
+//     any timezone skew a future writer might introduce.
+// Every row the exact filter would keep is inside this range. Nothing else is
+// removed: the exact filter still runs and still decides the answer.
+//
+// 🔴 WHY LITERALS AND NOT PLACEHOLDERS. Two reasons, both deliberate:
+//   1. Bound parameters only get RUNTIME pruning; a literal prunes at PLAN
+//      time, which is the guarantee we are buying.
+//   2. Every one of the eleven callers passes its args positionally. Adding
+//      placeholders here would force eleven arg-list edits, each a chance to
+//      transpose two values into a silently wrong answer. Literals change no
+//      caller at all.
+// Injection is not reachable: both values are produced by time.Format on a
+// time.Time, so they are ten characters of digits and dashes and nothing else.
+// partitionPruneClauseRe in the tests pins exactly that shape.
+// 🔴 POSTGRES ONLY, and that is not a shortcut — it is the smaller blast
+// radius. SQLite (Personal / Trial) does not partition this table at all, so
+// the prune buys exactly nothing there while still being one more predicate
+// that could drop a row: a legacy SQLite database written before usage_date
+// was populated would have '' in that column, and '' < any date, so every one
+// of that user's rows would vanish. Postgres cannot have that problem —
+// usage_date is the partition key and therefore NOT NULL — so the benefit and
+// the risk live on opposite sides of the dialect line. Take the benefit only.
+func partitionPrune(db *shared.DB, p QueryParams) string {
+	if db == nil || db.IsSQLite() {
+		return ""
+	}
+	startMs, endMs := p.LocalWindowMs()
+	lo0, hi0 := startMs.Time().UTC(), endMs.Time().UTC()
+	// 🔴 SKIP ON ANY WINDOW WE CANNOT TRUST. Emitting no prune costs a slow
+	// query; emitting a wrong one silently returns fewer rows, and a usage
+	// number that is quietly too small is far worse than one that is slow.
+	//
+	// The sanity floor is not paranoia. LocalWindowMs derives its end from
+	// EndDate, and a caller that leaves EndDate zero gets year 1 + one day —
+	// which would produce `usage_date >= '2026-04-23' AND <= '0001-01-03'`,
+	// an empty range that drops EVERY row. Production never does this (the
+	// handlers run Defaults()/hourlyDay() first) but the repository tests call
+	// in directly with only StartDate set, and they went red on exactly this.
+	// A caller with an untrustworthy window simply keeps today's behaviour.
+	if startMs.IsZero() || endMs.IsZero() || !hi0.After(lo0) ||
+		lo0.Year() < 2000 || hi0.Year() < 2000 {
+		return ""
+	}
+	lo := lo0.AddDate(0, 0, -1).Format("2006-01-02")
+	hi := hi0.AddDate(0, 0, 1).Format("2006-01-02")
+	return fmt.Sprintf("usage_date >= '%s' AND usage_date <= '%s' AND ", lo, hi)
+}
+
+// personalFilter builds the identity predicate AND, in front of it, the
+// coarse partition prune (see partitionPrune). Prefixing here rather than at
+// each call site is what keeps every caller's positional arg list untouched —
+// the prune contributes no placeholders.
+func (r *sqlRepo) personalFilter(p QueryParams) (clause string, id string) {
+	prune := partitionPrune(r.db, p)
+	defer func() { clause = prune + clause }()
+
 	// LocalAllScope: every row in THIS database, whatever org / account /
 	// seat tagged it (2026-08-20, desktop app "全部用量" ask). The personal
 	// machine's local DB holds exactly one human's traffic, but that traffic
@@ -135,7 +218,7 @@ func sessionIDFilter(p QueryParams) (frag string, arg interface{}) {
 // their local 00:00..24:00 window, not UTC 00..24 which would split
 // their morning across two rows. See bugfix 20260424 tz-local round.
 func (r *sqlRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]TimelinePoint, error) {
-	filter, id := personalFilter(p)
+	filter, id := r.personalFilter(p)
 	filter += scopeStatsAnd
 	startMs, endMs := p.LocalWindowMs() // [local start-day, local end-day+1) in UTC millis
 	dateExpr := r.db.DateOfLocal("event_time", p.TZOffsetMs, p.TZ)
@@ -169,7 +252,7 @@ func (r *sqlRepo) PersonalTimeline(ctx context.Context, p QueryParams) ([]Timeli
 // page's hourly view can scope to a single Connected App's traffic.
 // Empty AppSlug keeps the existing "whole vault" behavior intact.
 func (r *sqlRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]HourlyPoint, error) {
-	filter, id := personalFilter(p)
+	filter, id := r.personalFilter(p)
 	filter += scopeStatsAnd
 	// Local day window: [localMidnight, localMidnight+24h) converted
 	// back to UTC millis for the event_time range filter. p.StartDate
@@ -223,7 +306,7 @@ func (r *sqlRepo) PersonalHourlyTimeline(ctx context.Context, p QueryParams) ([]
 }
 
 func (r *sqlRepo) PersonalByProtocolTimeline(ctx context.Context, p QueryParams) ([]ProtocolTimelinePoint, error) {
-	filter, id := personalFilter(p)
+	filter, id := r.personalFilter(p)
 	filter += scopeStatsAnd
 	startMs, endMs := p.LocalWindowMs()
 	dateExpr := r.db.DateOfLocal("event_time", p.TZOffsetMs, p.TZ)
@@ -257,7 +340,7 @@ func (r *sqlRepo) PersonalByProtocolTimeline(ctx context.Context, p QueryParams)
 // from p.StartDate (interpreted in local tz); date range parameters are
 // ignored beyond extracting the day.
 func (r *sqlRepo) PersonalByProtocolHourly(ctx context.Context, p QueryParams) ([]ProtocolHourlyPoint, error) {
-	filter, id := personalFilter(p)
+	filter, id := r.personalFilter(p)
 	filter += scopeStatsAnd
 	dayStart := aikeytime.FromTime(p.StartDate)
 	dayEnd := aikeytime.FromTime(p.StartDate.AddDate(0, 0, 1))
@@ -286,7 +369,7 @@ func (r *sqlRepo) PersonalByProtocolHourly(ctx context.Context, p QueryParams) (
 }
 
 func (r *sqlRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParams) ([]ProtocolTotal, error) {
-	filter, id := personalFilter(p)
+	filter, id := r.personalFilter(p)
 	filter += scopeStatsAnd
 	startMs, endMs := p.LocalWindowMs()
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
@@ -335,7 +418,7 @@ func (r *sqlRepo) PersonalByProtocolTotal(ctx context.Context, p QueryParams) ([
 // matching the existing `PersonalByProtocolTotal` query — some older
 // rows have only `protocol_type` populated (provider_code NULL).
 func (r *sqlRepo) PersonalByAppTotal(ctx context.Context, p QueryParams) ([]AppTotal, error) {
-	filter, id := personalFilter(p)
+	filter, id := r.personalFilter(p)
 	filter += scopeStatsAnd
 	startMs, endMs := p.LocalWindowMs()
 	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`
@@ -560,7 +643,7 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 	//   workflow/CI/bugfix/20260526-usage-by-key-duplicate-rows-by-app-attribution.md
 	// for the full rationale, including why displaying ≠ aggregating
 	// was the underlying drift.
-	filter, id := personalFilter(p)
+	filter, id := r.personalFilter(p)
 	filter += scopeStatsAnd
 	// Optional session_id filter (2026-05-26 Performance drill-down):
 	// when set, the outer WHERE narrows to events tagged with this
@@ -662,7 +745,7 @@ func (r *sqlRepo) PersonalByKeyTotal(ctx context.Context, p QueryParams) ([]KeyT
 // under-report total tokens versus the by-key chart on the same
 // page.
 func (r *sqlRepo) PersonalByModelTotal(ctx context.Context, p QueryParams) ([]ModelTotal, error) {
-	filter, id := personalFilter(p)
+	filter, id := r.personalFilter(p)
 	filter += scopeStatsAnd
 	startMs, endMs := p.LocalWindowMs()
 	appSlugFrag, appSlugArg := appSlugFilter(p)
@@ -722,7 +805,7 @@ func (r *sqlRepo) PersonalByModelTotal(ctx context.Context, p QueryParams) ([]Mo
 // in the UI shouldn't shrink the ranking to one row — see design doc
 // §5.3 "Top N session chart self doesn't receive session filter".
 func (r *sqlRepo) PersonalBySessionTotal(ctx context.Context, p QueryParams) ([]SessionTotal, error) {
-	filter, id := personalFilter(p)
+	filter, id := r.personalFilter(p)
 	filter += scopeStatsAnd
 	startMs, endMs := p.LocalWindowMs()
 	startMsArg := r.db.BindMillis(startMs)
@@ -798,7 +881,7 @@ func (r *sqlRepo) PersonalBySessionTotal(ctx context.Context, p QueryParams) ([]
 // render empty on a stale window (e.g. 30-day chart starting 30 days
 // ago — recent activity today would be excluded).
 func (r *sqlRepo) PersonalRecent(ctx context.Context, p QueryParams) ([]RecentRequest, error) {
-	filter, id := personalFilter(p)
+	filter, id := r.personalFilter(p)
 	limit := p.Limit
 	if limit <= 0 {
 		limit = 5
@@ -865,7 +948,7 @@ func (r *sqlRepo) PersonalRecent(ctx context.Context, p QueryParams) ([]RecentRe
 // drill-down filters. billable_amount stays NULL for unpriced rows (the "未计价"
 // filter selects exactly those).
 func (r *sqlRepo) PersonalUsageDetail(ctx context.Context, p QueryParams) ([]UsageDetailRow, error) {
-	filter, id := personalFilter(p)
+	filter, id := r.personalFilter(p)
 	startMs, endMs := p.LocalWindowMs()
 	args := []interface{}{id, r.db.BindMillis(startMs), r.db.BindMillis(endMs)}
 	// Audit rule, not stats rule: the detail page keeps excluded/abnormal rows
