@@ -114,9 +114,31 @@ func partitionPrune(db *shared.DB, p QueryParams) string {
 // coarse partition prune (see partitionPrune). Prefixing here rather than at
 // each call site is what keeps every caller's positional arg list untouched —
 // the prune contributes no placeholders.
+// personalFilterRaw is the identity predicate WITHOUT the partition prune, for
+// queries whose FROM is a table that has no usage_date column.
+//
+// 🔴 WHY THIS SPLIT EXISTS (2026-08-24, regression I shipped). The prune was
+// added inside personalFilter because eleven callers share it — a genuinely
+// good choke point for the nine that read usage_reporting_fact. But the choke
+// point is shared by TABLE-AGNOSTIC callers: PersonalRecent reads
+// usage_event_ods, which has no usage_date column at all, so it started failing
+// outright with `pq: column "usage_date" does not exist`. It had been working.
+//
+// The lesson is narrow and worth keeping: a shared predicate builder is only
+// safe to extend with a COLUMN-specific clause if every caller queries a
+// relation that has that column. This one did not.
+func (r *sqlRepo) personalFilterRaw(p QueryParams) (clause string, id string) {
+	return personalIdentityFilter(p)
+}
+
+// personalFilter adds the coarse partition prune in front of the identity
+// predicate. Only for callers reading usage_reporting_fact / usage_fact_dwd.
 func (r *sqlRepo) personalFilter(p QueryParams) (clause string, id string) {
-	prune := partitionPrune(r.db, p)
-	defer func() { clause = prune + clause }()
+	clause, id = personalIdentityFilter(p)
+	return partitionPrune(r.db, p) + clause, id
+}
+
+func personalIdentityFilter(p QueryParams) (clause string, id string) {
 
 	// LocalAllScope: every row in THIS database, whatever org / account /
 	// seat tagged it (2026-08-20, desktop app "全部用量" ask). The personal
@@ -881,7 +903,7 @@ func (r *sqlRepo) PersonalBySessionTotal(ctx context.Context, p QueryParams) ([]
 // render empty on a stale window (e.g. 30-day chart starting 30 days
 // ago — recent activity today would be excluded).
 func (r *sqlRepo) PersonalRecent(ctx context.Context, p QueryParams) ([]RecentRequest, error) {
-	filter, id := r.personalFilter(p)
+	filter, id := r.personalFilterRaw(p) // usage_event_ods has no usage_date column
 	limit := p.Limit
 	if limit <= 0 {
 		limit = 5

@@ -2,7 +2,9 @@ package usage
 
 import (
 	"context"
+	"os"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -163,13 +165,12 @@ func countPlaceholders(s string) int {
 	return n
 }
 
-
 // SQLite must never see the prune.
 //
 // 🔴 The gate is the risk control, not an optimisation detail. SQLite does not
 // partition this table, so the prune cannot speed anything up there — while a
-// Personal database written before usage_date was populated would hold '' in
-// that column, and '' sorts below every real date, so every one of that user's
+// Personal database written before usage_date was populated would hold ” in
+// that column, and ” sorts below every real date, so every one of that user's
 // rows would silently disappear. Postgres cannot hit that: usage_date is the
 // partition key and therefore NOT NULL. Benefit and risk fall on opposite
 // sides of this line; the gate keeps only the benefit.
@@ -211,5 +212,46 @@ func TestPartitionPrune_IsWiderThanTheExactWindow(t *testing.T) {
 	if !hi.After(end.AddDate(0, 0, 1)) {
 		t.Fatalf("high bound %s is not after the window end %s — a day of usage can be cut off",
 			m[2], end.AddDate(0, 0, 1).Format("2006-01-02"))
+	}
+}
+
+// A query whose FROM has no usage_date column must never receive the prune.
+//
+// 🔴 THIS IS THE HOLE THAT LET A REGRESSION SHIP (2026-08-24). The prune was
+// put inside personalFilter because eleven callers share it. Nine of them read
+// usage_reporting_fact and were fine. PersonalRecent reads usage_event_ods,
+// which has NO usage_date column, so it began failing with
+// `pq: column "usage_date" does not exist` — an endpoint that had been working,
+// broken by a change whose whole point was that it could not change results.
+//
+// The existing equivalence fence did not catch it because it exercised
+// PersonalTimeline, a fact-table query. Fences written per-implementation miss
+// the caller that is shaped differently; this one is written per-TABLE.
+func TestPartitionPrune_NeverReachesTablesWithoutUsageDate(t *testing.T) {
+	src, err := os.ReadFile("repository_sql.go")
+	if err != nil {
+		t.Fatalf("read repository_sql.go: %v", err)
+	}
+	text := string(src)
+
+	// Every func that queries usage_event_ods as its OUTER relation must use the
+	// raw (unpruned) filter. `FROM usage_event_ods` appearing inside a
+	// parenthesised sub-select is fine — the prune applies to the outer FROM.
+	for _, fn := range []string{"PersonalRecent"} {
+		i := strings.Index(text, "func (r *sqlRepo) "+fn+"(")
+		if i < 0 {
+			t.Fatalf("%s not found — if it was renamed, move this fence with it "+
+				"rather than leaving it unable to match", fn)
+		}
+		end := strings.Index(text[i+1:], "\nfunc (r *sqlRepo) ")
+		if end < 0 {
+			end = len(text) - i - 1
+		}
+		body := text[i : i+1+end]
+		if !strings.Contains(body, "personalFilterRaw(") {
+			t.Errorf("%s reads usage_event_ods but uses the PRUNING filter.\n"+
+				"usage_event_ods has no usage_date column, so the query fails outright with\n"+
+				"`column \"usage_date\" does not exist`. Use personalFilterRaw here.", fn)
+		}
 	}
 }
