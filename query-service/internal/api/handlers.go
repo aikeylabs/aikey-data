@@ -846,7 +846,15 @@ func parsePersonalParams(r *http.Request) (usage.QueryParams, error) {
 	// Allow org_id=personal for personal edition (local-user mode) where
 	// events have no account_id but are tagged with org_id="personal".
 	if seatID == "" && accountID == "" && orgID != "personal" {
-		return usage.QueryParams{}, errMissing("seat_id or account_id")
+		// Name org_id too. It is accepted two lines above, and leaving it out of
+		// the message makes the endpoint look like it rejects the very call the
+		// Personal web client makes (personalParams() in shared/api/usage.ts
+		// sends org_id=personal, since personal events carry no account_id).
+		// A caller who reads this text and "fixes" their request by inventing an
+		// account_id gets HTTP 200 with an empty array -- a wrong answer that
+		// looks like an authoritative zero. The error text is the only place
+		// that difference is visible, so it has to list every accepted option.
+		return usage.QueryParams{}, errMissing(personalIdentityParamsMsg)
 	}
 	p := usage.QueryParams{
 		SeatID:    seatID,
@@ -905,6 +913,14 @@ func parseDates(p *usage.QueryParams, startStr, endStr string) {
 		}
 	}
 }
+
+// personalIdentityParamsMsg lists every identity a personal-scope query may be
+// keyed by, in the order parsePersonalParams tests them. Kept next to nothing
+// else on purpose: it is quoted verbatim by the 400 body, and
+// TestPersonalIdentityErrorNamesEveryAcceptedParam probes each name in it
+// against the real parser, so a name that stops working (or a message that
+// drifts from the code) fails the build.
+const personalIdentityParamsMsg = "one of seat_id, account_id, or org_id=personal"
 
 type paramError struct{ field string }
 
