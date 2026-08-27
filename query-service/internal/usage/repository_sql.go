@@ -187,9 +187,20 @@ func personalIdentityFilter(p QueryParams) (clause string, id string) {
 // to be appended to a WHERE fragment. Unqualified column name — every
 // consumer either queries usage_fact_dwd directly or aliases it in a scope
 // where the name is unambiguous.
+//   - scopeOrgBillingAnd (the organisation's cost): the SAME population
+//     MasterTimeline counts, and therefore the only one a per-seat breakdown
+//     may use if it is asserted to add up to the organisation total. It keeps
+//     abnormal/org_only rows, which the stats rule drops — on staging that
+//     difference alone was $0.7427 of $11.5059, showing up as departments
+//     having spent less. See RankingScope.
+//     bugfix: workflow/CI/bugfix/2026-08-27-ledger-by-department-top-n-truncation.md
 const (
 	scopeStatsAnd = " AND user_usage_scope = 'normal'"
 	scopeAuditAnd = " AND user_usage_scope <> 'non_generation'"
+	// 🔴 Kept literally identical to MasterTimeline's own WHERE fragment. If
+	// one changes and the other does not, the conservation row silently stops
+	// balancing again — TestLedgerPopulationMatchesTimeline pins the pair.
+	scopeOrgBillingAnd = " AND billing_scope IN ('org_only','org_and_user')" + scopeAuditAnd
 )
 
 // appSlugFilter returns an additional WHERE fragment + bind value when
@@ -1083,17 +1094,29 @@ func (r *sqlRepo) PersonalUsageDetail(ctx context.Context, p QueryParams) ([]Usa
 
 func (r *sqlRepo) MasterUserRanking(ctx context.Context, p QueryParams) ([]UserRanking, error) {
 	startMs, endMs := p.LocalWindowMs()
-	rows, err := r.db.QueryContext(ctx, `
+	// 🔴 LimitAll drops the LIMIT clause entirely rather than substituting a
+	// large number. A "big enough" cap is still a cap: it is a guess about the
+	// customer's size that fails silently on the first customer who exceeds
+	// it, and the failure looks like departments that spent less rather than
+	// like a truncated list. The result set is bounded by the org's own
+	// seats-with-usage in the window, which is the honest size of the answer.
+	// bugfix: workflow/CI/bugfix/2026-08-27-ledger-by-department-top-n-truncation.md
+	query := `
 		SELECT account_id, seat_id, COALESCE(SUM(total_tokens),0), COALESCE(SUM(client_request_count),0),
 		       COALESCE(SUM(CASE WHEN currency='USD' THEN billable_amount ELSE 0 END),0),
 		       COALESCE(SUM(CASE WHEN billable_amount IS NULL THEN client_request_count ELSE 0 END),0)
 		FROM usage_reporting_fact
 		WHERE org_id = ?
-		  AND event_time >= ? AND event_time < ?`+scopeStatsAnd+`
+		  AND event_time >= ? AND event_time < ?` + p.RankingScope.SQLFilter() + `
 		GROUP BY account_id, seat_id
-		ORDER BY SUM(total_tokens) DESC
-		LIMIT ?`,
-		p.OrgID, r.db.BindMillis(startMs), r.db.BindMillis(endMs), p.Limit)
+		ORDER BY SUM(total_tokens) DESC`
+	args := []any{p.OrgID, r.db.BindMillis(startMs), r.db.BindMillis(endMs)}
+	if p.Limit != LimitAll {
+		query += `
+		LIMIT ?`
+		args = append(args, p.Limit)
+	}
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("master user ranking: %w", err)
 	}

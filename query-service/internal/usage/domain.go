@@ -422,6 +422,49 @@ type UserRanking struct {
 
 // QueryParams holds common query filters.
 // Personal queries accept either SeatID or AccountID (fallback for personal/BYOK keys).
+// LimitAll asks a ranking query for EVERY row instead of a top-N slice.
+//
+// Why a sentinel on the existing `limit` rather than a new endpoint or a
+// second parameter: one switch, one source of truth (a second flag would let
+// callers ask for "all, limit 20" — a state with no meaning). On the wire it
+// is spelled `?limit=all`, which says what it does in a URL and in a log line;
+// a bare `0` there is indistinguishable from "the caller forgot".
+const LimitAll = -1
+
+// RankingScope names WHICH EVENTS a per-seat ranking counts. There are two
+// populations in this table and they are not interchangeable:
+//
+//	RankingScopeStats       user_usage_scope = 'normal'
+//	  What the "top users by token usage" chart has always shown.
+//	RankingScopeOrgBilling  user_usage_scope <> 'non_generation'
+//	                        AND billing_scope IN ('org_only','org_and_user')
+//	  What MasterTimeline counts — i.e. the organisation's cost.
+//
+// 🔴 Why the caller must say which: the console's cost-by-department table is
+// asserted to add up to the organisation total, and the organisation total is
+// the TIMELINE's number. Fed the stats population it comes up short by exactly
+// the abnormal/org_only rows, no matter how many rows it fetches — on staging,
+// $10.7632 against $11.5059, a $0.7427 gap that reads as departments having
+// spent less. Truncation and population are two separate ways to lose the same
+// money; fixing one alone still leaves the row unbalanced.
+//
+// The default is Stats so the existing chart is untouched.
+// bugfix: workflow/CI/bugfix/2026-08-27-ledger-by-department-top-n-truncation.md
+type RankingScope string
+
+const (
+	RankingScopeStats      RankingScope = "stats"
+	RankingScopeOrgBilling RankingScope = "org_billing"
+)
+
+// SQLFilter returns the WHERE fragment this scope adds.
+func (s RankingScope) SQLFilter() string {
+	if s == RankingScopeOrgBilling {
+		return scopeOrgBillingAnd
+	}
+	return scopeStatsAnd
+}
+
 type QueryParams struct {
 	OrgID     string
 	SeatID    string
@@ -432,7 +475,19 @@ type QueryParams struct {
 	IncludeLastRoute bool
 	StartDate time.Time // inclusive; interpreted in the user's local TZ
 	EndDate   time.Time // inclusive; interpreted in the user's local TZ
-	Limit     int       // for ranking, default 50
+	// Limit caps a ranking. Default 50 when unset (Defaults()).
+	//
+	// 🔴 LimitAll means "every row, no LIMIT clause", and it exists because a
+	// TOP-N list and a CONSERVING TOTAL are different questions asked of the
+	// same query. The cost ledger's per-department table has to add up to the
+	// organisation total; fed a top-N list it cannot, for any N, and the
+	// shortfall looks exactly like "these departments spent less".
+	// Callers that want a chart keep passing a number.
+	// bugfix: workflow/CI/bugfix/2026-08-27-ledger-by-department-top-n-truncation.md
+	Limit     int
+	// RankingScope selects the population a per-seat ranking counts.
+	// Empty means RankingScopeStats — see the type's doc.
+	RankingScope RankingScope
 
 	// AppSlug, when non-empty, narrows the result to events tagged
 	// with this Connected App. Powers the Web Apps Detail page's
@@ -589,7 +644,9 @@ func (q *QueryParams) Defaults() {
 	if q.StartDate.IsZero() {
 		q.StartDate = q.EndDate.AddDate(0, 0, -30)
 	}
-	if q.Limit <= 0 {
+	// 🔴 LimitAll (negative) is a deliberate value, not "unset" — it must
+	// survive Defaults(), or asking for every row silently returns 50.
+	if q.Limit == 0 {
 		q.Limit = 50
 	}
 }

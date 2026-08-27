@@ -888,10 +888,28 @@ func parseMasterParams(r *http.Request) (usage.QueryParams, error) {
 	}
 	p := usage.QueryParams{OrgID: orgID, TZ: q.Get("tz")}
 	parseDates(&p, q.Get("start_date"), q.Get("end_date"))
+	// `limit=all` asks for every row. See usage.LimitAll: the cost ledger's
+	// per-department table must add up to the organisation total, and a top-N
+	// slice cannot do that for any N — the shortfall reads as "those
+	// departments spent less", which is a wrong number that looks right.
+	// Numeric values behave exactly as before; anything unparseable is
+	// ignored and the default applies.
 	if lim := q.Get("limit"); lim != "" {
-		if n, err := strconv.Atoi(lim); err == nil && n > 0 {
+		if strings.EqualFold(lim, "all") {
+			p.Limit = usage.LimitAll
+		} else if n, err := strconv.Atoi(lim); err == nil && n > 0 {
 			p.Limit = n
 		}
+	}
+	// `scope=org_billing` counts the organisation's cost population — the same
+	// events MasterTimeline counts. The console's cost-by-department table must
+	// use it, because it is asserted to add up to that total; anything else
+	// (including the default stats population) comes up short by the
+	// abnormal/org_only rows. Unrecognised values fall back to the default
+	// rather than erroring: an unknown scope must not be able to widen what a
+	// caller sees.
+	if sc := q.Get("scope"); strings.EqualFold(sc, string(usage.RankingScopeOrgBilling)) {
+		p.RankingScope = usage.RankingScopeOrgBilling
 	}
 	p.Defaults()
 	return p, nil
