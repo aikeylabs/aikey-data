@@ -28,7 +28,11 @@ All endpoints require `Authorization: Bearer <SERVICE_TOKEN>` (except `/health`)
 |-------|--------|---------|
 | `start_date` | `YYYY-MM-DD` | 30 days ago |
 | `end_date` | `YYYY-MM-DD` | today |
-| `limit` | integer | 50 (ranking only) |
+| `limit` | integer, or `all` | 50 (ranking only) |
+
+> `limit=all` returns **every** row instead of a top-N slice. It exists for callers that need a
+> total that adds up — the console's cost-by-department table must equal the organisation total,
+> and a top-N list cannot do that for any N. Charts keep passing a number.
 
 ### Filters
 
