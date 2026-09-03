@@ -18,6 +18,7 @@ require (
 )
 
 require (
+	github.com/AiKeyLabs/pkg/mcpwire v0.0.0
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -34,6 +35,8 @@ require (
 replace github.com/AiKeyLabs/pkg/buildinfo => ../../pkg/buildinfo
 
 replace github.com/AiKeyLabs/pkg/aikeytime => ../../pkg/aikeytime
+
+replace github.com/AiKeyLabs/pkg/mcpwire => ../../pkg/mcpwire
 
 replace github.com/AiKeyLabs/pkg/aikeycompat => ../../pkg/aikeycompat
 

@@ -3,6 +3,7 @@ package api
 import (
 	"archive/zip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/conversation"
+	"github.com/AiKeyLabs/pkg/mcpwire"
 	"github.com/AiKeyLabs/aikey-data/query-service/internal/shared"
 )
 
@@ -101,6 +103,7 @@ func (h *ConversationHandler) renderSessionMarkdown(ctx context.Context, w io.Wr
 		fmt.Fprintf(w, "## Turn %d — %s — %s — %s\n\n", n, ts, dash(t.Model), t.RequestStatus)
 		fmt.Fprintf(w, "**User**\n\n%s\n\n", t.UserText)
 		fmt.Fprintf(w, "**Assistant**\n\n%s\n\n", t.AssistantText)
+		writeToolCalls(w, t.ToolCalls)
 		return nil
 	})
 }
@@ -135,4 +138,73 @@ func emptyDash(s string) string {
 		return "all"
 	}
 	return s
+}
+
+// writeToolCalls renders one turn's tool calls into the Markdown export.
+//
+// 🔴 The export carries them because a page that shows tool calls and an export
+// that does not makes the export an INCOMPLETE piece of audit evidence — and
+// the export is the artefact that leaves the building, gets attached to a
+// ticket, and is read months later by someone who cannot open the console
+// (task 13.7d, fence 13.F5).
+//
+// 🔴 Three renderings, matching the three states the column can hold. The
+// middle one is the whole point: an older proxy's turn must NOT read as "no
+// tools were called", because nobody established that.
+func writeToolCalls(w io.Writer, raw json.RawMessage) {
+	if len(raw) == 0 {
+		fmt.Fprintf(w, "**Tool calls**\n\n_Not collected — the proxy that captured this turn "+
+			"predates tool-call capture. This is not a statement that no tools were called._\n\n")
+		return
+	}
+	var calls []mcpwire.TurnToolCall
+	if err := json.Unmarshal(raw, &calls); err != nil {
+		// 🔴 Unreadable is its own state, reported. Silently printing "none"
+		// would turn a parse failure into a finding of fact.
+		fmt.Fprintf(w, "**Tool calls**\n\n_Recorded but unreadable in this build._\n\n")
+		return
+	}
+	if len(calls) == 0 {
+		fmt.Fprintf(w, "**Tool calls**\n\n_None._\n\n")
+		return
+	}
+	fmt.Fprintf(w, "**Tool calls**\n\n")
+	for i, c := range calls {
+		fmt.Fprintf(w, "%d. `%s`", i+1, dash(c.ToolName))
+		if c.LinkState != "" {
+			fmt.Fprintf(w, " — %s", linkStateWord(c.LinkState))
+		}
+		fmt.Fprintf(w, "\n")
+		// 🔴 The argument SUMMARY, never the values. Same gate as the console:
+		// arguments are SQL, file contents and sometimes credentials, and the
+		// export is the copy that travels furthest.
+		for _, a := range c.ArgsDigest {
+			key := a.Key
+			if key == "" {
+				key = "(value)"
+			}
+			fmt.Fprintf(w, "   - `%s`: %s, length %d\n", key, a.Type, a.Len)
+		}
+	}
+	fmt.Fprintf(w, "\n")
+}
+
+// linkStateWord renders a link state for a human reading an exported file.
+//
+// 🔴 `pending` and `bypassed` get DIFFERENT sentences and must never be merged:
+// the first says "we expect to match this up shortly", the second says "this
+// call did not go through AiKey at all", which is a security finding.
+func linkStateWord(s mcpwire.LinkState) string {
+	switch s {
+	case mcpwire.LinkStateLinked:
+		return "executed through the gateway"
+	case mcpwire.LinkStatePending:
+		return "execution record not matched yet"
+	case mcpwire.LinkStateBypassed:
+		return "NOT ROUTED THROUGH AIKEY — this call bypassed the gateway"
+	case mcpwire.LinkStateUnsupported:
+		return "the capturing node does not collect execution results"
+	default:
+		return string(s)
+	}
 }
