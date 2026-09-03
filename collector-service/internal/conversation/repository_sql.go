@@ -1,6 +1,7 @@
 package conversation
 
 import (
+	"encoding/json"
 	"context"
 	"database/sql"
 	"fmt"
@@ -20,11 +21,16 @@ func NewSQLRepository(db *shared.DB) Repository { return &sqlRepo{db: db} }
 const convColumns = "event_id, conv_date, org_id, session_id, owner_account_id, seat_id, " +
 	"virtual_key_id, source_id, source_seq, model, provider_code, user_text, assistant_text, " +
 	"input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens, reasoning_tokens, " +
-	"total_tokens, cache_enabled, duration_ms, request_status, content_bytes, ingest_status, created_at"
+	"total_tokens, cache_enabled, duration_ms, request_status, content_bytes, ingest_status, created_at, " +
+	// tool_calls: the tools the model asked for in this turn (P13 leg A,
+	// v1.0.1-alpha.10 migration). 🔴 Nullable with no default — NULL means the
+	// capturing proxy predates the feature, '[]' means it looked and found none.
+	"tool_calls"
 
-// 25 placeholders = 25 columns above (cache_enabled: decision B; seat_id:
-// 2026-07-07 seat-dimension attribution, v1.0.1-alpha.4 migration).
-const convPlaceholders = "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+// 26 placeholders = 26 columns above (cache_enabled: decision B; seat_id:
+// 2026-07-07 seat-dimension attribution, v1.0.1-alpha.4 migration; tool_calls:
+// P13 leg A, v1.0.1-alpha.10 migration).
+const convPlaceholders = "?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
 
 // advanceWatermarkScanLimit bounds the per-call source_seq window (mirrors usage).
 const advanceWatermarkScanLimit = 10000
@@ -84,6 +90,11 @@ func insertRecordOn(ctx context.Context, d *shared.DB, ex shared.Execer, e *Conv
 		nullStr(e.UserText), nullStr(e.AssistantText),
 		e.InputTokens, e.OutputTokens, e.CachedInputTokens, e.CacheCreationInputTokens, e.ReasoningTokens,
 		e.TotalTokens, e.CacheEnabled, e.DurationMs, e.RequestStatus, e.ContentBytes, ingestStatus, d.BindMillis(e.CreatedAt),
+		// 🔴 nullRaw, not string(e.ToolCalls): an absent field must land as SQL
+		// NULL, because NULL is what tells the console "this node does not
+		// collect tool calls" as opposed to "it collected none". Writing '' or
+		// 'null' here would erase the distinction the column exists for.
+		nullRaw(e.ToolCalls),
 	)
 	if err != nil {
 		return false, true, &TransientStorageError{Err: fmt.Errorf("insert conversation record %s: %w", e.EventID, err)}
@@ -336,4 +347,19 @@ func nullStr(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+// nullRaw maps an absent JSON field to SQL NULL and a present one to its exact
+// bytes.
+//
+// 🔴 nil and `[]` are DIFFERENT rows, and the difference is the whole of task
+// 13.8: NULL says "the proxy that captured this turn does not collect tool
+// calls" and '[]' says "it does, and the model called nothing". Mapping nil to
+// '' or to 'null' would collapse them, and the console would then tell an
+// administrator that nothing happened when the truth is that nobody looked.
+func nullRaw(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	return string(raw)
 }

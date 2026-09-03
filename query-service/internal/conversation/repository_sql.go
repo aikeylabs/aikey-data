@@ -1,6 +1,7 @@
 package conversation
 
 import (
+	"encoding/json"
 	"context"
 	"database/sql"
 	"fmt"
@@ -139,6 +140,17 @@ func appendSeatFilter(where string, args []any, p QueryParams) (string, []any) {
 // owner_account_id, or the two views diverge again.
 const seatKeyExpr = "COALESCE(NULLIF(seat_id, ''), owner_account_id)"
 
+// seatKeyExprOn is seatKeyExpr qualified with a table alias.
+//
+// 🔴 Needed the moment a query joins a second table: usage_event_ods carries
+// both `seat_id` and `event_id`, so the unqualified form becomes an "ambiguous
+// column" error — on a page whose only other failure mode is showing nothing.
+// One definition, so the seat-key rule (seat, falling back to owner for legacy
+// rows) cannot diverge between the joined and unjoined queries.
+func seatKeyExprOn(alias string) string {
+	return "COALESCE(NULLIF(" + alias + ".seat_id, ''), " + alias + ".owner_account_id)"
+}
+
 // countGroups returns how many DISTINCT groups match a list filter — i.e. the
 // list's TOTAL page-able item count. Both list views GROUP BY an expression, so
 // the total is the number of GROUPS (seats / sessions), never COUNT(*) rows.
@@ -272,16 +284,33 @@ func (r *sqlRepo) ThreadDetail(ctx context.Context, p QueryParams) (*ThreadDetai
 
 	// Turns: read-time-derived order (created_at, event_id) — r2 #8 dropped turn_seq.
 	q := fmt.Sprintf(`
-		SELECT event_id, %s, COALESCE(model, ''), COALESCE(provider_code, ''),
-		       COALESCE(user_text, ''), COALESCE(assistant_text, ''),
-		       COALESCE(duration_ms, 0), request_status, COALESCE(total_tokens, 0),
-		       COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
-		       COALESCE(cached_input_tokens, 0), COALESCE(cache_creation_input_tokens, 0),
-		       COALESCE(reasoning_tokens, 0), COALESCE(cache_enabled, 0)
-		FROM conversation_records
-		WHERE org_id = ? AND `+seatKeyExpr+` = ? AND COALESCE(session_id, event_id) = ?
-		ORDER BY created_at, event_id
-		LIMIT ? OFFSET ?`, r.db.EpochMillis("created_at"))
+		SELECT c.event_id, %s, COALESCE(c.model, ''), COALESCE(c.provider_code, ''),
+		       COALESCE(c.user_text, ''), COALESCE(c.assistant_text, ''),
+		       COALESCE(c.duration_ms, 0), c.request_status, COALESCE(c.total_tokens, 0),
+		       COALESCE(c.input_tokens, 0), COALESCE(c.output_tokens, 0),
+		       COALESCE(c.cached_input_tokens, 0), COALESCE(c.cache_creation_input_tokens, 0),
+		       COALESCE(c.reasoning_tokens, 0), COALESCE(c.cache_enabled, 0),
+		       -- 🔴 Every column is alias-qualified now that a second table is in
+		       -- scope. event_id and seat_id exist on BOTH sides, and an
+		       -- unqualified reference is an ambiguous-column error at runtime
+		       -- on a page whose only other failure mode is showing nothing.
+		       -- 🔴 tool_calls is NOT wrapped in COALESCE. NULL must survive the
+		       -- read: it is what distinguishes "the capturing proxy does not
+		       -- collect tool calls" from "it collected none" (task 13.8), and
+		       -- COALESCE(...,'[]') would silently turn the first into the second.
+		       tool_calls,
+		       -- 🔴 LEFT JOIN, and the NULL it can produce is load-bearing: it
+		       -- means the usage channel has not delivered this turn yet, which
+		       -- the console renders as "attribution pending". An INNER JOIN
+		       -- would silently drop those turns from the audit entirely, and a
+		       -- COALESCE(...,'unknown-app') would state a settled fact about a
+		       -- lookup that has not happened (task 13.4a).
+		       u.app_slug
+		FROM conversation_records c
+		LEFT JOIN usage_event_ods u ON u.event_id = c.event_id AND u.org_id = c.org_id
+		WHERE c.org_id = ? AND `+seatKeyExprOn("c")+` = ? AND COALESCE(c.session_id, c.event_id) = ?
+		ORDER BY c.created_at, c.event_id
+		LIMIT ? OFFSET ?`, r.db.EpochMillis("c.created_at"))
 	rows, err := r.db.QueryContext(ctx, q,
 		p.OrgID, p.OwnerAccountID, p.SessionID, clampLimit(p.Limit, defaultTurnLimit), p.Offset)
 	if err != nil {
@@ -290,11 +319,25 @@ func (r *sqlRepo) ThreadDetail(ctx context.Context, p QueryParams) (*ThreadDetai
 	defer rows.Close()
 	for rows.Next() {
 		var t ThreadTurn
+		var toolCalls, appSlug sql.NullString
 		if err := rows.Scan(&t.EventID, &t.CreatedAt, &t.Model, &t.ProviderCode,
 			&t.UserText, &t.AssistantText, &t.DurationMs, &t.RequestStatus, &t.TotalTokens,
 			&t.InputTokens, &t.OutputTokens, &t.CachedInputTokens, &t.CacheCreationInputTokens,
-			&t.ReasoningTokens, &t.CacheEnabled); err != nil {
+			&t.ReasoningTokens, &t.CacheEnabled, &toolCalls, &appSlug); err != nil {
 			return nil, fmt.Errorf("scan thread turn: %w", err)
+		}
+		// 🔴 Valid-but-empty is NOT the same as NULL here either. A NULL means
+		// the usage channel has not delivered this turn ("attribution pending",
+		// resolves later); a present-but-empty slug is a settled "unknown-app".
+		if appSlug.Valid {
+			v := appSlug.String
+			t.AppSlug = &v
+		}
+		// 🔴 Valid-but-empty stays distinct from NULL: a NULL column leaves
+		// ToolCalls nil (the console renders "this node does not collect tool
+		// calls"), while '[]' arrives as those two bytes.
+		if toolCalls.Valid {
+			t.ToolCalls = json.RawMessage(toolCalls.String)
 		}
 		td.Turns = append(td.Turns, t)
 	}
@@ -360,7 +403,12 @@ func (r *sqlRepo) StreamSessionTurns(ctx context.Context, p QueryParams, fn func
 		       COALESCE(duration_ms, 0), request_status, COALESCE(total_tokens, 0),
 		       COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
 		       COALESCE(cached_input_tokens, 0), COALESCE(cache_creation_input_tokens, 0),
-		       COALESCE(reasoning_tokens, 0), COALESCE(cache_enabled, 0)
+		       COALESCE(reasoning_tokens, 0), COALESCE(cache_enabled, 0),
+		       -- 🔴 Same column as the drawer's query, and for the same reason:
+		       -- the EXPORT must carry the tool calls too. A page that shows
+		       -- them and an export that does not makes the export an
+		       -- incomplete piece of audit evidence (task 13.7d / fence 13.F5).
+		       tool_calls
 		FROM conversation_records
 		WHERE org_id = ? AND `+seatKeyExpr+` = ? AND COALESCE(session_id, event_id) = ?
 		ORDER BY created_at, event_id`, r.db.EpochMillis("created_at"))
@@ -371,11 +419,15 @@ func (r *sqlRepo) StreamSessionTurns(ctx context.Context, p QueryParams, fn func
 	defer rows.Close()
 	for rows.Next() {
 		var t ThreadTurn
+		var toolCalls sql.NullString
 		if err := rows.Scan(&t.EventID, &t.CreatedAt, &t.Model, &t.ProviderCode,
 			&t.UserText, &t.AssistantText, &t.DurationMs, &t.RequestStatus, &t.TotalTokens,
 			&t.InputTokens, &t.OutputTokens, &t.CachedInputTokens, &t.CacheCreationInputTokens,
-			&t.ReasoningTokens, &t.CacheEnabled); err != nil {
+			&t.ReasoningTokens, &t.CacheEnabled, &toolCalls); err != nil {
 			return fmt.Errorf("scan turn: %w", err)
+		}
+		if toolCalls.Valid {
+			t.ToolCalls = json.RawMessage(toolCalls.String)
 		}
 		if err := fn(&t); err != nil {
 			return err

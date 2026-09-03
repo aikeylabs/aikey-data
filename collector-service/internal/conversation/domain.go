@@ -13,7 +13,11 @@
 // standalone; repo + service + handler build on it.
 package conversation
 
-import "github.com/AiKeyLabs/pkg/aikeytime"
+import (
+	"encoding/json"
+
+	"github.com/AiKeyLabs/pkg/aikeytime"
+)
 
 // MaxBatchSize bounds one upload batch (mirrors ingest.maxBatchSize).
 const MaxBatchSize = 500
@@ -72,6 +76,26 @@ type ConversationRecord struct {
 	// 1=on / 0=off / NULL=unknown. A display switch distinct from the cache COUNTS
 	// above (which read 0 both when caching was off AND when requested-but-ineffective).
 	CacheEnabled *int64 `json:"cache_enabled,omitempty"`
+
+	// ToolCalls is the JSON array of tool calls the model requested in this turn
+	// (阶段8 P13 leg A). Stored VERBATIM.
+	//
+	// 🔴 json.RawMessage, not a decoded slice. Two reasons:
+	//
+	//  1. What an auditor is shown must be what the proxy captured. Decoding and
+	//     re-encoding would let this service normalise key order and number
+	//     formatting — the same fidelity argument that made the MCP schema store
+	//     JSON as TEXT rather than JSONB.
+	//  2. The shape is defined ONCE, in pkg/mcpwire.TurnToolCall. The collector
+	//     is a transport for it, not a second author, so it does not need the
+	//     type — and adding a cross-repo module dependency to carry bytes
+	//     through would be a delivery cost with no correctness gain.
+	//
+	// 🔴 NO omitempty, and nil ≠ empty: nil (field absent) means the proxy that
+	// captured this turn predates tool-call collection, and the console must say
+	// so; `[]` means a collecting proxy looked and the model called nothing.
+	// Rendering the first as the second is a false report (task 13.8).
+	ToolCalls json.RawMessage `json:"tool_calls"`
 
 	DurationMs    *int64 `json:"duration_ms,omitempty"`   // request→response latency
 	RequestStatus string `json:"request_status"`          // ok | partial | error

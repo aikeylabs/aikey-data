@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"archive/zip"
 	"bytes"
 	"context"
@@ -114,5 +115,96 @@ func TestExport_SeatZip(t *testing.T) {
 	}
 	if !names["s1.md"] || !names["s2.md"] {
 		t.Fatalf("zip entry names=%v want s1.md + s2.md", names)
+	}
+}
+
+// TestFence_13F5_TheExportCarriesTheToolCalls.
+//
+// 🔴 A page that shows tool calls and an export that does not makes the export
+// an INCOMPLETE piece of audit evidence — and the export is the artefact that
+// leaves the building, gets attached to a ticket, and is read months later by
+// somebody who cannot open the console (task 13.7d).
+//
+// It also asserts the argument SUMMARY reaches the file and the VALUE does not.
+// The export travels furthest, so a leak there is the most expensive one.
+func TestFence_13F5_TheExportCarriesTheToolCalls(t *testing.T) {
+	repo := &fakeConvRepo{
+		turns: map[string][]conversation.ThreadTurn{"s1": {{
+			EventID: "e1", CreatedAt: 1_700_000_000_000, RequestStatus: "ok",
+			UserText: "check the db", AssistantText: "looking",
+			ToolCalls: json.RawMessage(`[{"tool_call_id":"t1","tool_name":"query_readonly",` +
+				`"args_digest":[{"key":"sql","type":"string","len":41}],"link_state":"bypassed"}]`),
+		}}},
+	}
+	h := NewConversationHandler(repo)
+	req := httptest.NewRequest("GET", "/v1/conversation-audit/export?org_id=o1&owner_account_id=a1&session_id=s1", nil)
+	rec := httptest.NewRecorder()
+	h.Export(rec, req)
+	body := rec.Body.String()
+
+	for _, want := range []string{"**Tool calls**", "query_readonly", "sql", "string", "41"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("🔴 the export dropped %q. A page that shows tool calls and an export "+
+				"that does not is an incomplete audit record:\n%s", want, body)
+		}
+	}
+	// 🔴 `bypassed` must survive into the file, and it must not read like a
+	// routine state: it says the call never went through AiKey.
+	if !strings.Contains(body, "NOT ROUTED THROUGH AIKEY") {
+		t.Errorf("🔴 a bypassed call was exported without saying so. `pending` and `bypassed` "+
+			"are opposite facts and only the second is a security finding:\n%s", body)
+	}
+}
+
+// TestFence_13F5_AnUncollectedTurnSaysSoRatherThanClaimingNone.
+//
+// 🔴 Task 13.8 in the export. A turn captured by an older proxy carries NO
+// tool_calls field, and writing "None." for it would put a claim nobody
+// established into a file that gets treated as evidence.
+func TestFence_13F5_AnUncollectedTurnSaysSoRatherThanClaimingNone(t *testing.T) {
+	repo := &fakeConvRepo{
+		turns: map[string][]conversation.ThreadTurn{"s1": {{
+			EventID: "e1", CreatedAt: 1_700_000_000_000, RequestStatus: "ok",
+			UserText: "hi", AssistantText: "hello",
+			// ToolCalls deliberately absent — an older proxy.
+		}}},
+	}
+	h := NewConversationHandler(repo)
+	req := httptest.NewRequest("GET", "/v1/conversation-audit/export?org_id=o1&owner_account_id=a1&session_id=s1", nil)
+	rec := httptest.NewRecorder()
+	h.Export(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "Not collected") {
+		t.Fatalf("🔴 a turn from a non-collecting proxy was exported without saying so:\n%s", body)
+	}
+	if strings.Contains(body, "_None._") {
+		t.Fatalf("🔴 the export claimed 'None' for a turn nobody examined. That is a false "+
+			"report, not a missing feature:\n%s", body)
+	}
+}
+
+// TestAnEmptyToolCallListIsReportedAsNone is the other side: a COLLECTING proxy
+// that saw no calls must say "none", not "not collected" — otherwise every
+// ordinary turn would carry a warning nobody needs to act on.
+func TestAnEmptyToolCallListIsReportedAsNone(t *testing.T) {
+	repo := &fakeConvRepo{
+		turns: map[string][]conversation.ThreadTurn{"s1": {{
+			EventID: "e1", CreatedAt: 1_700_000_000_000, RequestStatus: "ok",
+			UserText: "hi", AssistantText: "hello", ToolCalls: json.RawMessage(`[]`),
+		}}},
+	}
+	h := NewConversationHandler(repo)
+	req := httptest.NewRequest("GET", "/v1/conversation-audit/export?org_id=o1&owner_account_id=a1&session_id=s1", nil)
+	rec := httptest.NewRecorder()
+	h.Export(rec, req)
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "_None._") {
+		t.Fatalf("a collecting proxy that saw no calls should report none:\n%s", body)
+	}
+	if strings.Contains(body, "Not collected") {
+		t.Fatalf("🔴 an empty list was reported as 'not collected'. Every ordinary turn would "+
+			"then carry a warning, and the warning would stop meaning anything:\n%s", body)
 	}
 }

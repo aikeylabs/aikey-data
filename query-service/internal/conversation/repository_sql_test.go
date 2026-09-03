@@ -351,3 +351,83 @@ func TestEffectiveListLimit(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// P13 leg A — the thread query joins usage for Agent attribution
+// ---------------------------------------------------------------------------
+
+// TestThreadDetailCarriesToolCallsAndAgentAttribution runs the REAL query
+// against the REAL migrated schema.
+//
+// 🔴 It exists because the thread query grew a JOIN, and a JOIN is the one kind
+// of change that compiles, passes every unit test built on fakes, and then
+// fails at runtime with "ambiguous column" — on a page whose only other failure
+// mode is showing nothing. `event_id` and `seat_id` exist on BOTH sides of this
+// join.
+//
+// It also pins the three distinctions the feature is made of, none of which a
+// count or a not-empty assertion would catch.
+func TestThreadDetailCarriesToolCallsAndAgentAttribution(t *testing.T) {
+	db := newConvTestDB(t)
+	ctx := context.Background()
+	repo := NewSQLRepository(db)
+
+	// e1: a collecting proxy, two tool calls, and a usage row → attributed.
+	insertTurn(t, db, "e1", "2026-09-02", testOrg, "s1", "seat-1", "own-1", 10, 1_700_000_000_000)
+	mustExec(t, db, `UPDATE conversation_records SET tool_calls = ? WHERE event_id = 'e1'`,
+		`[{"tool_call_id":"t1","tool_name":"query_readonly","link_state":"pending"},`+
+			`{"tool_call_id":"t2","tool_name":"create_issue","link_state":"bypassed"}]`)
+	mustExec(t, db, `INSERT INTO usage_event_ods
+		(ods_id, org_id, event_id, seat_id, app_slug, event_time, occurred_at, request_status, raw_event_json)
+		VALUES (1, ?, 'e1', 'seat-1', 'claude-code', ?, ?, 'ok', '{}')`,
+		testOrg, 1_700_000_000_000, 1_700_000_000_000)
+
+	// e2: a collecting proxy, nothing called, and NO usage row yet.
+	insertTurn(t, db, "e2", "2026-09-02", testOrg, "s1", "seat-1", "own-1", 10, 1_700_000_001_000)
+	mustExec(t, db, `UPDATE conversation_records SET tool_calls = '[]' WHERE event_id = 'e2'`)
+
+	// e3: an OLDER proxy — the column was never written.
+	insertTurn(t, db, "e3", "2026-09-02", testOrg, "s1", "seat-1", "own-1", 10, 1_700_000_002_000)
+
+	td, err := repo.ThreadDetail(ctx, QueryParams{
+		OrgID: testOrg, OwnerAccountID: "seat-1", SessionID: "s1", Limit: 50})
+	if err != nil {
+		t.Fatalf("🔴 the thread query failed. A JOIN that compiles and then errors at runtime "+
+			"is exactly what this test exists to catch: %v", err)
+	}
+	if len(td.Turns) != 3 {
+		t.Fatalf("want 3 turns, got %d", len(td.Turns))
+	}
+
+	// --- tool_calls: three states, three renderings ------------------------
+	if string(td.Turns[0].ToolCalls) == "" {
+		t.Error("turn 1 lost its tool calls")
+	}
+	if string(td.Turns[1].ToolCalls) != "[]" {
+		t.Errorf("turn 2 should carry an EMPTY list (a collecting proxy that saw nothing), "+
+			"got %q", string(td.Turns[1].ToolCalls))
+	}
+	if td.Turns[2].ToolCalls != nil {
+		t.Errorf("🔴 turn 3 was captured by a proxy that does not collect tool calls; the "+
+			"column is NULL and must stay nil so the console can say so rather than claiming "+
+			"'no tool calls'. Got %q", string(td.Turns[2].ToolCalls))
+	}
+
+	// --- app_slug: resolved vs pending -------------------------------------
+	if td.Turns[0].AppSlug == nil || *td.Turns[0].AppSlug != "claude-code" {
+		t.Errorf("turn 1 should be attributed to claude-code via the usage join, got %v",
+			td.Turns[0].AppSlug)
+	}
+	if td.Turns[1].AppSlug != nil {
+		t.Errorf("🔴 turn 2 has no usage row yet, so attribution is PENDING and must be nil — "+
+			"not an empty string and not 'unknown-app'. Those are settled facts and this one "+
+			"resolves by itself. Got %q", *td.Turns[1].AppSlug)
+	}
+}
+
+func mustExec(t *testing.T, db *shared.DB, q string, args ...any) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(), q, args...); err != nil {
+		t.Fatalf("exec %q: %v", q, err)
+	}
+}
