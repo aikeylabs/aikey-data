@@ -1578,8 +1578,14 @@ func (r *sqlRepo) MasterUpstreamLatency(ctx context.Context, p QueryParams) (Ups
 	latency := r.db.LatencyMillis("started_at", "finished_at")
 	const windowDays = 7
 
+	// 🔴 The ODS table is `usage_event_ods`. This query shipped reading
+	// `usage_fact_ods` (a table that never existed) and failed on every call for
+	// two months without anyone noticing — the handler test mocked the repo and
+	// nothing executed the SQL. master_upstream_latency_test.go now runs it on
+	// the real baseline DDL; a wrong table or column name is red there.
+	// bugfix: workflow/CI/bugfix/2026-09-22-query-service-upstream-latency-wrong-table.md
 	where := fmt.Sprintf(`
-		FROM usage_fact_ods
+		FROM usage_event_ods
 		WHERE org_id = ?
 		  AND event_time >= ? AND event_time < ?
 		  AND started_at IS NOT NULL AND finished_at IS NOT NULL

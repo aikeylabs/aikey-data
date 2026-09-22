@@ -67,6 +67,7 @@ func respondQueryError(w http.ResponseWriter, op string, err error) {
 			"event.name", "query.usage.timeout",
 			"error.code", "QUERY_TIMEOUT",
 			"op", op, "error", err.Error())
+		queryErrors.record(op, "QUERY_TIMEOUT", err.Error(), time.Now())
 		shared.Error(w, http.StatusGatewayTimeout, "QUERY_TIMEOUT",
 			"the usage query took too long — narrow the date range, or retry once the backlog clears")
 		return
@@ -75,6 +76,9 @@ func respondQueryError(w http.ResponseWriter, op string, err error) {
 		"event.name", "query.usage.failed",
 		"error.code", "QUERY_FAILED",
 		"op", op, "error", err.Error())
+	// Counted on /health as well — a log line alone kept a two-month 100% failure
+	// invisible (see query_errors.go).
+	queryErrors.record(op, "QUERY_FAILED", err.Error(), time.Now())
 	shared.Error(w, http.StatusInternalServerError, "QUERY_FAILED", "internal error")
 }
 

@@ -17,8 +17,11 @@ func NewRouter(h *UsageHandler, admin *AdminHandler, conv *ConversationHandler, 
 	mux := http.NewServeMux()
 
 	// Health check
+	// `status` is always "ok" while the process serves; installers gate on the
+	// 200. `query_errors` is the readable counterpart of the query.usage.failed /
+	// query.usage.timeout log lines (see query_errors.go for why it exists).
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		shared.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		shared.JSON(w, http.StatusOK, map[string]any{"status": "ok", "query_errors": queryErrors.snapshot()})
 	})
 
 	// Version — unauthenticated
