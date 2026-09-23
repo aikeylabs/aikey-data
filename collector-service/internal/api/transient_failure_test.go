@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -197,5 +198,58 @@ func TestConversationBatch_TransientInsertFailure_Returns503(t *testing.T) {
 	}
 	if !bytes.Contains(w.Body.Bytes(), []byte("INGEST_TRANSIENT_FAILURE")) {
 		t.Fatalf("body=%s want INGEST_TRANSIENT_FAILURE", w.Body.String())
+	}
+}
+
+// terminalDataODS poisons one event with a deterministic PostgreSQL data error
+// (what SQLSTATE 22001 "value too long" looks like once the repository has
+// classified it). It embeds the ODSRepository interface only, so the service
+// takes the per-event path and the override is exercised.
+type terminalDataODS struct {
+	ingest.ODSRepository
+	poison string
+}
+
+func (r *terminalDataODS) InsertEvent(ctx context.Context, e *ingest.UsageEvent, raw []byte, quarantined bool) (bool, bool, error) {
+	if e.EventID == r.poison {
+		return false, false, &shared.TerminalDataError{SQLState: "22001", Err: errors.New("pq: value too long for type character varying(1024)")}
+	}
+	return r.ODSRepository.InsertEvent(ctx, e, raw, quarantined)
+}
+
+// TestHandleBatch_DeterministicDataError_Is200Rejected is the fourth leg of the
+// classification above (bugfix 2026-09-23-collector-data-error-classified-transient):
+//
+//   - deterministic data error  → 200 + rejected (re-sending the identical event
+//     can never succeed; as a 503 it made worker-1 re-send the same batch every
+//     30 s for two weeks and starved its WAL prune).
+//
+// The healthy events of the batch must be accepted, the poisoned one rejected,
+// and the wire must NOT carry INGEST_TRANSIENT_FAILURE.
+func TestHandleBatch_DeterministicDataError_Is200Rejected(t *testing.T) {
+	db := newTransientTestDB(t)
+	svc := ingest.NewService(&terminalDataODS{ODSRepository: ingest.NewSQLODSRepository(db), poison: "td-poison"})
+	h := NewIngestHandler(svc)
+
+	w := postUsageBatch(t, h, []ingest.UsageEvent{
+		usageEvt("orgTD", "td-e1", 1),
+		usageEvt("orgTD", "td-poison", 2),
+		usageEvt("orgTD", "td-e2", 3),
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200 — a deterministic data error must be a per-event terminal rejection, not a batch-wide 503 the proxy retries forever (body=%s)", w.Code, w.Body.String())
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte("INGEST_TRANSIENT_FAILURE")) {
+		t.Fatalf("body must not carry the transient code: %s", w.Body.String())
+	}
+	var resp struct {
+		Accepted int `json:"accepted"`
+		Rejected int `json:"rejected"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (%s)", err, w.Body.String())
+	}
+	if resp.Accepted != 2 || resp.Rejected != 1 {
+		t.Fatalf("want accepted=2 rejected=1, got %+v (%s)", resp, w.Body.String())
 	}
 }

@@ -3,10 +3,13 @@ package shared
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/AiKeyLabs/pkg/aikeytime"
+	"github.com/lib/pq"
 )
 
 const (
@@ -270,4 +273,84 @@ func (d *DB) rewrite(query string) string {
 		}
 	}
 	return b.String()
+}
+
+// ClampChars truncates s to at most maxChars Unicode characters (not bytes), so a
+// value bound into a VARCHAR(n) column can never trip PostgreSQL's SQLSTATE 22001
+// "value too long". Only for client-supplied DIAGNOSTIC free text (today:
+// usage_event_ods.error_message); identifiers and metering fields are never
+// clamped — an over-long identifier is a data error and must surface as one.
+// maxChars <= 0 means "no clamp".
+// bugfix: workflow/CI/bugfix/2026-09-23-collector-data-error-classified-transient.md
+func ClampChars(s string, maxChars int) string {
+	if maxChars <= 0 || utf8.RuneCountInString(s) <= maxChars {
+		return s
+	}
+	n := 0
+	for i := range s {
+		if n == maxChars {
+			return s[:i]
+		}
+		n++
+	}
+	return s
+}
+
+// TerminalDataError marks a storage failure that is DETERMINISTIC for the same
+// input — PostgreSQL SQLSTATE class 22 (data exception: value too long, bad
+// encoding, numeric overflow) or 23 (integrity violation: NOT NULL, CHECK, FK).
+// Re-sending the identical event can never succeed, so the ingest lanes answer
+// it as a per-event terminal rejection inside a 200 instead of the whole-batch
+// 503 that TransientStorageError produces. This is the collector-side instance
+// of workflow/CI/designpattern/retryable-status-for-unservable.md: "I cannot
+// serve" keeps a retryable status, "your data is wrong" must not — before this
+// type every insert error was wrapped as transient and ONE 2049-character
+// error_message made a proxy re-send the same batch every 30 s for two weeks
+// (worker-1, 2026-09-09 → 09-23), which also starved its WAL prune.
+// bugfix: workflow/CI/bugfix/2026-09-23-collector-data-error-classified-transient.md
+type TerminalDataError struct {
+	SQLState string
+	Err      error
+}
+
+func (e *TerminalDataError) Error() string { return e.Err.Error() }
+func (e *TerminalDataError) Unwrap() error { return e.Err }
+
+// ClassifyStorageError reports whether err is a deterministic data error: a
+// lib/pq error whose SQLSTATE class is 22 or 23. Everything else — connection
+// loss (08), serialization (40), resource exhaustion (53), operator
+// intervention (57), driver.ErrBadConn, context timeouts, SQLite errors,
+// unknown drivers — stays transient. Unknown ⇒ transient is the conservative
+// default P0-4 chose: a retry that might succeed must never become a silent
+// loss. (Genuine duplicates never reach this function: inserts use
+// ON CONFLICT DO NOTHING / INSERT OR IGNORE, so 23505 here would be a real
+// constraint bug and is as deterministic as the rest of class 23.)
+// lib/pq v1.12.3 exposes the code as a string type without a Class() method,
+// hence the two-character prefix.
+func ClassifyStorageError(err error) (sqlstate string, deterministic bool) {
+	var pqErr *pq.Error
+	if err == nil || !errors.As(err, &pqErr) {
+		return "", false
+	}
+	code := string(pqErr.Code)
+	if len(code) < 2 {
+		return code, false
+	}
+	switch code[:2] {
+	case "22", "23":
+		return code, true
+	}
+	return code, false
+}
+
+// WrapStorageError is the one place an insert error becomes a wire
+// classification: deterministic → *TerminalDataError (per-event terminal);
+// otherwise the calling lane's own transient type via mkTransient (whole-batch
+// 503, proxy re-sends from its WAL). Both ingest lanes (usage, conversation)
+// call this so the split cannot drift between them.
+func WrapStorageError(err error, mkTransient func(error) error) error {
+	if code, deterministic := ClassifyStorageError(err); deterministic {
+		return &TerminalDataError{SQLState: code, Err: err}
+	}
+	return mkTransient(err)
 }

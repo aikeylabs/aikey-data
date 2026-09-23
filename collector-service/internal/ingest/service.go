@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
 	"github.com/AiKeyLabs/pkg/usagehash"
 )
 
@@ -254,6 +255,16 @@ func (s *Service) ingestOne(ctx context.Context, e *UsageEvent, ins eventInserte
 		var tse *TransientStorageError
 		if errors.As(err, &tse) {
 			return EventResult{EventID: e.EventID, Status: "rejected", Reason: "transient storage failure", transient: true}
+		}
+		// Deterministic data error (SQLSTATE 22/23): terminal per-event rejection
+		// inside a 200. Re-sending the identical event can never succeed, so the
+		// proxy must advance past it; its reconcile then ledgers the seq as
+		// confirmed lost after K delivered re-sends. Classified as transient this
+		// looped every 30 s for two weeks (worker-1, 2026-09-09 → 09-23).
+		// bugfix: workflow/CI/bugfix/2026-09-23-collector-data-error-classified-transient.md
+		var tde *shared.TerminalDataError
+		if errors.As(err, &tde) {
+			return EventResult{EventID: e.EventID, Status: "rejected", Reason: "invalid_data:" + tde.SQLState}
 		}
 		return EventResult{EventID: e.EventID, Status: "rejected", Reason: "internal error"}
 	}

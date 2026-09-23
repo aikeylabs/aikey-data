@@ -86,7 +86,12 @@ func insertRecordOn(ctx context.Context, d *shared.DB, ex shared.Execer, e *Conv
 		e.TotalTokens, e.CacheEnabled, e.DurationMs, e.RequestStatus, e.ContentBytes, ingestStatus, d.BindMillis(e.CreatedAt),
 	)
 	if err != nil {
-		return false, true, &TransientStorageError{Err: fmt.Errorf("insert conversation record %s: %w", e.EventID, err)}
+		// Same split as ingest (bugfix 2026-09-23-collector-data-error-classified-transient):
+		// a deterministic SQLSTATE 22/23 error is a per-record terminal rejection,
+		// anything else stays a whole-batch 503. infra stays true for the tx replay.
+		return false, true, shared.WrapStorageError(
+			fmt.Errorf("insert conversation record %s: %w", e.EventID, err),
+			func(wrapped error) error { return &TransientStorageError{Err: wrapped} })
 	}
 	if n, _ := res.RowsAffected(); n > 0 {
 		return true, false, nil

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/AiKeyLabs/aikey-data/collector-service/internal/shared"
 )
 
 // Service handles conversation record ingestion. Mirrors ingest.Service:
@@ -230,6 +232,13 @@ func rejectedResult(eventID string, err error) RecordResult {
 	var tse *TransientStorageError
 	if errors.As(err, &tse) {
 		return RecordResult{EventID: eventID, Status: "rejected", Reason: "transient storage failure", transient: true}
+	}
+	// Deterministic data error (SQLSTATE 22/23): terminal per-record rejection —
+	// re-sending cannot help, and as "transient" it would 503 the lane forever.
+	// bugfix: workflow/CI/bugfix/2026-09-23-collector-data-error-classified-transient.md
+	var tde *shared.TerminalDataError
+	if errors.As(err, &tde) {
+		return RecordResult{EventID: eventID, Status: "rejected", Reason: "invalid_data:" + tde.SQLState}
 	}
 	return RecordResult{EventID: eventID, Status: "rejected", Reason: "internal error"}
 }

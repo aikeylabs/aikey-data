@@ -130,6 +130,18 @@ func (b *odsBatchWriter) Failed() bool    { return b.failed }
 func (b *odsBatchWriter) Commit() error   { return b.tx.Commit() }
 func (b *odsBatchWriter) Rollback() error { return b.tx.Rollback() }
 
+// odsErrorMessageChars mirrors usage_event_ods.error_message VARCHAR(1024)
+// (migrations/001_usage_event_ods.sql, baseline/data_postgres.go). The DDL is the
+// source of truth; TestODSErrorMessageWidthMatchesDDL pins this constant to it.
+// Why clamp at ingest: error_message is client-supplied DIAGNOSTIC text. Older
+// proxies capped it at 2 KB, PostgreSQL rejected the row with SQLSTATE 22001,
+// and — wrapped as transient — that one row made a proxy re-send the same batch
+// every 30 s for two weeks (worker-1, 2026-09-09 → 09-23). Clamping the
+// diagnostic text keeps every billing field intact; identifiers are never
+// clamped (an over-long identifier is a data error and must surface as one).
+// bugfix: workflow/CI/bugfix/2026-09-23-collector-data-error-classified-transient.md
+const odsErrorMessageChars = 1024
+
 // insertEventOn is the single insert implementation, executing through either
 // the autocommit pool (*shared.DB) or a batch transaction (*shared.Tx). infra
 // reports an infrastructure-level SQL failure (statement exec / scan error) as
@@ -175,7 +187,7 @@ func insertEventOn(ctx context.Context, d *shared.DB, ex shared.Execer, e *Usage
 		nullStr(e.Model), e.RequestCount,
 		e.InputTokens, e.OutputTokens, e.CachedInputTokens, e.CacheCreationInputTokens, e.ReasoningTokens, e.TotalTokens,
 		nullStr(ptrStr(e.BillableAmount)), nullStr(e.Currency),
-		e.RequestStatus, e.HTTPStatusCode, nullStr(e.ErrorCode), nullStr(e.ErrorMessage), nullStr(e.UpstreamRequestID),
+		e.RequestStatus, e.HTTPStatusCode, nullStr(e.ErrorCode), nullStr(shared.ClampChars(e.ErrorMessage, odsErrorMessageChars)), nullStr(e.UpstreamRequestID),
 		jsonbOrNull(e.RawUsageJSON), jsonbOrNull(e.RawHeadersJSON), jsonbOrNull(e.ExtJSON), rawJSON,
 		nullStr(e.AppSlug),
 		nullStr(e.SessionID),
@@ -190,7 +202,16 @@ func insertEventOn(ctx context.Context, d *shared.DB, ex shared.Execer, e *Usage
 		nullStr(e.FallbackReason), e.FallbackAttempt,
 	)
 	if err != nil {
-		return false, false, true, &TransientStorageError{Err: fmt.Errorf("insert ods event %s: %w", e.EventID, err)}
+		// A DETERMINISTIC data error (SQLSTATE class 22/23) becomes a per-event
+		// terminal rejection instead of a batch-wide 503: re-sending the same
+		// event can never succeed, and as "transient" it made the proxy loop for
+		// two weeks (see odsErrorMessageChars). infra stays true either way —
+		// inside a PostgreSQL transaction the failed statement poisons the tx no
+		// matter why, so the batch writer must still roll back and replay per event.
+		// bugfix: workflow/CI/bugfix/2026-09-23-collector-data-error-classified-transient.md
+		return false, false, true, shared.WrapStorageError(
+			fmt.Errorf("insert ods event %s: %w", e.EventID, err),
+			func(wrapped error) error { return &TransientStorageError{Err: wrapped} })
 	}
 	n, _ := res.RowsAffected()
 	if n > 0 {
